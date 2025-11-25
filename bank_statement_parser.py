@@ -177,7 +177,32 @@ class BankStatementParser:
         
         # Skip header lines, total lines, and summary lines
         line_lower = line.lower()
-        if any(skip_word in line_lower for skip_word in ['date', 'description', 'amount', 'total', 'summary', 'balance']):
+        header_keywords = ['date', 'description', 'amount']
+        summary_keywords = [
+            'total deposits', 'total additions', 'total credits', 'total withdrawals',
+            'total debits', 'total checks', 'total atm', 'total fees', 'total charges',
+            'total payments', 'total amount', 'total for this period', 'total ending balance',
+            'ending balance', 'beginning balance', 'closing balance', 'average ledger balance',
+            'average available balance', 'interest paid', 'summary'
+        ]
+
+        if any(keyword in line_lower for keyword in summary_keywords):
+            return None
+
+        if line_lower.strip().startswith('total '):
+            tokens = line_lower.split()
+            if len(tokens) >= 2:
+                summary_tokens = {
+                    'deposit', 'deposits', 'withdrawal', 'withdrawals', 'debit', 'debits',
+                    'credit', 'credits', 'fees', 'charges', 'amount', 'payments', 'checks',
+                    'atm', 'ach', 'fees', 'service', 'interest', 'balance', 'ending', 'beginning'
+                }
+                second = tokens[1].strip(',:')
+                numeric = second.replace(',', '').replace('.', '').isdigit()
+                if numeric or second in summary_tokens:
+                    return None
+
+        if any(word in line_lower for word in header_keywords):
             if 'date' in line_lower and 'description' in line_lower:
                 return None  # Header row
         
