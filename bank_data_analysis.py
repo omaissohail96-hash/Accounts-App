@@ -43,6 +43,7 @@ class Transaction:
     date: str                      # date string (display)
     transaction_type: str          # 'deposit', 'withdrawal', or 'unknown'
     vendor: str
+    section: str = None
     category: str = None
     amount: float = 0.0
     description: str = ""
@@ -257,6 +258,7 @@ class BankStatementParser:
     # amount: allow commas and parentheses and spaces. We'll clean in _parse_amount.
     AMOUNT_PAT = re.compile(r'([+\-]?\s*\(?\s*[\d\.,\s]+\s*\)?)')
     SINGLE_LINE_DATE = re.compile(r'(\d{1,2}\s+[A-Za-z]{3}\,?\s+\d{4})')
+    SECTION_HEADER_PAT = re.compile(r'\b(CHECKS|CHECK|ATM|DEBIT\s*CARD|DEBIT|CREDIT\s*CARD|ELECTRONIC|FEES|FEE|CHARGES|CARD)\b', re.IGNORECASE)
 
     def __init__(self):
         pass
@@ -273,6 +275,10 @@ class BankStatementParser:
                 date_col = self._find_column(
                     df.columns,
                     ['date', 'transaction date', 'posted date', 'posted_at', 'posting date', 'value date']
+                )
+                status_col = self._find_column(
+                    df.columns,
+                    ['status', 'transaction status', 'posting status', 'clearing status', 'state']
                 )
                 amt_col = self._find_column(
                     df.columns,
@@ -325,8 +331,34 @@ class BankStatementParser:
                                 amt = abs(amt)
                         tx_type = 'deposit' if amt > 0 else 'withdrawal'
                         vendor = vendor_val or self._infer_vendor_from_description(desc)
+                        # detect section from description or direction column
+                        section = None
+                        # prefer explicit direction/type column if it contains section-like tokens
+                        try:
+                            if direction_col and not pd.isna(row[direction_col]):
+                                dv = str(row[direction_col])
+                                sh = self.SECTION_HEADER_PAT.search(dv)
+                                if sh:
+                                    section = sh.group(1).upper()
+                        except Exception:
+                            section = None
+
+                        # fallback: look for section tokens in description
+                        if not section and desc:
+                            sh2 = self.SECTION_HEADER_PAT.search(desc)
+                            if sh2:
+                                section = sh2.group(1).upper()
+
+                        # pending/clearing detection
+                        needs_review_flag = False
+                        if status_col and not pd.isna(row[status_col]):
+                            stval = str(row[status_col]).strip().lower()
+                            if 'pend' in stval or 'processing' in stval:
+                                needs_review_flag = True
+
                         transactions.append(Transaction(date=date, transaction_type=tx_type, vendor=vendor,
-                                                        amount=abs(amt), description=desc, needs_review=False, raw_line=str(row.to_dict())))
+                                                        section=section,
+                                                        amount=abs(amt), description=desc, needs_review=needs_review_flag, raw_line=str(row.to_dict())))
                     metadata['parsed_from'] = 'csv'
                     metadata['transactions_extracted'] = len(transactions)
                     return transactions, metadata
@@ -337,8 +369,16 @@ class BankStatementParser:
         i = 0
         n = len(lines)
         grouped = []
+        current_section = None
         while i < n:
             ln = lines[i].strip()
+            # detect section header lines (e.g., CHECKS, ATM, DEBIT CARD, FEES)
+            sh = self.SECTION_HEADER_PAT.search(ln)
+            if sh:
+                # set a current section which will be attached to following transactions
+                current_section = sh.group(1).upper()
+                i += 1
+                continue
             # Date line start
             date_match = self.DATE_LINE_PAT.match(ln)
             if date_match:
@@ -365,14 +405,14 @@ class BankStatementParser:
                     amount_line = lines[j].strip()
                     j += 1
 
-                grouped.append({'date': date_text, 'desc': " ".join(desc_parts).strip(), 'amount': amount_line or '', 'raw': lines[i:j]})
+                grouped.append({'date': date_text, 'desc': " ".join(desc_parts).strip(), 'amount': amount_line or '', 'raw': lines[i:j], 'section': current_section})
                 i = j
                 continue
 
             # single-line date + amount
             if self.SINGLE_LINE_DATE.search(ln) and self.AMOUNT_PAT.search(ln):
                 d = self.SINGLE_LINE_DATE.search(ln).group(1)
-                grouped.append({'date': d, 'desc': ln, 'amount': ln, 'raw': [ln]})
+                grouped.append({'date': d, 'desc': ln, 'amount': ln, 'raw': [ln], 'section': current_section})
                 i += 1
                 continue
 
@@ -382,7 +422,7 @@ class BankStatementParser:
                     grouped[-1]['amount'] = ln
                     grouped[-1]['raw'].append(ln)
                 else:
-                    grouped.append({'date': '', 'desc': '', 'amount': ln, 'raw': [ln]})
+                    grouped.append({'date': '', 'desc': '', 'amount': ln, 'raw': [ln], 'section': current_section})
                 i += 1
                 continue
 
@@ -394,9 +434,11 @@ class BankStatementParser:
             desc_raw = rec.get('desc', '').strip()
             amt_raw = rec.get('amount', '') or ''
             raw_join = " | ".join(rec.get('raw', []))
+            section = rec.get('section') if rec.get('section') else None
 
             if not amt_raw:
                 transactions.append(Transaction(date=date_raw or 'N/A', transaction_type='unknown', vendor='UNKNOWN',
+                                                section=section,
                                                 amount=0.0, description=desc_raw or raw_join, needs_review=True, raw_line=raw_join))
                 continue
 
@@ -414,6 +456,7 @@ class BankStatementParser:
 
             needs_review = (vendor in ('UNKNOWN', '') or amt == 0)
             transactions.append(Transaction(date=date_raw or 'N/A', transaction_type=tx_type, vendor=vendor or 'UNKNOWN',
+                                            section=section,
                                             amount=abs(amt), description=(desc_raw or amt_raw).strip(), needs_review=needs_review, raw_line=raw_join))
 
         # Fallback single-line scan if none found
@@ -427,6 +470,7 @@ class BankStatementParser:
                     tx_type = 'deposit' if amt > 0 else 'withdrawal'
                     vendor = self._infer_vendor_from_description(ln)
                     transactions.append(Transaction(date=date_raw, transaction_type=tx_type, vendor=vendor,
+                                                    section=None,
                                                     amount=abs(amt), description=ln, needs_review=False, raw_line=ln))
             metadata['parsed_from'] = 'single-line-fallback'
 
@@ -882,6 +926,14 @@ with c4:
         f"{statistics['Transactions Needing Review']} need review"
     )
 
+# Reconciliation sanity check (compares computed sums)
+sum_deposits = sum(t.amount for t in transactions if t.transaction_type == 'deposit')
+sum_withdrawals = sum(t.amount for t in transactions if t.transaction_type == 'withdrawal')
+if abs(sum_deposits - statistics.get('Total Deposit Amount', 0.0)) > 0.01 or abs(sum_withdrawals - statistics.get('Total Withdrawal Amount', 0.0)) > 0.01:
+    st.warning("⚠ Reconciliation mismatch: computed subtotals do not match internal summary. Please review parsed transactions.")
+else:
+    st.success("✅ Reconciliation OK: subtotals match parsed totals.")
+
 
 # ----------------------------
 # Tabs
@@ -908,6 +960,25 @@ with tab1:
         st.info("No deposits found.")
     else:
         st.dataframe(df, use_container_width=True, hide_index=True)
+
+        # Expanders: show item list per vendor/source
+        deps = [t for t in transactions if t.transaction_type == 'deposit']
+        by_vendor = {}
+        for t in deps:
+            key = t.vendor or 'UNKNOWN'
+            by_vendor.setdefault(key, []).append(t)
+
+        for vendor_name, items in sorted(by_vendor.items(), key=lambda x: (-len(x[1]), x[0])):
+            subtotal = sum(it.amount for it in items)
+            with st.expander(f"{vendor_name} — {len(items)} tx — {cur} {subtotal:,.2f}"):
+                vdf = pd.DataFrame([{
+                    'Date': it.date,
+                    'Amount': f"{cur} {it.amount:,.2f}",
+                    'Description': it.description,
+                    'Needs Review': '⚠ Yes' if it.needs_review else '✅ No',
+                    'Section': it.section or ''
+                } for it in items])
+                st.dataframe(vdf, use_container_width=True, hide_index=True)
 
 
 # ----------------------------
