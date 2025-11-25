@@ -487,80 +487,66 @@ class BankStatementParser:
         return None
 
     def _parse_amount(self, s: str) -> float:
-            """
-            SUPER-ROBUST AMOUNT PARSER
-            Fixes:
-            - 2 9 0 8 3 . 0 0
-            - + 29 . 083 .00
-            - ( 1 , 4 0 3 . 7 5 )
-            - 29 . 083 . 00
-            - 2,90 83 .00
-            - PKR 2,903.00 CR/DR
-            - Random spaces inside digits
-            """
+        if not s:
+            return 0.0
 
-            if not s:
-                return 0.0
+        s = str(s)
 
-            s = str(s)
-
-            # Strip non-breaking spaces
-            s = s.replace("\xa0", " ")
-
-            # Detect parentheses negative
-            negative = "(" in s and ")" in s
-
-            # Remove currency symbols
-            s = re.sub(r"[A-Za-z₹$€£¥]", " ", s)
-
-            # Remove CR/DR words
-            s = re.sub(r"\bCR\b|\bDR\b", "", s, flags=re.IGNORECASE)
-
-            # Remove all commas
-            s = s.replace(",", " ")
-
-            # FIX: join digits separated by spaces OR dots between digits
-            # e.g. 2 9 . 0 8 3 . 0 0  → 29083.00
-            s = re.sub(r'(?<=\d)[\s\.]+(?=\d)', '', s)
-
-            # Remove remaining spaces
-            s = s.replace(" ", "")
-
-            # Find number with optional decimal
-            match = re.search(r"([+-]?\d+(?:\.\d+)?)", s)
-            if not match:
-                return 0.0
-
-            num = match.group(1)
-
+        # extract ALL number-like tokens from the line
+        nums = re.findall(r'[\+\-]?\d[\d\s,]*\.\d+', s)
+        if nums:
+            # pick LAST amount-like token, Sadapay tables always have real amount last
+            amt = nums[-1]
+            amt = amt.replace(" ", "").replace(",", "")
             try:
-                val = float(num)
+                return float(amt)
             except:
-                val = 0.0
+                pass
 
-            # Apply negative parentheses
-            if negative:
-                val = -abs(val)
+        # fallback: old logic
+        s = re.sub(r'[A-Za-z]', '', s)
+        s = s.replace(" ", "")
+        s = re.sub(r'\.(?=\D)', '', s)
+        s = s.replace("..", ".")
+        s = s.replace(",", "")
+        m = re.search(r'([\-]?\d+(\.\d+)?)', s)
+        if not m:
+            return 0.0
+        return float(m.group(1))
 
-            return val    
+    
 
 
     def _infer_vendor_from_description(self, desc: str) -> str:
         if not desc:
-            return 'UNKNOWN'
-        d = desc
-        # remove likely GUIDs and long hex strings
-        d = re.sub(r'[0-9a-fA-F\-]{8,}', ' ', d)
-        # remove common transaction tokens
-        d = re.sub(r'\b(TRANSF|CR|DR|OGT|ICT|IB|W2W|PUR|POS|PAYMENT|DEBIT|CREDIT|ATM)\b', ' ', d, flags=re.IGNORECASE)
-        d = re.sub(r'[\|\-\:\,\/]+', ' ', d)
-        d = re.sub(r'\s{2,}', ' ', d).strip()
-        vendor = d[:80]
-        if re.fullmatch(r'[\d\W]+', vendor):
-            return 'UNKNOWN'
-        return vendor if vendor else 'UNKNOWN'
+            return "UNKNOWN"
 
+        text = desc.upper()
 
+        # Remove CR/DR, dates, IDs
+        text = re.sub(r'\b(\d{1,2}\s+[A-Z]{3}\,?\s+\d{4})\b', ' ', text)
+        text = re.sub(r'\b(CR|DR|TRANSF|W2W|IB|PUR|PAYMENT|POS|REF|SMS|FEE)\b', ' ', text)
+
+        # Split by common delimiters
+        tokens = re.split(r'[/:,;|\-]+', text)
+
+        # Take the largest meaningful token
+        candidates = [t.strip() for t in tokens if len(t.strip()) > 2]
+
+        # Vendor must contain letters
+        candidates = [c for c in candidates if re.search(r'[A-Z]', c)]
+
+        if not candidates:
+            return "UNKNOWN"
+
+        # Pick best vendor (usually first meaningful word)
+        vendor = candidates[0]
+
+        # Too numeric? then discard
+        if vendor.replace(" ", "").isdigit():
+            return "UNKNOWN"
+
+        return vendor.title()
 # ----------------------------
 # Transaction Categorizer
 # ----------------------------
