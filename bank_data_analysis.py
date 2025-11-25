@@ -22,14 +22,14 @@ try:
 except Exception:
     docx = None
 
-# If you later enable OCR, these imports can be used in DocumentParser
-# try:
-#     from pdf2image import convert_from_bytes
-#     import pytesseract
-#     from PIL import Image
-#     OCR_AVAILABLE = True
-# except Exception:
-#     OCR_AVAILABLE = False
+try:
+    from pdf2image import convert_from_bytes
+    import pytesseract
+    OCR_AVAILABLE = True
+except Exception:
+    convert_from_bytes = None
+    pytesseract = None
+    OCR_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -56,13 +56,67 @@ class Transaction:
 class DocumentParser:
     """
     Extracts text lines from PDF / DOCX / CSV bytes.
-    If OCR is required, add pdf2image + pytesseract usage in parse_document fallback.
+    OCR fallback (pytesseract + pdf2image) is available when dependencies are installed.
     """
 
-    def __init__(self, use_ocr_if_needed: bool = False):
-        # set True to enable OCR fallback (requires pdf2image & pytesseract + system deps)
-        self.use_ocr_if_needed = use_ocr_if_needed
+    def __init__(self, use_ocr_if_needed: bool = True):
+        # enable OCR fallback (requires pdf2image, pytesseract, Pillow, and Tesseract binary)
+        self.ocr_enabled = bool(use_ocr_if_needed and OCR_AVAILABLE)
+        if use_ocr_if_needed and not OCR_AVAILABLE:
+            logger.warning(
+                "OCR requested but pdf2image/pytesseract/Pillow are not installed. "
+                "Install the optional dependencies plus the Tesseract binary to enable scanned PDF support."
+            )
 
+    def _clean_lines(self, text: str) -> List[str]:
+        if not text:
+            return []
+        return [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    def _ocr_page(self, file_bytes: bytes, page_number: int) -> str:
+        """Run OCR on a single PDF page."""
+        if not self.ocr_enabled or not convert_from_bytes:
+            return ""
+        try:
+            images = convert_from_bytes(
+                file_bytes,
+                first_page=page_number,
+                last_page=page_number,
+                dpi=300,
+                fmt="png"
+            )
+            if not images:
+                return ""
+            text = pytesseract.image_to_string(images[0])
+            return text or ""
+        except Exception:
+            logger.exception("OCR extraction failed for page %s", page_number)
+            return ""
+
+    def _ocr_entire_pdf(self, file_bytes: bytes) -> Tuple[List[str], List[int]]:
+        """OCR entire PDF when no text could be extracted."""
+        if not self.ocr_enabled or not convert_from_bytes:
+            return [], []
+        try:
+            images = convert_from_bytes(file_bytes, dpi=300, fmt="png")
+        except Exception:
+            logger.exception("Unable to convert PDF to images for OCR fallback")
+            return [], []
+
+        lines: List[str] = []
+        unreadable: List[int] = []
+        for idx, image in enumerate(images, start=1):
+            try:
+                text = pytesseract.image_to_string(image)
+                cleaned = self._clean_lines(text)
+                if cleaned:
+                    lines.extend(cleaned)
+                else:
+                    unreadable.append(idx)
+            except Exception:
+                logger.exception("OCR failed on page %s during full-document fallback", idx)
+                unreadable.append(idx)
+        return lines, unreadable
     def parse_document(self, file_bytes: bytes, filename: str) -> Tuple[List[str], bool, List[int]]:
         ext = filename.lower().split('.')[-1]
         pages_text = []
@@ -76,15 +130,33 @@ class DocumentParser:
                     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
                         for i, page in enumerate(pdf.pages):
                             try:
-                                page_text = page.extract_text() or ""
-                                page_text = page_text.replace("\xa0", " ")
-                                pages_text.append(page_text)
-                                if not page_text.strip():
-                                    unreadable_pages.append(i + 1)
+                                page_text = (page.extract_text() or "").replace("\xa0", " ")
+                                if page_text.strip():
+                                    pages_text.append(page_text)
+                                else:
+                                    if self.ocr_enabled:
+                                        ocr_text = self._ocr_page(file_bytes, i + 1)
+                                        if ocr_text.strip():
+                                            pages_text.append(ocr_text)
+                                            logger.info("Recovered text on page %s via OCR", i + 1)
+                                        else:
+                                            unreadable_pages.append(i + 1)
+                                            pages_text.append("")
+                                    else:
+                                        unreadable_pages.append(i + 1)
+                                        pages_text.append("")
                             except:
                                 unreadable_pages.append(i + 1)
                                 pages_text.append("")
                     full_text = "\n".join(pages_text)
+
+                    if self.ocr_enabled and not full_text.strip():
+                        logger.info("PDF contained no extractable text; running full-document OCR fallback.")
+                        ocr_lines, ocr_unreadable = self._ocr_entire_pdf(file_bytes)
+                        if ocr_lines:
+                            return ocr_lines, len(ocr_unreadable) == 0, ocr_unreadable
+                        else:
+                            unreadable_pages = ocr_unreadable or unreadable_pages
 
                 except Exception:
                     logger.exception("PDF parsing via pdfplumber failed")
@@ -134,6 +206,13 @@ class DocumentParser:
             logger.exception("Unexpected error in parse_document")
             full_text = ""
             is_readable = False
+
+        if ext == "pdf" and self.ocr_enabled and not full_text.strip():
+            ocr_lines, ocr_unreadable = self._ocr_entire_pdf(file_bytes)
+            if ocr_lines:
+                return ocr_lines, len(ocr_unreadable) == 0, ocr_unreadable
+            else:
+                unreadable_pages = ocr_unreadable or unreadable_pages
 
         lines = []
         if full_text and len(full_text.strip()) > 5:
@@ -191,17 +270,61 @@ class BankStatementParser:
             try:
                 raw = "\n".join(lines)
                 df = pd.read_csv(io.StringIO(raw))
-                date_col = self._find_column(df.columns, ['date', 'transaction date', 'posted date'])
-                amt_col = self._find_column(df.columns, ['amount', 'value', 'debit', 'credit'])
-                desc_col = self._find_column(df.columns, ['description', 'details', 'narration', 'particulars'])
-                if date_col and amt_col:
+                date_col = self._find_column(
+                    df.columns,
+                    ['date', 'transaction date', 'posted date', 'posted_at', 'posting date', 'value date']
+                )
+                amt_col = self._find_column(
+                    df.columns,
+                    ['amount', 'value', 'debit', 'credit', 'amount in', 'amount out']
+                )
+                desc_col = self._find_column(
+                    df.columns,
+                    ['description', 'description_raw', 'details', 'narration', 'particulars', 'memo']
+                )
+                direction_col = self._find_column(
+                    df.columns,
+                    ['direction', 'transaction type', 'type', 'credit/debit', 'debit/credit', 'dr/cr']
+                )
+                credit_col = self._find_column(
+                    df.columns,
+                    ['credit', 'deposit', 'amount in', 'money in']
+                )
+                debit_col = self._find_column(
+                    df.columns,
+                    ['debit', 'withdrawal', 'amount out', 'money out', 'payment']
+                )
+                vendor_col = self._find_column(
+                    df.columns,
+                    ['vendor', 'merchant', 'merchant name', 'merchant_name', 'payee', 'counterparty']
+                )
+                if date_col and (amt_col or credit_col or debit_col):
                     for _, row in df.iterrows():
                         date = str(row[date_col]) if not pd.isna(row[date_col]) else ''
                         desc = str(row[desc_col]) if desc_col and not pd.isna(row[desc_col]) else ''
-                        raw_amt = row[amt_col]
-                        amt = self._parse_amount(str(raw_amt))
+
+                        if vendor_col and not desc:
+                            vendor_val = str(row[vendor_col]) if not pd.isna(row[vendor_col]) else ''
+                            desc = vendor_val or desc
+                        else:
+                            vendor_val = str(row[vendor_col]) if vendor_col and not pd.isna(row[vendor_col]) else ''
+
+                        if amt_col:
+                            raw_amt = row[amt_col]
+                            amt = self._parse_amount(str(raw_amt))
+                        else:
+                            credit_amt = self._parse_amount(row[credit_col]) if credit_col and not pd.isna(row[credit_col]) else 0.0
+                            debit_amt = self._parse_amount(row[debit_col]) if debit_col and not pd.isna(row[debit_col]) else 0.0
+                            amt = credit_amt - abs(debit_amt)
+
+                        if direction_col and not pd.isna(row[direction_col]):
+                            direction_value = str(row[direction_col]).strip().lower()
+                            if direction_value in {'out', 'debit', 'withdrawal', 'payment', 'charge', 'fee', 'purchase'}:
+                                amt = -abs(amt)
+                            elif direction_value in {'in', 'credit', 'deposit', 'add', 'received'}:
+                                amt = abs(amt)
                         tx_type = 'deposit' if amt > 0 else 'withdrawal'
-                        vendor = self._infer_vendor_from_description(desc)
+                        vendor = vendor_val or self._infer_vendor_from_description(desc)
                         transactions.append(Transaction(date=date, transaction_type=tx_type, vendor=vendor,
                                                         amount=abs(amt), description=desc, needs_review=False, raw_line=str(row.to_dict())))
                     metadata['parsed_from'] = 'csv'
@@ -656,7 +779,7 @@ if uploaded_file:
                     file_bytes = uploaded_file.read()
 
                     # Step 1 — Document Parsing
-                    doc_parser = DocumentParser()
+                    doc_parser = DocumentParser(use_ocr_if_needed=True)
                     lines, is_readable, unreadable_pages = doc_parser.parse_document(
                         file_bytes, uploaded_file.name
                     )
