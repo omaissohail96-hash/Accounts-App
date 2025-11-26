@@ -280,10 +280,22 @@ class BankStatementParser:
                     df.columns,
                     ['status', 'transaction status', 'posting status', 'clearing status', 'state']
                 )
+                # Prefer transactional amount columns FIRST, avoid balance column
                 amt_col = self._find_column(
                     df.columns,
-                    ['amount', 'value', 'debit', 'credit', 'amount in', 'amount out']
+                    [
+                        'withdrawal', 'withdrawals', 'debit', 'dr', 'amount out', 'payment', 'money out',
+                        'deposit', 'deposits', 'credit', 'cr', 'amount in', 'money in',
+                        'amount', 'value',
+                        # ignore balance specifically
+                    ]
                 )
+                # Force ignore balance column entirely
+                bal_candidates = ['balance', 'available balance', 'running balance']
+                for col in df.columns:
+                    if any(bal in col.lower() for bal in bal_candidates):
+                        df.drop(columns=[col], inplace=True, errors='ignore')
+
                 desc_col = self._find_column(
                     df.columns,
                     ['description', 'description_raw', 'details', 'narration', 'particulars', 'memo']
@@ -329,7 +341,28 @@ class BankStatementParser:
                                 amt = -abs(amt)
                             elif direction_value in {'in', 'credit', 'deposit', 'add', 'received'}:
                                 amt = abs(amt)
-                        tx_type = 'deposit' if amt > 0 else 'withdrawal'
+                        text_blob = f"{desc_raw} {amt_raw} {raw_join}".upper()
+
+                        withdraw_keywords = [
+                            "DEBIT", "POS", "CARD PURCHASE", "PURCHASE", "WITHDRAW",
+                            "CASH OUT", "BILL", "UTILITY", "BOOKING", "FEE", "CHARGE"
+                        ]
+
+                        deposit_keywords = [
+                            "CREDIT", "DEPOSIT", "ADD MONEY", "SALARY", "RECEIVED",
+                            "TRANSFER IN", "TOPUP"
+                        ]
+
+                        tx_type = None
+
+                        if any(k in text_blob for k in withdraw_keywords):
+                            tx_type = "withdrawal"
+
+                        elif any(k in text_blob for k in deposit_keywords):
+                            tx_type = "deposit"
+
+                        else:
+                            tx_type = "deposit" if amt > 0 else "withdrawal"
                         vendor = vendor_val or self._infer_vendor_from_description(desc)
                         # detect section from description or direction column
                         section = None
@@ -356,9 +389,17 @@ class BankStatementParser:
                             if 'pend' in stval or 'processing' in stval:
                                 needs_review_flag = True
 
-                        transactions.append(Transaction(date=date, transaction_type=tx_type, vendor=vendor,
-                                                        section=section,
-                                                        amount=abs(amt), description=desc, needs_review=needs_review_flag, raw_line=str(row.to_dict())))
+                        amt_display = abs(amt) if tx_type == 'deposit' else -abs(amt)
+                        transactions.append(Transaction(
+                                date=date,
+                                transaction_type=tx_type,
+                                vendor=vendor,
+                                section=section,
+                                amount=amt_display,
+                                description=desc,
+                                needs_review=needs_review_flag,
+                                raw_line=str(row.to_dict())
+                            ))
                     metadata['parsed_from'] = 'csv'
                     metadata['transactions_extracted'] = len(transactions)
                     return transactions, metadata
@@ -455,10 +496,17 @@ class BankStatementParser:
                 vendor = self._infer_vendor_from_description(amt_raw)
 
             needs_review = (vendor in ('UNKNOWN', '') or amt == 0)
-            transactions.append(Transaction(date=date_raw or 'N/A', transaction_type=tx_type, vendor=vendor or 'UNKNOWN',
-                                            section=section,
-                                            amount=abs(amt), description=(desc_raw or amt_raw).strip(), needs_review=needs_review, raw_line=raw_join))
-
+            amt_display = abs(amt) if tx_type == 'deposit' else -abs(amt)
+            transactions.append(Transaction(
+                date=date_raw or 'N/A',
+                transaction_type=tx_type,
+                vendor=vendor or 'UNKNOWN',
+                section=section,
+                amount=amt_display,
+                description=(desc_raw or amt_raw).strip(),
+                needs_review=needs_review,
+                raw_line=raw_join
+            ))
         # Fallback single-line scan if none found
         if not transactions:
             for ln in lines:
@@ -490,32 +538,43 @@ class BankStatementParser:
         if not s:
             return 0.0
 
-        s = str(s)
+        s = str(s).strip()
 
-        # extract ALL number-like tokens from the line
-        nums = re.findall(r'[\+\-]?\d[\d\s,]*\.\d+', s)
+        # Extract numeric tokens (decimal)
+        nums = re.findall(r'[\+\-]?\d[\d,]*\.\d+', s)
+
         if nums:
-            # pick LAST amount-like token, Sadapay tables always have real amount last
-            amt = nums[-1]
-            amt = amt.replace(" ", "").replace(",", "")
+            # Filter numbers: ignore long numbers that are likely balances (e.g., > 6 digits before decimal)
+            filtered = []
+            for n in nums:
+                nn = n.replace(",", "")
+                try:
+                    before_decimal = nn.split(".")[0].replace("-", "")
+                    if len(before_decimal) <= 6:  # balance numbers ignored
+                        filtered.append(nn)
+                except:
+                    continue
+
+            if not filtered:
+                filtered = [n.replace(",", "") for n in nums]
+
+            # Prefer the FIRST amount-like numeric token (closest to original description)
             try:
-                return float(amt)
+                return float(filtered[0])
             except:
                 pass
 
-        # fallback: old logic
-        s = re.sub(r'[A-Za-z]', '', s)
-        s = s.replace(" ", "")
-        s = re.sub(r'\.(?=\D)', '', s)
-        s = s.replace("..", ".")
-        s = s.replace(",", "")
-        m = re.search(r'([\-]?\d+(\.\d+)?)', s)
-        if not m:
-            return 0.0
-        return float(m.group(1))
+        # Fallback: pick any valid number
+        s2 = re.sub(r'[A-Za-z]', '', s)
+        s2 = s2.replace(" ", "").replace(",", "")
+        m = re.search(r'([\-]?\d+(\.\d+)?)', s2)
+        if m:
+            try:
+                return float(m.group(1))
+            except:
+                return 0.0
 
-    
-
+        return 0.0
 
     def _infer_vendor_from_description(self, desc: str) -> str:
         if not desc:
@@ -631,12 +690,21 @@ class ReportGenerator:
         pass
 
     def generate_summary_statistics(self, transactions: List[Transaction]) -> Dict[str, Any]:
-        total_deposits = sum(t.amount for t in transactions if t.transaction_type == 'deposit')
-        total_withdrawals = sum(t.amount for t in transactions if t.transaction_type == 'withdrawal')
-        total_deposit_count = sum(1 for t in transactions if t.transaction_type == 'deposit')
-        total_withdrawal_count = sum(1 for t in transactions if t.transaction_type == 'withdrawal')
+    # Deposits: ANY transaction with positive amount
+        total_deposits = sum(t.amount for t in transactions if t.amount > 0)
+
+        # Withdrawals: ANY transaction with negative amount (absolute for display)
+        total_withdrawals = abs(sum(t.amount for t in transactions if t.amount < 0))
+
+        # Ensure counts track correctly
+        total_deposit_count = sum(1 for t in transactions if t.amount > 0)
+        total_withdrawal_count = sum(1 for t in transactions if t.amount < 0)
+
         needs_review = sum(1 for t in transactions if t.needs_review)
+
+        # Real net = deposits - withdrawals
         net_income = total_deposits - total_withdrawals
+
         stats = {
             'Total Deposit Amount': total_deposits,
             'Total Withdrawal Amount': total_withdrawals,
@@ -648,11 +716,16 @@ class ReportGenerator:
         }
         return stats
 
+
     def generate_deposits_summary(self, transactions: List[Transaction]) -> pd.DataFrame:
-        deps = [t for t in transactions if t.transaction_type == 'deposit']
+    # consider transactions explicitly labeled as 'deposit' OR with positive amounts
+        deps = [t for t in transactions if t.transaction_type == 'deposit' or t.amount > 0]
         if not deps:
             return pd.DataFrame()
         df = pd.DataFrame([asdict(t) for t in deps])
+        # ensure amount numeric
+        df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0.0)
+        # group only deposits (amounts are positive display values)
         grp = df.groupby('vendor').agg({'amount': 'sum', 'raw_line': 'count'}).reset_index()
         grp.columns = ['Source/Vendor', 'Subtotal ($)', 'Transaction Count']
         grp['Subtotal ($)'] = grp['Subtotal ($)'].astype(float)
@@ -661,11 +734,19 @@ class ReportGenerator:
         out = pd.concat([grp, total_row], ignore_index=True)
         return out[['Source/Vendor', 'Transaction Count', 'Subtotal ($)']]
 
+
     def generate_withdrawals_summary(self, transactions: List[Transaction]) -> pd.DataFrame:
+    # consider transactions explicitly labeled as 'withdrawal' OR with negative original sign
+        wds = [t for t in transactions if t.transaction_type == 'withdrawal' or (hasattr(t, 'amount') and t.amount < 0)]
+        # If your transactions store amount as positive numbers always, fall back to transaction_type only:
         wds = [t for t in transactions if t.transaction_type == 'withdrawal']
         if not wds:
             return pd.DataFrame()
         df = pd.DataFrame([asdict(t) for t in wds])
+        df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0.0)
+        # make amounts positive for subtotals display (expenses)
+        df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0.0)
+        df['amount'] = -df['amount']   # always show withdrawals as negative
         df['category'] = df['category'].fillna('Uncategorized')
         grp = df.groupby(['category', 'vendor']).agg({'amount': 'sum', 'raw_line': 'count'}).reset_index()
         grp.columns = ['Category', 'Vendor', 'Subtotal ($)', 'Transaction Count']
@@ -673,6 +754,7 @@ class ReportGenerator:
         total_row = pd.DataFrame([{'Category': 'TOTAL WITHDRAWALS', 'Vendor': '', 'Subtotal ($)': total, 'Transaction Count': grp['Transaction Count'].sum()}])
         out = pd.concat([grp, total_row], ignore_index=True)
         return out[['Category', 'Vendor', 'Transaction Count', 'Subtotal ($)']]
+
 
     def generate_pl_report(self, transactions: List[Transaction]) -> pd.DataFrame:
         stats = self.generate_summary_statistics(transactions)
