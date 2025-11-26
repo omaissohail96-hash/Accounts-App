@@ -1061,6 +1061,25 @@ with tab2:
     else:
         st.dataframe(df, use_container_width=True, hide_index=True)
 
+        # Expanders: show item list per vendor/category
+        wds = [t for t in transactions if t.transaction_type == 'withdrawal']
+        by_vendor = {}
+        for t in wds:
+            key = f"{t.category or 'Uncategorized'} — {t.vendor or 'UNKNOWN'}"
+            by_vendor.setdefault(key, []).append(t)
+
+        for vendor_name, items in sorted(by_vendor.items(), key=lambda x: (-len(x[1]), x[0])):
+            subtotal = sum(it.amount for it in items)
+            with st.expander(f"{vendor_name} — {len(items)} tx — {cur} {subtotal:,.2f}"):
+                vdf = pd.DataFrame([{
+                    'Date': it.date,
+                    'Amount': f"{cur} {it.amount:,.2f}",
+                    'Description': it.description,
+                    'Needs Review': '⚠ Yes' if it.needs_review else '✅ No',
+                    'Section': it.section or ''
+                } for it in items])
+                st.dataframe(vdf, use_container_width=True, hide_index=True)
+
 
 # ----------------------------
 # TAB 3 – P&L
