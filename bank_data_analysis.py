@@ -2,6 +2,7 @@
 # PART 1: Core Engine + LLM Enhancer
 # ----------------------------
 import io
+import os
 import re
 import json
 import tempfile
@@ -9,10 +10,9 @@ import logging
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from typing import List, Tuple, Dict, Any, Optional
-
+from dotenv import load_dotenv
 import pdfplumber
 import pandas as pd
-
 import openai
 import streamlit as st  # used for secrets access in Part 2 too
 
@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 # Set OpenAI API key from Streamlit secrets if available (Part2 will set it before processing)
-if "OPENAI_API_KEY" in st.secrets:
-    openai.api_key = st.secrets["OPENAI_API_KEY"]
+load_dotenv()
+api_key = os.getenv('OPENAI_API_KEY')
 
 
 # ----------------------------
