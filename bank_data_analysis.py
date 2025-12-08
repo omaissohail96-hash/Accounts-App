@@ -1,6 +1,7 @@
-# ----------------------------
-# PART 1: Core Engine + LLM Enhancer
-# ----------------------------
+# bank_data_analysis.py
+# Single-file hybrid Bank Statement Analyzer (deterministic + optional LLM)
+# Save as bank_data_analysis.py and run: streamlit run bank_data_analysis.py
+
 import io
 import os
 import re
@@ -8,343 +9,439 @@ import json
 import tempfile
 import logging
 from dataclasses import dataclass, asdict
-from datetime import datetime
 from typing import List, Tuple, Dict, Any, Optional
-from dotenv import load_dotenv
+from datetime import datetime
 import pdfplumber
 import pandas as pd
-import openai
-import streamlit as st  # used for secrets access in Part 2 too
+import streamlit as st
 
-logger = logging.getLogger(__name__)
+# Optional OpenAI usage (LLM enhancement). If you don't want LLM, leave secrets empty.
+try:
+    import openai
+except Exception:
+    openai = None
+
+logger = logging.getLogger("bank_analyzer")
 logging.basicConfig(level=logging.INFO)
 
-# Set OpenAI API key from Streamlit secrets if available (Part2 will set it before processing)
-load_dotenv()
-api_key = os.getenv('OPENAI_API_KEY')
-
-
 # ----------------------------
-# Data Model
+# Data model
 # ----------------------------
 @dataclass
 class Transaction:
     date: str
-    transaction_type: str  # 'deposit' or 'withdrawal'
+    transaction_type: str    # 'deposit' or 'withdrawal'
     vendor: str
-    amount: float
+    amount: float            # signed: deposits > 0, withdrawals < 0
     description: str
     raw_line: str
     section: Optional[str] = None
     category: Optional[str] = None
     needs_review: bool = False
 
+# ----------------------------
+# Helper: robust amount cleaner (single place)
+# ----------------------------
+def clean_amount_token(token: str) -> Optional[float]:
+    """
+    Convert tokens like:
+      "29 083.00", "2,500", "(2,500.00)", "+2500", "-2500", "2500.00"
+    Returns signed float (negative if parentheses or leading '-'), or None if can't parse.
+    """
+    if not token:
+        return None
+
+    s = str(token).strip()
+
+    # If token contains many digits (like trace IDs) treat with caution:
+    digits_only = re.sub(r'\D', '', s)
+    if len(digits_only) >= 13:
+        # too many digits — likely not a monetary value
+        return None
+
+    negative = False
+    # parentheses = negative (common)
+    if s.startswith("(") and s.endswith(")"):
+        negative = True
+        s = s[1:-1].strip()
+
+    # leading sign
+    if s.startswith("-"):
+        negative = True
+        s = s[1:].strip()
+    elif s.startswith("+"):
+        s = s[1:].strip()
+
+    # remove currency symbols and letters
+    s = re.sub(r'[A-Za-z₹₨$€£,]', '', s)
+    # normalize spaces between thousands "29 083.00"
+    s = s.replace(" ", "")
+    # handle multiple dots like "1.234.567,89" — we don't try locale detection here; keep as simple float
+    # if there are more than 1 dot, join all but last as integer part
+    parts = s.split(".")
+    if len(parts) > 2:
+        s = "".join(parts[:-1]) + "." + parts[-1]
+
+    # If empty after cleaning:
+    if not re.search(r'\d', s):
+        return None
+
+    try:
+        val = float(s)
+    except Exception:
+        # try integer
+        try:
+            val = int(s)
+        except Exception:
+            return None
+
+    return -abs(val) if negative else abs(val)
 
 # ----------------------------
-# Document Parser (PDF / CSV / DOCX)
+# Document parser: PDF tables + text fallback + CSV/DOCX
 # ----------------------------
 class DocumentParser:
-    # Column detection regex patterns
     COL_DATE = re.compile(r"date", re.I)
     COL_DEBIT = re.compile(r"debit|withdraw|paid|sent|out|dr", re.I)
     COL_CREDIT = re.compile(r"credit|deposit|received|in|cr", re.I)
     COL_DESC = re.compile(r"desc|details|narration|merchant|vendor|description", re.I)
 
     def _clean_vendor(self, desc: str) -> str:
-        desc = desc.title()
-        desc = re.sub(r"\b[A-Z]\b", "", desc)  # remove solo initials (Sadapay issue)
-        desc = re.sub(r"\s{2,}", " ", desc).strip()
-        return desc or "Unknown"
+        if not desc:
+            return "UNKNOWN"
+        v = re.sub(r'\s{2,}', ' ', desc).strip()
+        v = " ".join([w.upper() if w.isupper() and len(w) <= 4 else w.title() for w in v.split()])
+        return v or "UNKNOWN"
 
-    def parse_pdf_table(self, file_bytes):
-        """ Extract transactions from tables inside PDF """
-        transactions = []
-
-        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            for page in pdf.pages:
-                tables = page.extract_tables()
-
-                for table in tables:
-                    if not table or len(table) < 2:
+    def parse_pdf_table(self, file_bytes: bytes) -> List[Transaction]:
+        txs: List[Transaction] = []
+        try:
+            with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+                for page in pdf.pages:
+                    tables = page.extract_tables()
+                    if not tables:
                         continue
+                    for table in tables:
+                        if len(table) < 2:
+                            continue
+                        header = [ (c or "").strip() for c in table[0] ]
+                        date_idx = next((i for i,h in enumerate(header) if self.COL_DATE.search(h)), None)
+                        debit_idx = next((i for i,h in enumerate(header) if self.COL_DEBIT.search(h)), None)
+                        credit_idx = next((i for i,h in enumerate(header) if self.COL_CREDIT.search(h)), None)
+                        desc_idx = next((i for i,h in enumerate(header) if self.COL_DESC.search(h)), None)
 
-                    header = [c.strip() if c else "" for c in table[0]]
-
-                    date_idx = next((i for i, h in enumerate(header) if self.COL_DATE.search(h)), None)
-                    debit_idx = next((i for i, h in enumerate(header) if self.COL_DEBIT.search(h)), None)
-                    credit_idx = next((i for i, h in enumerate(header) if self.COL_CREDIT.search(h)), None)
-                    desc_idx = next((i for i, h in enumerate(header) if self.COL_DESC.search(h)), None)
-
-                    # Table not matching transaction format
-                    if date_idx is None or (debit_idx is None and credit_idx is None):
-                        continue
-
-                    for row in table[1:]:
-                        if not row or len(row) <= max(date_idx, debit_idx or 0, credit_idx or 0):
+                        if date_idx is None or (debit_idx is None and credit_idx is None):
                             continue
 
-                        date = (row[date_idx] or "").strip()
-                        desc = (row[desc_idx] or "").strip() if desc_idx is not None else ""
+                        for row in table[1:]:
+                            if not row or len(row) <= max(date_idx, debit_idx or 0, credit_idx or 0):
+                                continue
+                            date = (row[date_idx] or "").strip()
+                            desc = (row[desc_idx] or "").strip() if desc_idx is not None else ""
+                            debit = (row[debit_idx] or "").strip() if debit_idx is not None else ""
+                            credit = (row[credit_idx] or "").strip() if credit_idx is not None else ""
+                            amount = None
+                            direction = None
 
-                        debit = row[debit_idx] if debit_idx is not None else ""
-                        credit = row[credit_idx] if credit_idx is not None else ""
-                        amount = None
-                        direction = None  
-                        if credit and credit.strip():
-                            cleaned = re.sub(r"[^\d.-]", "", credit)
-                            if cleaned:
-                                if cleaned.startswith('-'):
-                                    direction = "withdrawal"
-                                else:
+                            # prefer credit column as deposit
+                            if credit:
+                                cleaned = re.sub(r'[^\d\-\.\(\),\s\+]', '', credit)
+                                amt = clean_amount_token(cleaned)
+                                if amt is not None:
+                                    amount = abs(amt)
                                     direction = "deposit"
-                                amount = abs(float(cleaned))
 
-                        elif debit and debit.strip():
-                            cleaned = re.sub(r"[^\d.-]", "", debit)
-                            if cleaned:
-                                direction = "withdrawal"
-                                amount = abs(float(cleaned))
+                            if amount is None and debit:
+                                cleaned = re.sub(r'[^\d\-\.\(\),\s\+]', '', debit)
+                                amt = clean_amount_token(cleaned)
+                                if amt is not None:
+                                    amount = abs(amt)
+                                    direction = "withdrawal"
 
-                        # 2️⃣ Look for CR/DR labeling in description
-                        if direction is None:
-                            low = desc.lower()
-                            if "cr" in low or "credit" in low or "received" in low:
-                                direction = "deposit"
-                            elif "dr" in low or "debit" in low or "sent" in low or "purchase" in low:
-                                direction = "withdrawal"
+                            # fallback: detect CR/DR signs in desc if direction unknown
+                            if amount is not None and direction is None:
+                                low = desc.lower()
+                                if "cr" in low or "credit" in low or "received" in low:
+                                    direction = "deposit"
+                                elif "dr" in low or "debit" in low or "sent" in low or "purchase" in low:
+                                    direction = "withdrawal"
 
-                        # 3️⃣ If still unknown, drop the row
-                        if amount is None or direction is None:
-                            continue
+                            if amount is None or direction is None:
+                                continue
 
-                        # ✔️ Finalized Transaction
-                        transactions.append(Transaction(
-                            date=date,
-                            transaction_type=direction,
-                            vendor=self._clean_vendor(desc),
-                            amount=amount if direction == "deposit" else -amount,
-                            description=desc,
-                            raw_line=" | ".join(str(x) for x in row)
-                        ))
+                            signed = amount if direction == "deposit" else -amount
 
-        return transactions
+                            txs.append(Transaction(
+                                date=date or "",
+                                transaction_type=direction,
+                                vendor=self._clean_vendor(desc),
+                                amount=signed,
+                                description=desc,
+                                raw_line=" | ".join(str(x) for x in row)
+                            ))
+        except Exception as e:
+            logger.exception("parse_pdf_table failed: %s", e)
+        return txs
 
     def parse_document(self, file_bytes: bytes, filename: str) -> Tuple[List[str], bool, List[int]]:
-        """Fallback to text parsing if table extraction is incomplete"""
         ext = filename.lower().split('.')[-1]
         unreadable_pages: List[int] = []
         lines: List[str] = []
 
-        # CSV support
         if ext == "csv":
             try:
-                text = file_bytes.decode('utf-8', errors='ignore')
+                txt = file_bytes.decode("utf-8", errors="ignore")
             except Exception:
-                text = str(file_bytes)
-            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+                txt = str(file_bytes)
+            lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
             return lines, True, []
 
-        # PDF — use text fallback if tables not fully detected
         if ext == "pdf":
             try:
                 with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
                     for page in pdf.pages:
                         txt = page.extract_text() or ""
-                        txt = txt.replace('\xa0', ' ')
+                        txt = txt.replace('\xa0',' ')
                         if txt.strip():
                             lines.extend([ln.strip() for ln in txt.splitlines() if ln.strip()])
                         else:
                             unreadable_pages.append(page.page_number)
                 return lines, len(lines) > 0, unreadable_pages
-            except Exception:
-                logger.exception("PDF parse failed")
+            except Exception as e:
+                logger.exception("PDF text parse failed: %s", e)
                 return [], False, []
 
-        # DOCX support
-        if ext in ("doc", "docx"):
+        if ext in ("doc","docx"):
             try:
                 import docx
-                tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.' + ext)
+                tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.'+ext)
                 tmp.write(file_bytes)
                 tmp.flush()
                 doc = docx.Document(tmp.name)
                 lines = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
                 return lines, True, []
-            except Exception:
-                logger.exception("DOCX parse failed")
+            except Exception as e:
+                logger.exception("DOCX parse failed: %s", e)
                 return [], False, []
 
-        # Plain text fallback
         try:
-            text = file_bytes.decode('utf-8', errors='ignore')
-            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+            txt = file_bytes.decode("utf-8", errors="ignore")
+            lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
             return lines, True, []
         except Exception:
             return [], False, []
-    def extract_transactions(self, file_bytes: bytes, filename: str):
-        ext = filename.lower().split('.')[-1]
 
-        # If PDF → Try table parsing first
+    def extract_transactions(self, file_bytes: bytes, filename: str) -> Tuple[List[Transaction], Dict[str,Any]]:
+        ext = filename.lower().split('.')[-1]
         if ext == "pdf":
             table_tx = self.parse_pdf_table(file_bytes)
             if table_tx:
-                return table_tx, {"parsed_from": "pdf-table", "transactions_extracted": len(table_tx)}
+                return table_tx, {"parsed_from":"pdf-table", "transactions_extracted": len(table_tx)}
 
-        # Fallback → text line parsing
         lines, ok, unreadable = self.parse_document(file_bytes, filename)
         if not ok or not lines:
-            return [], {"parsed_from": "failed"}
+            return [], {"parsed_from":"failed", "raw_lines": len(lines)}
 
         fallback = FallbackStatementParser()
         txs, meta = fallback.parse_statement(lines)
         meta["raw_lines"] = len(lines)
         return txs, meta
 
-
 # ----------------------------
-# Fallback Statement Parser (deterministic)
+# Deterministic fallback parser (robust)
 # ----------------------------
 class FallbackStatementParser:
-    # Detect dates like "09/10/2025", "09 Oct 2025", "09 Oct, 2025", "2025-10-09"
-    DATE_RE = re.compile(r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}\s+[A-Za-z]{3,9}\,?\s+\d{2,4}|\d{4}-\d{2}-\d{2})')
-    # Amount tokens: allow spaces inside thousands "29 083.00", commas, optional sign, parentheses for negative
-    AMOUNT_RE = re.compile(
-    r'([+\-]?\(?\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})\s*\)?)'
+    # broad date patterns
+    DATE_RE = re.compile(
+    r'(\b\d{1,2}[/\-. ]\d{1,2}[/\-. ]\d{2,4}\b|\b\d{1,2}[/\-. ]\d{1,2}\b|'
+    r'\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[ .-]?\d{1,2}[, ]*\d{2,4}?\b)',
+    re.I
 )
 
-    deposit_keys = ["received", "credit", "payment received", "deposit", "payment from", "paid in", "inbound", "refund"]
-    withdraw_keys = ["purchase", "paid", "payment", "purchase at", "sent", "withdraw", "debit", "card", "purchase -", "purchase/"]
+    # amount-like tokens: allow spaces/comma thousands, parentheses, leading +/-.
+    AMOUNT_RE = re.compile(r'([+\-]?\(?\s*\d{1,3}(?:[,\s]\d{3})*(?:\.\d{2})?\)?)')
 
-    def _clean_amount_token(self, token: str) -> Optional[float]:
-        if not token:
-            return None
-        
-        s = token.strip()
-
-        # negative if () or a minus sign
-        negative = ("(" in s and ")" in s) or s.strip().startswith("-")
-
-        # Remove parentheses and currency symbols
-        s = re.sub(r'[A-Za-z\(\)\$]', '', s)
-
-        # Normalize spaces
-        s = re.sub(r'\s+', '', s)
-
-        # Fix "2, 500" or "2 . 500" → correct thousands
-        s = s.replace(',', '').replace(' ', '')
-
-        # Make sure only one decimal exists
-        parts = s.split('.')
-        if len(parts) > 2:  # more than one dot -> join all except last as integer
-            s = ''.join(parts[:-1]) + "." + parts[-1]
-
-        # If no decimal: consider integer safely
-        if "." not in s:
+    deposit_keys = ["deposit", "received", "credit", "salary", "refund", "payroll", "payment received"]
+    withdraw_keys = ["withdraw", "purchase", "sent", "payment", "debit", "card", "pos", "paid to"]
+    def _normalize_date(self, d: str) -> str:
+        d = d.strip()
+        # Try DD/MM or MM/DD without year
+        m = re.match(r'(\d{1,2})[/\-. ](\d{1,2})$', d)
+        if m:
+            day, month = m.group(1), m.group(2)
+            # Assume current year
+            year = datetime.now().year
             try:
-                val = int(s)
+                obj = datetime(int(year), int(day), int(month))
+                return obj.strftime("%Y-%m-%d")
             except:
-                return None
-            return -val if negative else val
+                try:
+                    obj = datetime(int(year), int(month), int(day))
+                    return obj.strftime("%Y-%m-%d")
+                except:
+                    return d
 
+        # Full date formats
         try:
-            val = float(s)
-            return -abs(val) if negative else abs(val)
+            for fmt in ("%d/%m/%Y","%m/%d/%Y","%d-%m-%Y","%m-%d-%Y",
+                        "%d/%m/%y","%m/%d/%y","%d-%m-%y","%m-%d-%y"):
+                try:
+                    return datetime.strptime(d, fmt).strftime("%Y-%m-%d")
+                except:
+                    pass
         except:
-            return None
+            return d
+
+        return d
+
     def _infer_vendor(self, line: str, date_str: str, amount_token: str) -> str:
         tmp = line
         if date_str:
             tmp = tmp.replace(date_str, ' ')
         if amount_token:
             tmp = tmp.replace(amount_token, ' ')
-        # remove currency words and balances
-        tmp = re.sub(r'\b(PKR|USD|EUR|GBP|AED|CAD|AUD|Balance|Available)\b', ' ', tmp, flags=re.I)
-        # remove numbers
-        tmp = re.sub(r'\d[\d,./-]*', ' ', tmp)
-        tmp = re.sub(r'[\|\-:]+', ' ', tmp)
+        tmp = re.sub(r'\b(PKR|USD|EUR|GBP|AED|CAD|AUD|Rs|Balance|Available)\b', ' ', tmp, flags=re.I)
+        tmp = re.sub(r'[\d\|\-:\/\.]', ' ', tmp)
+        tmp = re.sub(r'[\(\)\[\],]', ' ', tmp)
         tmp = re.sub(r'\s{2,}', ' ', tmp).strip()
         return tmp if tmp else "UNKNOWN"
 
-    def parse_statement(self, lines: List[str]) -> Tuple[List[Transaction], Dict[str, Any]]:
-        transactions: List[Transaction] = []
+    def parse_statement(self, lines: List[str]) -> Tuple[List[Transaction], Dict[str,Any]]:
+        txs: List[Transaction] = []
+
         for ln in lines:
-            low = ln.lower()
-            if 'balance' in low and 'available' in low:
-                # skip balance lines
+            low = ln.lower().strip()
+            # skip trivial lines
+            if not ln.strip() or any(k in low for k in ("available balance", "closing balance", "total", "statement")):
                 continue
+
             d_match = self.DATE_RE.search(ln)
-            a_match = self.AMOUNT_RE.search(ln)
-            if not a_match:
-                # skip lines without amount
+            date_str = self._normalize_date(d_match.group(1)) if d_match else ""
+
+
+            # find all amount-like tokens
+            matches = list(self.AMOUNT_RE.finditer(ln))
+            if not matches:
                 continue
 
-            amount_token = a_match.group(1)
-            amount_val = self._clean_amount_token(amount_token)
-            if amount_val is None:
+            # build tokens with spans
+            tokens = [(m.group(1), m.start(1), m.end(1)) for m in matches]
+
+            # heuristic choose:
+            chosen_token = None
+            chosen_span = (0, len(ln))
+
+            # 1) prefer token with explicit sign or parentheses
+            for tok, s, e in tokens:
+                if tok.strip().startswith("+") or tok.strip().startswith("-") or ("(" in tok and ")" in tok):
+                    chosen_token = tok
+                    chosen_span = (s, e)
+                    break
+
+            # 2) prefer token with nearby currency
+            if chosen_token is None:
+                for tok, s, e in tokens:
+                    ctx_start = max(0, s-12)
+                    context = ln[ctx_start:s].upper()
+                    if any(cur in context for cur in ('PKR','USD','EUR','GBP','AED','CAD','AUD','RS')):
+                        chosen_token = tok
+                        chosen_span = (s, e)
+                        break
+
+            # 3) prefer token nearest to line end
+            if chosen_token is None:
+                best = None
+                best_dist = None
+                L = len(ln)
+                for tok,s,e in tokens:
+                    dist = L - e
+                    if best is None or dist < best_dist:
+                        best = (tok,s,e)
+                        best_dist = dist
+                if best:
+                    chosen_token, chosen_span = best[0], (best[1], best[2])
+
+            # 4) fallback: last token
+            if chosen_token is None and tokens:
+                chosen_token, chosen_span = tokens[-1][0], (tokens[-1][1], tokens[-1][2])
+
+            if not chosen_token:
                 continue
-            if re.match(r'^\d{1,2}/\d{1,2}/\d{2,4}$', ln):
-                continue    
-            # default sign handling: assume positive unless keywords or parentheses or leading '-'
-            # detect parentheses or leading minus
-            ln_signed = ln.strip()
-            if amount_token.strip().startswith('(') and amount_token.strip().endswith(')'):
-                amount_val = -abs(amount_val)
-            elif amount_token.strip().startswith('-'):
-                amount_val = -abs(amount_val)
 
-            # check explicit + or - anywhere
-            if '+' in ln and '-' not in ln:
-                amount_val = abs(amount_val)
-            if '-' in ln and '+' not in ln and ('-' in amount_token):
-                amount_val = -abs(amount_val)
+            # Try to parse chosen token
+            amt_val = clean_amount_token(chosen_token)
+            # If chosen token invalid, try other tokens (reverse)
+            if amt_val is None:
+                for tok, s, e in tokens[::-1]:
+                    parsed = clean_amount_token(tok)
+                    if parsed is not None:
+                        amt_val = parsed
+                        chosen_token = tok
+                        chosen_span = (s, e)
+                        break
+            if amt_val is None:
+                continue
 
-            # keywords detection override
-            if any(k in low for k in self.withdraw_keys):
-                amount_val = -abs(amount_val)
-            if any(k in low for k in self.deposit_keys):
-                amount_val = abs(amount_val)
+            # Determine sign primarily from token itself
+            tokstr = chosen_token.strip()
+            if tokstr.startswith("-") or (tokstr.startswith("(") and tokstr.endswith(")")):
+                amt_val = -abs(amt_val)
+            elif tokstr.startswith("+"):
+                amt_val = abs(amt_val)
 
-            date_str = d_match.group(1) if d_match else ""
-            vendor = self._infer_vendor(ln, date_str, amount_token)
+            # If token had no explicit sign, use keywords as fallback
+            if not (tokstr.startswith(("+","-")) or (tokstr.startswith("(") and tokstr.endswith(")"))):
+                if any(k in low for k in self.withdraw_keys):
+                    amt_val = -abs(amt_val)
+                if any(k in low for k in self.deposit_keys):
+                    amt_val = abs(amt_val)
 
-            transactions.append(Transaction(
+            # Sanity: skip ridiculously large numbers (IDs)
+            if abs(amt_val) > 1e12:
+                continue
+
+            vendor = self._infer_vendor(ln, date_str, chosen_token).title()
+            if not vendor:
+                vendor = "UNKNOWN"
+
+            txs.append(Transaction(
                 date=date_str,
-                transaction_type='deposit' if amount_val > 0 else 'withdrawal',
-                vendor=vendor.title(),
-                amount=amount_val,
+                transaction_type="deposit" if amt_val > 0 else "withdrawal",
+                vendor=vendor,
+                amount=amt_val,
                 description=ln,
                 raw_line=ln
             ))
 
-        meta = {'parsed_from': 'fallback', 'transactions_extracted': len(transactions)}
-        return transactions, meta
-
+        meta = {"parsed_from":"universal_fallback", "transactions_extracted": len(txs)}
+        return txs, meta
 
 # ----------------------------
-# LLM Enhancer (Cleans & canonicalizes rows)
-#    — HYBRID MODE: we send the fallback-extracted rows for cleaning.
-#    — LLM returns a JSON list aligned by index: it MUST keep same count and include index.
+# (Optional) LLM enhancer — unchanged logic but uses clean amounts
 # ----------------------------
 class LLMEnhancer:
-    def __init__(self, model: str = "gpt-4o-mini", max_tokens: int = 1500):
+    def __init__(self, model: str = "gpt-4o-mini", max_tokens: int = 1200):
         self.model = model
         self.max_tokens = max_tokens
 
     def enhance(self, transactions: List[Transaction], raw_text: str) -> List[Transaction]:
-        """
-        Send a compact prompt containing extracted rows and ask LLM to:
-        - Standardize date to YYYY-MM-DD if possible
-        - Fix vendor name (short canonical)
-        - Fix amounts (remove spaces in numbers) but DO NOT add/remove transactions
-        - Return JSON: [{"idx":0,"date":"YYYY-MM-DD","vendor":"...","amount":number,"direction":"in/out","description":"..."} ...]
-        """
-        if not openai.api_key:
-            logger.info("No OpenAI API key — skipping LLM enhancement.")
+        if openai is None:
+            logger.info("openai package not installed — skipping LLM enhancement.")
             return transactions
 
-        # Build small sample of rows to send (limit to first 200 rows to avoid huge prompt)
+        key = None
+        try:
+            key = st.secrets.get("OPENAI_API_KEY") if "OPENAI_API_KEY" in st.secrets else None
+        except Exception:
+            key = None
+        if not key:
+            logger.info("No OPENAI_API_KEY found in Streamlit secrets — skipping LLM enhancement.")
+            return transactions
+
+        openai.api_key = key
+
         rows = []
-        for i, t in enumerate(transactions):
+        for i, t in enumerate(transactions[:200]):
             rows.append({
                 "idx": i,
                 "date": t.date,
@@ -354,37 +451,28 @@ class LLMEnhancer:
                 "description": t.description
             })
 
-        prompt = f"""
-You are a careful financial cleaner. You will receive a JSON array of parsed transactions. 
-You MUST return a JSON array with exactly the same number of elements. 
-Each element must be an object with keys:
-  - idx (integer): index matching the input
-  - date (string or null): canonicalize to YYYY-MM-DD if possible, else return original text
-  - vendor (string or null): short cleaned vendor name
-  - amount (number): numeric amount (positive)
-  - direction (string): "in" or "out"
-  - description (string): cleaned description text
+        prompt = (
+            "You are a precise financial data cleaner. You will receive a JSON array of parsed transactions.\n"
+            "Return a JSON array with exactly the same number of elements. Each element must contain:\n"
+            "  idx (int), date (YYYY-MM-DD or original), vendor (short), amount (number positive), direction ('in'/'out'), description (string)\n"
+            "Rules:\n"
+            "- Normalize amounts (e.g. '29 083.00' -> 29083.00). Return numeric amount (positive).\n"
+            "- Do NOT add or remove rows; keep idx mapping.\n"
+            "- If you can canonicalize the date to YYYY-MM-DD do so, otherwise return original date string.\n"
+            "- Return ONLY a JSON array (no explanation).\n\n"
+            "INPUT:\n" + json.dumps(rows, ensure_ascii=False)
+        )
 
-Rules:
-- Do NOT add or remove transactions, keep idx mapping strict.
-- Normalize amounts: convert strings like "29 083.00" -> 29083.00
-- If amount parsing uncertain, return the numeric value closest to input.
-- For date: try parsing common formats; if you can convert to YYYY-MM-DD do so.
-- Return ONLY a JSON array (no extra text or markdown).
-Input JSON:
-{json.dumps(rows, ensure_ascii=False)}
-"""
         try:
             resp = openai.ChatCompletion.create(
                 model=self.model,
                 temperature=0,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role":"user","content":prompt}],
                 max_tokens=self.max_tokens
             )
             content = resp.choices[0].message["content"]
             parsed = json.loads(content)
-            # Build new transactions from parsed
-            enhanced = []
+            enhanced: List[Transaction] = []
             for obj in parsed:
                 idx = int(obj.get("idx"))
                 amt = float(obj.get("amount", 0.0))
@@ -402,65 +490,61 @@ Input JSON:
                     raw_line=transactions[idx].raw_line,
                     needs_review=False
                 ))
-            # Ensure same length
-            if len(enhanced) == len(transactions):
-                return enhanced
-            else:
-                logger.warning("LLM returned different number of rows — skipping enhancement.")
+            if len(enhanced) != len(rows):
+                logger.warning("LLM returned different count — skipping enhancement.")
                 return transactions
+            return enhanced + transactions[200:]
         except Exception as e:
-            logger.exception("LLM enhancement failed: %s", e)
+            logger.exception("LLM enhancement error: %s", e)
             return transactions
 
-
 # ----------------------------
-# Categorizer + Dedupe
+# Categorizer & dedupe
 # ----------------------------
 class TransactionCategorizer:
-    def process_transactions(self, transactions: List[Transaction]) -> List[Transaction]:
-        for t in transactions:
+    def process_transactions(self, txs: List[Transaction]) -> List[Transaction]:
+        for t in txs:
             if t.amount > 0:
                 t.category = "Income"
             else:
-                # example heuristics:
-                if 'uber' in t.description.lower():
+                low = (t.description or "").lower()
+                if 'uber' in low or 'careem' in low:
                     t.category = "Transport"
-                elif 'starbuck' in t.description.lower() or 'coffee' in t.description.lower():
+                elif 'starbuck' in low or 'pizza' in low or 'restaurant' in low:
                     t.category = "Food"
                 else:
                     t.category = "Expense"
-        return transactions
+        return txs
 
-    def detect_duplicates(self, transactions: List[Transaction]) -> List[Transaction]:
+    def detect_duplicates(self, txs: List[Transaction]) -> List[Transaction]:
         seen = {}
         order = []
-        for t in transactions:
-            key = (t.date, round(t.amount, 2), re.sub(r'\W+', '', (t.vendor or '').lower()))
+        for t in txs:
+            key = (t.date, round(t.amount,2), re.sub(r'\W+','', (t.vendor or '').lower()))
             if key in seen:
-                # prefer non-review item
-                if seen[key].needs_review and not t.needs_review:
+                existing = seen[key]
+                if existing.needs_review and not t.needs_review:
                     seen[key] = t
             else:
                 seen[key] = t
                 order.append(key)
         return [seen[k] for k in order]
 
-
 # ----------------------------
-# Report Generator
+# Report generator
 # ----------------------------
 class ReportGenerator:
-    def generate_summary_statistics(self, transactions: List[Transaction]) -> Dict[str, Any]:
+    def generate_summary_statistics(self, transactions: List[Transaction]) -> Dict[str,Any]:
         total_deposits = sum(t.amount for t in transactions if t.amount > 0)
         total_withdrawals = sum(-t.amount for t in transactions if t.amount < 0)
         return {
-            'Total Deposit Amount': total_deposits,
-            'Total Withdrawal Amount': total_withdrawals,
-            'Total Deposits': sum(1 for t in transactions if t.amount > 0),
-            'Total Withdrawals': sum(1 for t in transactions if t.amount < 0),
+            'Total Deposit Amount': float(total_deposits),
+            'Total Withdrawal Amount': float(total_withdrawals),
+            'Total Deposits': int(sum(1 for t in transactions if t.amount > 0)),
+            'Total Withdrawals': int(sum(1 for t in transactions if t.amount < 0)),
             'Total Transactions': len(transactions),
-            'Net Income': total_deposits - total_withdrawals,
-            'Transactions Needing Review': sum(1 for t in transactions if t.needs_review)
+            'Net Income': float(total_deposits - total_withdrawals),
+            'Transactions Needing Review': int(sum(1 for t in transactions if t.needs_review))
         }
 
     def generate_deposits_summary(self, transactions: List[Transaction]) -> pd.DataFrame:
@@ -469,13 +553,13 @@ class ReportGenerator:
             return pd.DataFrame()
         df = pd.DataFrame([asdict(t) for t in deps])
         df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0.0)
-        grp = df.groupby('vendor').agg({'amount': 'sum', 'raw_line': 'count'}).reset_index()
+        grp = df.groupby('vendor').agg({'amount':'sum', 'raw_line':'count'}).reset_index()
         grp.columns = ['Source/Vendor', 'Subtotal ($)', 'Transaction Count']
         grp['Subtotal ($)'] = grp['Subtotal ($)'].astype(float)
         total = grp['Subtotal ($)'].sum()
-        total_row = pd.DataFrame([{'Source/Vendor': 'TOTAL DEPOSITS', 'Subtotal ($)': total, 'Transaction Count': grp['Transaction Count'].sum()}])
+        total_row = pd.DataFrame([{'Source/Vendor':'TOTAL DEPOSITS','Subtotal ($)': total, 'Transaction Count': grp['Transaction Count'].sum()}])
         out = pd.concat([grp, total_row], ignore_index=True)
-        return out[['Source/Vendor', 'Transaction Count', 'Subtotal ($)']]
+        return out[['Source/Vendor','Transaction Count','Subtotal ($)']]
 
     def generate_withdrawals_summary(self, transactions: List[Transaction]) -> pd.DataFrame:
         wds = [t for t in transactions if t.amount < 0]
@@ -484,104 +568,105 @@ class ReportGenerator:
         df = pd.DataFrame([asdict(t) for t in wds])
         df['amount'] = df['amount'].abs()
         df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0.0)
-        grp = df.groupby(['vendor']).agg({'amount': 'sum', 'raw_line': 'count'}).reset_index()
-        grp.columns = ['Vendor', 'Subtotal ($)', 'Transaction Count']
+        grp = df.groupby('vendor').agg({'amount':'sum', 'raw_line':'count'}).reset_index()
+        grp.columns = ['Vendor','Subtotal ($)','Transaction Count']
         total = grp['Subtotal ($)'].sum()
-        total_row = pd.DataFrame([{'Vendor': 'TOTAL WITHDRAWALS', 'Subtotal ($)': total, 'Transaction Count': grp['Transaction Count'].sum()}])
+        total_row = pd.DataFrame([{'Vendor':'TOTAL WITHDRAWALS','Subtotal ($)': total, 'Transaction Count': grp['Transaction Count'].sum()}])
         out = pd.concat([grp, total_row], ignore_index=True)
-        return out[['Vendor', 'Transaction Count', 'Subtotal ($)']]
+        return out[['Vendor','Transaction Count','Subtotal ($)']]
+
     def generate_pl_report(self, transactions: List[Transaction]) -> pd.DataFrame:
-        total_income = sum(t.amount for t in transactions if t.amount > 0)
-        total_expenses = sum(-t.amount for t in transactions if t.amount < 0)
-        net = total_income - total_expenses
-
-        df = pd.DataFrame([
-            {"Category": "Income", "Amount ($)": total_income},
-            {"Category": "Expenses", "Amount ($)": -total_expenses},
-            {"Category": "Net Income", "Amount ($)": net},
+        s = self.generate_summary_statistics(transactions)
+        total_income = s['Total Deposit Amount']
+        total_expenses = s['Total Withdrawal Amount']
+        net = s['Net Income']
+        return pd.DataFrame([
+            {'Category':'Total Income','Amount ($)': total_income},
+            {'Category':'Total Expenses','Amount ($)': -total_expenses},
+            {'Category':'NET INCOME','Amount ($)': net}
         ])
-        return df
+
 # ----------------------------
-# PART 2: Streamlit UI
+# Streamlit UI (single-file)
 # ----------------------------
-import streamlit as st
-import pandas as pd
-from typing import List
+st.set_page_config(page_title="Bank Statement Analyzer (Hybrid)", layout="wide")
+st.title("💼 Bank Statement Analyzer — Deterministic + LLM (Hybrid)")
 
-# Ensure OpenAI key is loaded
-if "OPENAI_API_KEY" in st.secrets and st.secrets["OPENAI_API_KEY"]:
-    openai.api_key = st.secrets["OPENAI_API_KEY"]
+st.markdown(
+    "Upload a bank statement (PDF / CSV / DOCX). The app extracts deterministically, "
+    "then optionally cleans rows with an LLM (gpt-4o-mini). Totals are computed from parsed numeric amounts."
+)
 
-st.set_page_config(page_title="Bank Statement Analyzer (Hybrid LLM)", layout="wide")
-
-st.markdown("<h1 style='color:#0d6efd'>💼 Bank Statement Analyzer</h1>", unsafe_allow_html=True)
-st.markdown("<p>Hybrid parser: deterministic extractor → optional LLM cleaner. Totals are computed from parsed numeric amounts (no LLM hallucination).</p>", unsafe_allow_html=True)
-
-# sidebar: LLM switch + model
 with st.sidebar:
     st.header("Settings")
-    use_llm = st.checkbox("Enable LLM Enhancement (cost)", value=True)
+    use_llm = st.checkbox("Enable LLM enhancement (cost)", value=True)
     llm_model = st.selectbox("LLM model", ["gpt-4o-mini"], index=0)
-    st.markdown("Make sure you put your OpenAI key in `.streamlit/secrets.toml` as:\n\n`OPENAI_API_KEY = \"sk-...\"`")
+    st.write("Put your OpenAI key in `.streamlit/secrets.toml` as: `OPENAI_API_KEY = \"sk-...\"`")
 
-# Upload
-uploaded = st.file_uploader("Upload statement (PDF/CSV/DOCX)", type=["pdf", "csv", "doc", "docx"])
+uploaded = st.file_uploader("Upload statement (PDF, CSV, DOCX)", type=["pdf","csv","doc","docx"])
 
 if uploaded:
     st.info(f"File: {uploaded.name} — {uploaded.size/1024:.1f} KB")
-    currency = st.selectbox("Currency", ["PKR", "USD", "EUR", "GBP", "AED", "CAD", "AUD"], index=0)
+    currency = st.selectbox("Currency", ["PKR","USD","EUR","GBP","AED","CAD","AUD"], index=0)
 
     if st.button("Process Statement"):
-        with st.spinner("Processing..."):
+        with st.spinner("Parsing & processing..."):
             file_bytes = uploaded.read()
-
-            # Parse doc
             dp = DocumentParser()
-            lines, ok, unreadable = dp.parse_document(file_bytes, uploaded.name)
-            if not ok:
-                st.error("Could not read text from file.")
-                if unreadable:
-                    st.warning(f"Unreadable pages: {unreadable}")
+
+            # Try table extraction first
+            txs_table = dp.parse_pdf_table(file_bytes) if uploaded.name.lower().endswith(".pdf") else []
+            if txs_table:
+                transactions = txs_table
+                parsed_from = "pdf-table"
+            else:
+                lines, ok, unreadable = dp.parse_document(file_bytes, uploaded.name)
+                if not ok or len(lines) < 1:
+                    st.error("Could not read text from file.")
+                    if unreadable:
+                        st.warning(f"Unreadable pages: {unreadable}")
+                    st.stop()
+                fallback = FallbackStatementParser()
+                transactions, meta = fallback.parse_statement(lines)
+                parsed_from = meta.get("parsed_from", "fallback")
+
+            if not transactions:
+                st.error("No transactions extracted.")
                 st.stop()
 
-            # Fallback parse (deterministic)
-            fallback = FallbackStatementParser()
-            txs = dp.parse_pdf_table(file_bytes)
-
-            if txs:
-                transactions = txs
-                parsed_from = "table"
+            # optional LLM enhancement
+            if use_llm and openai is not None:
+                try:
+                    key = st.secrets.get("OPENAI_API_KEY") if "OPENAI_API_KEY" in st.secrets else None
+                except Exception:
+                    key = None
+                if key:
+                    openai.api_key = key
+                    enhancer = LLMEnhancer(model=llm_model)
+                    try:
+                        transactions = enhancer.enhance(transactions, raw_text="\n".join([t.raw_line for t in transactions]))
+                        parsed_from = parsed_from + "-llm"
+                    except Exception as e:
+                        logger.exception("LLM enhancement error: %s", e)
+                        st.warning("LLM enhancement failed — continuing with deterministic parse.")
+                else:
+                    st.warning("OPENAI_API_KEY not set in Streamlit secrets — skipping LLM enhancement.")
             else:
-                transactions, _ = fallback.parse_statement(lines)
-                parsed_from = "fallback"
-            # If nothing
-            if not txs:
-                st.error("No transactions extracted by fallback parser.")
-                st.stop()
+                if use_llm and openai is None:
+                    st.warning("openai Python package not installed — skipping LLM enhancement.")
 
-            # Optional LLM enhancement (hybrid)
-            if use_llm and openai.api_key:
-                enhancer = LLMEnhancer(model=llm_model)
-                enhanced = enhancer.enhance(txs, raw_text="\n".join(lines))
-                transactions = enhanced
-                parsed_from = "hybrid-llm"
-            else:
-                transactions = txs
-                parsed_from = "fallback-only"
-
-            # Categorize and dedupe
+            # categorize & dedupe
             cat = TransactionCategorizer()
             transactions = cat.process_transactions(transactions)
             transactions = cat.detect_duplicates(transactions)
 
-            # Stats and reports
+            # stats & reports
             rg = ReportGenerator()
             stats = rg.generate_summary_statistics(transactions)
             deposits_df = rg.generate_deposits_summary(transactions)
             withdrawals_df = rg.generate_withdrawals_summary(transactions)
             pl_df = rg.generate_pl_report(transactions)
 
-            # Save to session
             st.session_state.transactions = transactions
             st.session_state.stats = stats
             st.session_state.deposit_df = deposits_df
@@ -592,7 +677,7 @@ if uploaded:
 
             st.success(f"Processed {len(transactions)} transactions ({parsed_from}).")
 
-# If we have processed transactions, show dashboard
+# Dashboard display
 if "transactions" in st.session_state and st.session_state.transactions:
     transactions: List[Transaction] = st.session_state.transactions
     stats = st.session_state.stats
@@ -605,37 +690,31 @@ if "transactions" in st.session_state and st.session_state.transactions:
     c3.metric("Net Income", f"{cur} {stats['Net Income']:,.2f}")
     c4.metric("Transactions", stats['Total Transactions'])
 
-    # Reconciliation check
+    # reconcile computed sums
     computed_deposits = sum(t.amount for t in transactions if t.amount > 0)
     computed_withdrawals = sum(-t.amount for t in transactions if t.amount < 0)
     if abs(computed_deposits - stats['Total Deposit Amount']) > 0.001 or abs(computed_withdrawals - stats['Total Withdrawal Amount']) > 0.001:
-        st.warning("Reconciliation mismatch: computed sums differ from reported sums — using computed sums as source of truth.")
-    else:
-        st.success("Reconciliation OK.")
+        st.warning("Reconciliation mismatch: using computed sums as source of truth.")
+        stats['Total Deposit Amount'] = float(computed_deposits)
+        stats['Total Withdrawal Amount'] = float(computed_withdrawals)
+        stats['Net Income'] = float(computed_deposits - computed_withdrawals)
 
-    # Tabs for details
-    tab1, tab2, tab3, tab4 = st.tabs(["💰 Deposits", "💸 Withdrawals", "📈 P&L", "📋 All Transactions"])
+    tab1, tab2, tab3, tab4 = st.tabs(["💰 Deposits","💸 Withdrawals","📈 P&L","📋 All Transactions"])
+    rg = ReportGenerator()
 
     with tab1:
         st.subheader("Deposits Summary (by Source/Vendor)")
-        if st.session_state.deposit_df is None or st.session_state.deposit_df.empty:
+        df = st.session_state.deposit_df
+        if df is None or df.empty:
             st.info("No deposits found.")
         else:
-            df = st.session_state.deposit_df.copy()
-            df = df.rename(columns={"vendor": "Source/Vendor", "sum": "Subtotal ($)", "count": "Transaction Count"}) if 'vendor' in df.columns else df
-            # ensure columns named consistently
-            if list(df.columns) == ["vendor", "sum", "count"]:
-                df.columns = ["Source/Vendor", "Subtotal ($)", "Transaction Count"]
             st.dataframe(df, use_container_width=True, hide_index=True)
-
-            # Expanders with transaction details per vendor
             deps = [t for t in transactions if t.amount > 0]
             grouped = {}
             for t in deps:
                 key = t.vendor or "UNKNOWN"
                 grouped.setdefault(key, []).append(t)
-
-            for vendor, items in sorted(grouped.items(), key=lambda x: (-len(x[1]), x[0])):
+            for vendor, items in sorted(grouped.items(), key=lambda x:(-len(x[1]), x[0])):
                 subtotal = sum(i.amount for i in items)
                 cnt = len(items)
                 with st.expander(f"{vendor} — {cnt} tx — {cur} {subtotal:,.2f}"):
@@ -649,18 +728,17 @@ if "transactions" in st.session_state and st.session_state.transactions:
 
     with tab2:
         st.subheader("Withdrawals Summary (by Vendor)")
-        if st.session_state.withdrawal_df is None or st.session_state.withdrawal_df.empty:
+        df = st.session_state.withdrawal_df
+        if df is None or df.empty:
             st.info("No withdrawals found.")
         else:
-            st.dataframe(st.session_state.withdrawal_df, use_container_width=True, hide_index=True)
-
+            st.dataframe(df, use_container_width=True, hide_index=True)
             wds = [t for t in transactions if t.amount < 0]
             grouped = {}
             for t in wds:
                 key = t.vendor or "UNKNOWN"
                 grouped.setdefault(key, []).append(t)
-
-            for vendor, items in sorted(grouped.items(), key=lambda x: (-len(x[1]), x[0])):
+            for vendor, items in sorted(grouped.items(), key=lambda x:(-len(x[1]), x[0])):
                 subtotal = sum(abs(i.amount) for i in items)
                 cnt = len(items)
                 with st.expander(f"{vendor} — {cnt} tx — {cur} {subtotal:,.2f}"):
@@ -687,17 +765,17 @@ if "transactions" in st.session_state and st.session_state.transactions:
         } for t in transactions])
         st.dataframe(all_df, use_container_width=True, hide_index=True)
 
-    # Download buttons
+    # Downloads
     st.header("📥 Download")
-    col1, col2, col3 = st.columns(3)
-    with col1:
+    c1,c2,c3 = st.columns(3)
+    with c1:
         dep_csv = st.session_state.deposit_df.to_csv(index=False) if (st.session_state.deposit_df is not None and not st.session_state.deposit_df.empty) else ""
         st.download_button("⬇ Deposits CSV", dep_csv, "deposits.csv", mime="text/csv")
-    with col2:
+    with c2:
         wd_csv = st.session_state.withdrawal_df.to_csv(index=False) if (st.session_state.withdrawal_df is not None and not st.session_state.withdrawal_df.empty) else ""
         st.download_button("⬇ Withdrawals CSV", wd_csv, "withdrawals.csv", mime="text/csv")
-    with col3:
+    with c3:
         pnl_csv = st.session_state.pl_df.to_csv(index=False) if (st.session_state.pl_df is not None and not st.session_state.pl_df.empty) else ""
         st.download_button("⬇ P&L CSV", pnl_csv, "pnl.csv", mime="text/csv")
 
-    st.success("Report generated. Verify totals against your original statement.")
+    st.success("✅ Report generated. Verify totals against your bank statement.")
