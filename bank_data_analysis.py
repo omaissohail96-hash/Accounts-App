@@ -1,16 +1,16 @@
 # bank_data_analysis.py
-# Single-file hybrid Bank Statement Analyzer (deterministic + optional LLM)
-# Save as bank_data_analysis.py and run: streamlit run bank_data_analysis.py
+# Option B — Rewritten & optimized single-file Bank Statement Analyzer (Deterministic + optional LLM)
+# Run: streamlit run bank_data_analysis.py
 
 import io
-import os
 import re
 import json
-import tempfile
 import logging
+import tempfile
 from dataclasses import dataclass, asdict
-from typing import List, Tuple, Dict, Any, Optional
 from datetime import datetime
+from typing import List, Tuple, Dict, Any, Optional
+
 import pdfplumber
 import pandas as pd
 import streamlit as st
@@ -21,6 +21,7 @@ try:
 except Exception:
     openai = None
 
+# Logging
 logger = logging.getLogger("bank_analyzer")
 logging.basicConfig(level=logging.INFO)
 
@@ -40,154 +41,127 @@ class Transaction:
     needs_review: bool = False
 
 # ----------------------------
-# Helper: robust amount cleaner (single place)
+# Utilities
 # ----------------------------
-def clean_amount_token(token: str) -> Optional[float]:
-    """
-    Convert tokens like:
-      "29 083.00", "2,500", "(2,500.00)", "+2500", "-2500", "2500.00"
-    Returns signed float (negative if parentheses or leading '-'), or None if can't parse.
-    """
+# Date recognition (many formats)
+DATE_RE = re.compile(r'^(\d{1,2}/\d{1,2})')
+
+
+AMOUNT_RE = re.compile(r'([+\-]?\(?\s*\d{1,3}(?:[,\s]\d{3})*(?:\.\d{1,2})\)?)')
+
+SUMMARY_KEYWORDS = [
+    "summary", "daily ending", "fees section", "beginning balance",
+    "ending balance", "total deposits", "total withdrawals",
+    "complete checking", "page", "instance", "amount", "balance",
+    "checking summary", "deposits and additions", "checks paid", "atm & debit"
+]
+
+def _normalize_date_token(token: str) -> str:
+    if not token:
+        return ""
+    t = token.strip().replace(",", "")
+    formats = [
+        "%d/%m/%Y", "%d/%m/%y",
+        "%m/%d/%Y", "%m/%d/%y",
+        "%Y-%m-%d",
+        "%d-%m-%Y", "%d-%m-%y",
+        "%d %b %Y", "%d %b %y",
+        "%d %B %Y", "%d %B %y",
+        "%b %d %Y", "%b %d, %Y", "%B %d %Y",
+        "%m/%d", "%d/%m"
+    ]
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(t, fmt)
+            # If format had no year (mm/dd), assume current year
+            if "%Y" not in fmt and "%y" not in fmt:
+                dt = dt.replace(year=datetime.now().year)
+            return dt.strftime("%Y-%m-%d")
+        except Exception:
+            continue
+    # heuristics: "241203" style? not handling here — return raw
+    return t
+
+def _clean_amount_token(token: str) -> Optional[float]:
     if not token:
         return None
-
     s = str(token).strip()
-
-    # If token contains many digits (like trace IDs) treat with caution:
-    digits_only = re.sub(r'\D', '', s)
-    if len(digits_only) >= 13:
-        # too many digits — likely not a monetary value
-        return None
-
     negative = False
-    # parentheses = negative (common)
     if s.startswith("(") and s.endswith(")"):
         negative = True
-        s = s[1:-1].strip()
-
-    # leading sign
     if s.startswith("-"):
         negative = True
-        s = s[1:].strip()
-    elif s.startswith("+"):
-        s = s[1:].strip()
-
-    # remove currency symbols and letters
-    s = re.sub(r'[A-Za-z₹₨$€£,]', '', s)
-    # normalize spaces between thousands "29 083.00"
-    s = s.replace(" ", "")
-    # handle multiple dots like "1.234.567,89" — we don't try locale detection here; keep as simple float
-    # if there are more than 1 dot, join all but last as integer part
-    parts = s.split(".")
-    if len(parts) > 2:
-        s = "".join(parts[:-1]) + "." + parts[-1]
-
-    # If empty after cleaning:
+    # Remove currency letters & symbols, but not dot or minus
+    s = re.sub(r'[A-Za-z\$£€₹]', '', s)
+    # Remove commas and spaces used as thousand separators
+    s = s.replace(',', '').replace(' ', '')
+    s = re.sub(r'[^0-9\.\-]', '', s)
     if not re.search(r'\d', s):
         return None
-
+    # if multiple dots, keep last as decimal separator
+    parts = s.split('.')
+    if len(parts) > 2:
+        s = "".join(parts[:-1]) + "." + parts[-1]
     try:
         val = float(s)
     except Exception:
-        # try integer
-        try:
-            val = int(s)
-        except Exception:
-            return None
-
+        return None
     return -abs(val) if negative else abs(val)
 
+def _vendor_cleanup(raw: str) -> str:
+    if not raw:
+        return "UNKNOWN"
+    v = raw.strip()
+    v = re.sub(r'Orig Co Name[:\s]*', '', v, flags=re.I)
+    v = re.sub(r'Ind Name[:\s]*', '', v, flags=re.I)
+    # remove trace, id, trace#, sec: etc
+    v = re.sub(r'trace#?:?\s*\S+', '', v, flags=re.I)
+    v = re.sub(r'orig id[:\s]*\S+', '', v, flags=re.I)
+    v = re.sub(r'descr:?', '', v, flags=re.I)
+    v = re.sub(r'\b(sec|sec:|ccd|web|ccd|ccd:|entry)\b', '', v, flags=re.I)
+    v = re.sub(r'[^A-Za-z0-9\-\&\.\s]', ' ', v)
+    v = re.sub(r'\s{2,}', ' ', v).strip()
+    if not v:
+        return "UNKNOWN"
+    # Common normalizations
+    v = v.title()
+    v = re.sub(r'\bShopifypmt\b', 'Shopify', v, flags=re.I)
+    v = re.sub(r'\bShopifypmnt\b', 'Shopify', v, flags=re.I)
+    v = re.sub(r'\bTiktok\b', 'TikTok', v, flags=re.I)
+    v = re.sub(r'\bAmazoncom\b', 'Amazon', v, flags=re.I)
+    v = re.sub(r'\bEbay\b', 'Ebay', v, flags=re.I)
+    # short cutoff
+    if len(v) > 60:
+        v = v[:60] + "..."
+    return v
+
 # ----------------------------
-# Document parser: PDF tables + text fallback + CSV/DOCX
+# Document parsing
 # ----------------------------
 class DocumentParser:
-    COL_DATE = re.compile(r"date", re.I)
-    COL_DEBIT = re.compile(r"debit|withdraw|paid|sent|out|dr", re.I)
-    COL_CREDIT = re.compile(r"credit|deposit|received|in|cr", re.I)
-    COL_DESC = re.compile(r"desc|details|narration|merchant|vendor|description", re.I)
-
-    def _clean_vendor(self, desc: str) -> str:
-        if not desc:
-            return "UNKNOWN"
-        v = re.sub(r'\s{2,}', ' ', desc).strip()
-        v = " ".join([w.upper() if w.isupper() and len(w) <= 4 else w.title() for w in v.split()])
-        return v or "UNKNOWN"
-
-    def parse_pdf_table(self, file_bytes: bytes) -> List[Transaction]:
-        txs: List[Transaction] = []
+    def parse_pdf_text_lines(self, file_bytes: bytes) -> Tuple[List[str], List[int]]:
+        unreadable_pages = []
+        lines = []
         try:
             with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
                 for page in pdf.pages:
-                    tables = page.extract_tables()
-                    if not tables:
-                        continue
-                    for table in tables:
-                        if len(table) < 2:
-                            continue
-                        header = [ (c or "").strip() for c in table[0] ]
-                        date_idx = next((i for i,h in enumerate(header) if self.COL_DATE.search(h)), None)
-                        debit_idx = next((i for i,h in enumerate(header) if self.COL_DEBIT.search(h)), None)
-                        credit_idx = next((i for i,h in enumerate(header) if self.COL_CREDIT.search(h)), None)
-                        desc_idx = next((i for i,h in enumerate(header) if self.COL_DESC.search(h)), None)
-
-                        if date_idx is None or (debit_idx is None and credit_idx is None):
-                            continue
-
-                        for row in table[1:]:
-                            if not row or len(row) <= max(date_idx, debit_idx or 0, credit_idx or 0):
-                                continue
-                            date = (row[date_idx] or "").strip()
-                            desc = (row[desc_idx] or "").strip() if desc_idx is not None else ""
-                            debit = (row[debit_idx] or "").strip() if debit_idx is not None else ""
-                            credit = (row[credit_idx] or "").strip() if credit_idx is not None else ""
-                            amount = None
-                            direction = None
-
-                            # prefer credit column as deposit
-                            if credit:
-                                cleaned = re.sub(r'[^\d\-\.\(\),\s\+]', '', credit)
-                                amt = clean_amount_token(cleaned)
-                                if amt is not None:
-                                    amount = abs(amt)
-                                    direction = "deposit"
-
-                            if amount is None and debit:
-                                cleaned = re.sub(r'[^\d\-\.\(\),\s\+]', '', debit)
-                                amt = clean_amount_token(cleaned)
-                                if amt is not None:
-                                    amount = abs(amt)
-                                    direction = "withdrawal"
-
-                            # fallback: detect CR/DR signs in desc if direction unknown
-                            if amount is not None and direction is None:
-                                low = desc.lower()
-                                if "cr" in low or "credit" in low or "received" in low:
-                                    direction = "deposit"
-                                elif "dr" in low or "debit" in low or "sent" in low or "purchase" in low:
-                                    direction = "withdrawal"
-
-                            if amount is None or direction is None:
-                                continue
-
-                            signed = amount if direction == "deposit" else -amount
-
-                            txs.append(Transaction(
-                                date=date or "",
-                                transaction_type=direction,
-                                vendor=self._clean_vendor(desc),
-                                amount=signed,
-                                description=desc,
-                                raw_line=" | ".join(str(x) for x in row)
-                            ))
+                    txt = page.extract_text() or ""
+                    txt = txt.replace('\xa0', ' ')
+                    if txt.strip():
+                        page_lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
+                        lines.extend(page_lines)
+                    else:
+                        unreadable_pages.append(page.page_number)
+            return lines, unreadable_pages
         except Exception as e:
-            logger.exception("parse_pdf_table failed: %s", e)
-        return txs
+            logger.exception("PDF read failed: %s", e)
+            return [], []
 
     def parse_document(self, file_bytes: bytes, filename: str) -> Tuple[List[str], bool, List[int]]:
         ext = filename.lower().split('.')[-1]
-        unreadable_pages: List[int] = []
-        lines: List[str] = []
-
+        if ext == "pdf":
+            lines, unreadable = self.parse_pdf_text_lines(file_bytes)
+            return lines, len(lines) > 0, unreadable
         if ext == "csv":
             try:
                 txt = file_bytes.decode("utf-8", errors="ignore")
@@ -195,26 +169,10 @@ class DocumentParser:
                 txt = str(file_bytes)
             lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
             return lines, True, []
-
-        if ext == "pdf":
-            try:
-                with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-                    for page in pdf.pages:
-                        txt = page.extract_text() or ""
-                        txt = txt.replace('\xa0',' ')
-                        if txt.strip():
-                            lines.extend([ln.strip() for ln in txt.splitlines() if ln.strip()])
-                        else:
-                            unreadable_pages.append(page.page_number)
-                return lines, len(lines) > 0, unreadable_pages
-            except Exception as e:
-                logger.exception("PDF text parse failed: %s", e)
-                return [], False, []
-
-        if ext in ("doc","docx"):
+        if ext in ("doc", "docx"):
             try:
                 import docx
-                tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.'+ext)
+                tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.' + ext)
                 tmp.write(file_bytes)
                 tmp.flush()
                 doc = docx.Document(tmp.name)
@@ -223,7 +181,6 @@ class DocumentParser:
             except Exception as e:
                 logger.exception("DOCX parse failed: %s", e)
                 return [], False, []
-
         try:
             txt = file_bytes.decode("utf-8", errors="ignore")
             lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
@@ -231,193 +188,222 @@ class DocumentParser:
         except Exception:
             return [], False, []
 
-    def extract_transactions(self, file_bytes: bytes, filename: str) -> Tuple[List[Transaction], Dict[str,Any]]:
-        ext = filename.lower().split('.')[-1]
-        if ext == "pdf":
-            table_tx = self.parse_pdf_table(file_bytes)
-            if table_tx:
-                return table_tx, {"parsed_from":"pdf-table", "transactions_extracted": len(table_tx)}
-
-        lines, ok, unreadable = self.parse_document(file_bytes, filename)
-        if not ok or not lines:
-            return [], {"parsed_from":"failed", "raw_lines": len(lines)}
-
-        fallback = FallbackStatementParser()
-        txs, meta = fallback.parse_statement(lines)
-        meta["raw_lines"] = len(lines)
-        return txs, meta
-
 # ----------------------------
-# Deterministic fallback parser (robust)
+# Robust fallback parser (date-segmented)
 # ----------------------------
 class FallbackStatementParser:
-    # broad date patterns
-    DATE_RE = re.compile(
-    r'(\b\d{1,2}[/\-. ]\d{1,2}[/\-. ]\d{2,4}\b|\b\d{1,2}[/\-. ]\d{1,2}\b|'
-    r'\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[ .-]?\d{1,2}[, ]*\d{2,4}?\b)',
-    re.I
-)
+    """
+    Parser tuned for Chase-style statements that contain explicit section headings:
+      - Deposits and Additions
+      - Checks Paid
+      - ATM & Debit Card Withdrawals
+      - Electronic Withdrawals
+      - Fees
+    It strips summary blocks and totals, segments transactions by date, and uses section context
+    to determine deposit vs withdrawal.
+    """
 
-    # amount-like tokens: allow spaces/comma thousands, parentheses, leading +/-.
-    AMOUNT_RE = re.compile(r'([+\-]?\(?\s*\d{1,3}(?:[,\s]\d{3})*(?:\.\d{2})?\)?)')
+    DATE_RE = re.compile(r'^(\d{1,2}/\d{1,2})\b')
+    AMOUNT_RE = re.compile(r'([+\-]?\(?\s*\d{1,3}(?:[,\s]\d{3})*(?:\.\d{1,2})\)?)')
 
-    deposit_keys = ["deposit", "received", "credit", "salary", "refund", "payroll", "payment received"]
-    withdraw_keys = ["withdraw", "purchase", "sent", "payment", "debit", "card", "pos", "paid to"]
-    def _normalize_date(self, d: str) -> str:
-        d = d.strip()
-        # Try DD/MM or MM/DD without year
-        m = re.match(r'(\d{1,2})[/\-. ](\d{1,2})$', d)
+    # Section header tokens (targeting the exact sections you listed + small variants)
+    SECTION_PATTERNS = {
+        "DEPOSITS": re.compile(r'\bdeposits\s+and\s+additions\b', re.I),
+        "CHECKS": re.compile(r'\bchecks\s+paid\b', re.I),
+        "ATM": re.compile(r'\batm\b.*\bdebit\b|\batm\s*&\s*debit\b|\batm\s+withdrawal\b', re.I),
+        "ELECTRONIC_WITHDRAWALS": re.compile(r'\belectronic\s+withdrawals?\b', re.I),
+        "FEES": re.compile(r'\bfees?\b', re.I),
+    }
+
+    SUMMARY_BLACKLIST = re.compile(
+        r'\b(total deposits|total withdrawals|beginning balance|ending balance|closing balance|statement|page of|deposits and additions summary|total)\b',
+        re.I
+    )
+
+    def _extract_vendor(self, block_text: str, date_raw: str, amount_token: str) -> str:
+        # first try common Chase patterns
+        m = re.search(r'Orig Co Name[:\s]*([A-Za-z0-9\-\&\.\s\\\/\*]+?)(?:\s+Orig ID|\s+Descr|Trace#|Eed:|Descr:|Ind Name|Trn:|$)', block_text, re.I)
         if m:
-            day, month = m.group(1), m.group(2)
-            # Assume current year
-            year = datetime.now().year
-            try:
-                obj = datetime(int(year), int(day), int(month))
-                return obj.strftime("%Y-%m-%d")
-            except:
-                try:
-                    obj = datetime(int(year), int(month), int(day))
-                    return obj.strftime("%Y-%m-%d")
-                except:
-                    return d
+            v = m.group(1).strip()
+        else:
+            m2 = re.search(r'Ind Name[:\s]*([A-Za-z0-9\-\&\.\s\\\/\*]+?)(?:Trace#|Trn:|$)', block_text, re.I)
+            if m2:
+                v = m2.group(1).strip()
+            else:
+                # fallback: take words after date in first line
+                first_line = block_text.splitlines()[0] if '\n' in block_text else block_text
+                after_date = re.sub(self.DATE_RE, '', first_line, count=1).strip()
+                after_date = re.sub(r'[\d\|\-:\/\.\(\)\[\],]', ' ', after_date)
+                after_date = re.sub(r'\s{2,}', ' ', after_date).strip()
+                v = " ".join(after_date.split()[:6]) if after_date else "UNKNOWN"
 
-        # Full date formats
-        try:
-            for fmt in ("%d/%m/%Y","%m/%d/%Y","%d-%m-%Y","%m-%d-%Y",
-                        "%d/%m/%y","%m/%d/%y","%d-%m-%y","%m-%d-%y"):
-                try:
-                    return datetime.strptime(d, fmt).strftime("%Y-%m-%d")
-                except:
-                    pass
-        except:
-            return d
+        # cleanup
+        v = re.sub(r'\b(sec|sec:|ccd|web|descr|trace#|trace)\b', ' ', v, flags=re.I)
+        v = re.sub(r'[^A-Za-z0-9\-\&\.\s]', ' ', v)
+        v = re.sub(r'\s{2,}', ' ', v).strip()
+        if not v:
+            return "UNKNOWN"
+        # shorten overly long vendors
+        if len(v) > 60:
+            v = v[:60].strip() + "..."
+        return v.title()
 
-        return d
+    def _is_summary_line(self, ln: str) -> bool:
+        if not ln or not ln.strip():
+            return True
 
-    def _infer_vendor(self, line: str, date_str: str, amount_token: str) -> str:
-        tmp = line
-        if date_str:
-            tmp = tmp.replace(date_str, ' ')
-        if amount_token:
-            tmp = tmp.replace(amount_token, ' ')
-        tmp = re.sub(r'\b(PKR|USD|EUR|GBP|AED|CAD|AUD|Rs|Balance|Available)\b', ' ', tmp, flags=re.I)
-        tmp = re.sub(r'[\d\|\-:\/\.]', ' ', tmp)
-        tmp = re.sub(r'[\(\)\[\],]', ' ', tmp)
-        tmp = re.sub(r'\s{2,}', ' ', tmp).strip()
-        return tmp if tmp else "UNKNOWN"
+        low = ln.lower().strip()
 
-    def parse_statement(self, lines: List[str]) -> Tuple[List[Transaction], Dict[str,Any]]:
+        SUMMARY_PHRASES = [
+            "summary", 
+            "daily ending", 
+            "beginning balance",
+            "ending balance",
+            "closing balance",
+            "statement period",
+            "page ",
+        ]
+
+        # ONLY skip PURE summary lines
+        for phrase in SUMMARY_PHRASES:
+            # must match whole line or be clearly a header
+            if low.startswith(phrase) or low.endswith(phrase):
+                return True
+
+        # Skip "Total ..." ONLY when entire line starts with Total
+        if re.match(r'^total\b', low):
+            return True
+
+        # DO NOT skip anything containing the word "deposit"
+        # DO NOT skip anything containing numbers like 12/02
+        # DO NOT skip ACH lines, Orig Co Name lines, etc.
+        return False
+
+
+    def parse_statement(self, lines: List[str]) -> Tuple[List[Transaction], Dict[str, Any]]:
         txs: List[Transaction] = []
 
+        # 1) Pre-clean: remove obvious summary/header lines anywhere
+        cleaned = []
         for ln in lines:
-            low = ln.lower().strip()
-            # skip trivial lines
-            if not ln.strip() or any(k in low for k in ("available balance", "closing balance", "total", "statement")):
+            s = ln.strip()
+            if not s:
                 continue
-
-            d_match = self.DATE_RE.search(ln)
-            date_str = self._normalize_date(d_match.group(1)) if d_match else ""
-
-
-            # find all amount-like tokens
-            matches = list(self.AMOUNT_RE.finditer(ln))
-            if not matches:
+            if self._is_summary_line(s):
                 continue
+            cleaned.append(s)
 
-            # build tokens with spans
-            tokens = [(m.group(1), m.start(1), m.end(1)) for m in matches]
+        if not cleaned:
+            return [], {"parsed_from": "fallback", "transactions_extracted": 0}
 
-            # heuristic choose:
-            chosen_token = None
-            chosen_span = (0, len(ln))
+        # 2) Walk lines, detect section context and build date-started blocks
+        blocks: List[Tuple[List[str], str]] = []
+        current_section = "UNKNOWN"
+        current_block: Optional[List[str]] = None
 
-            # 1) prefer token with explicit sign or parentheses
-            for tok, s, e in tokens:
-                if tok.strip().startswith("+") or tok.strip().startswith("-") or ("(" in tok and ")" in tok):
-                    chosen_token = tok
-                    chosen_span = (s, e)
+        for ln in cleaned:
+            # update section if matches
+            for sec_name, pattern in self.SECTION_PATTERNS.items():
+                if pattern.search(ln):
+                    current_section = sec_name
+                    # finish any open block when section changes
+                    if current_block:
+                        blocks.append((current_block, current_section))
+                        current_block = None
+                    # don't append the section header as a transaction line
+                    current_block = None
                     break
+            else:
+                # no section match — treat as potential transaction content
+                if self.DATE_RE.search(ln):
+                    # start a new block: finish previous
+                    if current_block:
+                        blocks.append((current_block, current_section))
+                    current_block = [ln]
+                else:
+                    # continuation line
+                    if current_block is not None:
+                        current_block.append(ln)
+                    else:
+                        # stray non-date lines outside a block — ignore
+                        continue
 
-            # 2) prefer token with nearby currency
-            if chosen_token is None:
-                for tok, s, e in tokens:
-                    ctx_start = max(0, s-12)
-                    context = ln[ctx_start:s].upper()
-                    if any(cur in context for cur in ('PKR','USD','EUR','GBP','AED','CAD','AUD','RS')):
-                        chosen_token = tok
-                        chosen_span = (s, e)
-                        break
+        # finalize last block
+        if current_block:
+            blocks.append((current_block, current_section))
 
-            # 3) prefer token nearest to line end
-            if chosen_token is None:
-                best = None
-                best_dist = None
-                L = len(ln)
-                for tok,s,e in tokens:
-                    dist = L - e
-                    if best is None or dist < best_dist:
-                        best = (tok,s,e)
-                        best_dist = dist
-                if best:
-                    chosen_token, chosen_span = best[0], (best[1], best[2])
-
-            # 4) fallback: last token
-            if chosen_token is None and tokens:
-                chosen_token, chosen_span = tokens[-1][0], (tokens[-1][1], tokens[-1][2])
-
-            if not chosen_token:
+        # 3) Parse each block: pick last amount, use section to determine direction
+        for block_lines, section in blocks:
+            block_text = " ".join(block_lines)
+            if re.match(r'^(end|ending|end daily|daily ending|end daily ending balance|through)', block_text.strip(), re.I):
                 continue
+            # safety: skip blocks that look like totals
+            if re.search(r'\btotal\b.*\d', block_text, re.I):
+                continue
+            # date from first line
+            d_match = self.DATE_RE.search(block_lines[0])
+            date_raw = d_match.group(0) if d_match else ""
+            try:
+                month, day = date_raw.split('/')
+                year = datetime.now().year
+                date_norm = f"{year}-{int(month):02d}-{int(day):02d}"
+            except:
+                date_norm = ""
 
-            # Try to parse chosen token
-            amt_val = clean_amount_token(chosen_token)
-            # If chosen token invalid, try other tokens (reverse)
+
+            # amounts: pick last
+            amounts = self.AMOUNT_RE.findall(block_text)
+            if not amounts:
+                continue
+            amount_raw = amounts[-1]
+            amt_val = _clean_amount_token(amount_raw)
             if amt_val is None:
-                for tok, s, e in tokens[::-1]:
-                    parsed = clean_amount_token(tok)
-                    if parsed is not None:
-                        amt_val = parsed
-                        chosen_token = tok
-                        chosen_span = (s, e)
-                        break
-            if amt_val is None:
                 continue
 
-            # Determine sign primarily from token itself
-            tokstr = chosen_token.strip()
-            if tokstr.startswith("-") or (tokstr.startswith("(") and tokstr.endswith(")")):
-                amt_val = -abs(amt_val)
-            elif tokstr.startswith("+"):
-                amt_val = abs(amt_val)
+            # determine direction by section (strict)
+            if section == "DEPOSITS":
+                direction = "deposit"
+                signed_amount = abs(amt_val)
+            elif section in ("CHECKS", "ATM", "ELECTRONIC_WITHDRAWALS", "FEES"):
+                direction = "withdrawal"
+                signed_amount = -abs(amt_val)
+            else:
+                # unknown section — fallback to heuristics
+                low_block = block_text.lower()
+                if amount_raw.strip().startswith("(") or "-" in amount_raw:
+                    direction = "withdrawal"
+                    signed_amount = -abs(amt_val)
+                elif any(k in low_block for k in ["deposit", "credit", "received", "payout"]):
+                    direction = "deposit"
+                    signed_amount = abs(amt_val)
+                else:
+                    # safer default: withdrawal
+                    direction = "withdrawal"
+                    signed_amount = -abs(amt_val)
 
-            # If token had no explicit sign, use keywords as fallback
-            if not (tokstr.startswith(("+","-")) or (tokstr.startswith("(") and tokstr.endswith(")"))):
-                if any(k in low for k in self.withdraw_keys):
-                    amt_val = -abs(amt_val)
-                if any(k in low for k in self.deposit_keys):
-                    amt_val = abs(amt_val)
+            # vendor extraction
+            vendor = self._extract_vendor(block_text, date_raw, amount_raw)
 
-            # Sanity: skip ridiculously large numbers (IDs)
-            if abs(amt_val) > 1e12:
-                continue
-
-            vendor = self._infer_vendor(ln, date_str, chosen_token).title()
-            if not vendor:
-                vendor = "UNKNOWN"
+            # optional: flag very large items for review (adjust threshold as needed)
+            needs_review = abs(signed_amount) >= 20000.0
 
             txs.append(Transaction(
-                date=date_str,
-                transaction_type="deposit" if amt_val > 0 else "withdrawal",
+                date=date_norm,
+                transaction_type='deposit' if signed_amount > 0 else 'withdrawal',
                 vendor=vendor,
-                amount=amt_val,
-                description=ln,
-                raw_line=ln
+                amount=signed_amount,
+                description=block_text,
+                raw_line=block_text,
+                section=section,
+                needs_review=needs_review
             ))
 
-        meta = {"parsed_from":"universal_fallback", "transactions_extracted": len(txs)}
+        meta = {"parsed_from": "chase_sectioned_fallback", "transactions_extracted": len(txs)}
         return txs, meta
 
+
 # ----------------------------
-# (Optional) LLM enhancer — unchanged logic but uses clean amounts
+# LLM enhancer (unchanged but safe)
 # ----------------------------
 class LLMEnhancer:
     def __init__(self, model: str = "gpt-4o-mini", max_tokens: int = 1200):
@@ -467,7 +453,7 @@ class LLMEnhancer:
             resp = openai.ChatCompletion.create(
                 model=self.model,
                 temperature=0,
-                messages=[{"role":"user","content":prompt}],
+                messages=[{"role": "user", "content": prompt}],
                 max_tokens=self.max_tokens
             )
             content = resp.choices[0].message["content"]
@@ -493,7 +479,8 @@ class LLMEnhancer:
             if len(enhanced) != len(rows):
                 logger.warning("LLM returned different count — skipping enhancement.")
                 return transactions
-            return enhanced + transactions[200:]
+            final = enhanced + transactions[200:]
+            return final
         except Exception as e:
             logger.exception("LLM enhancement error: %s", e)
             return transactions
@@ -502,6 +489,9 @@ class LLMEnhancer:
 # Categorizer & dedupe
 # ----------------------------
 class TransactionCategorizer:
+    def __init__(self):
+        pass
+
     def process_transactions(self, txs: List[Transaction]) -> List[Transaction]:
         for t in txs:
             if t.amount > 0:
@@ -512,6 +502,10 @@ class TransactionCategorizer:
                     t.category = "Transport"
                 elif 'starbuck' in low or 'pizza' in low or 'restaurant' in low:
                     t.category = "Food"
+                elif 'wise' in low:
+                    t.category = "Transfer"
+                elif 'shopify' in low:
+                    t.category = "Sales"
                 else:
                     t.category = "Expense"
         return txs
@@ -520,9 +514,11 @@ class TransactionCategorizer:
         seen = {}
         order = []
         for t in txs:
-            key = (t.date, round(t.amount,2), re.sub(r'\W+','', (t.vendor or '').lower()))
+            vendor_norm = re.sub(r'\W+', '', (t.vendor or '').lower())
+            key = (t.date, round(t.amount, 2), vendor_norm)
             if key in seen:
                 existing = seen[key]
+                # prefer existing that is not needs_review
                 if existing.needs_review and not t.needs_review:
                     seen[key] = t
             else:
@@ -534,7 +530,7 @@ class TransactionCategorizer:
 # Report generator
 # ----------------------------
 class ReportGenerator:
-    def generate_summary_statistics(self, transactions: List[Transaction]) -> Dict[str,Any]:
+    def generate_summary_statistics(self, transactions: List[Transaction]) -> Dict[str, Any]:
         total_deposits = sum(t.amount for t in transactions if t.amount > 0)
         total_withdrawals = sum(-t.amount for t in transactions if t.amount < 0)
         return {
@@ -553,13 +549,13 @@ class ReportGenerator:
             return pd.DataFrame()
         df = pd.DataFrame([asdict(t) for t in deps])
         df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0.0)
-        grp = df.groupby('vendor').agg({'amount':'sum', 'raw_line':'count'}).reset_index()
+        grp = df.groupby('vendor').agg({'amount': 'sum', 'raw_line': 'count'}).reset_index()
         grp.columns = ['Source/Vendor', 'Subtotal ($)', 'Transaction Count']
         grp['Subtotal ($)'] = grp['Subtotal ($)'].astype(float)
         total = grp['Subtotal ($)'].sum()
-        total_row = pd.DataFrame([{'Source/Vendor':'TOTAL DEPOSITS','Subtotal ($)': total, 'Transaction Count': grp['Transaction Count'].sum()}])
+        total_row = pd.DataFrame([{'Source/Vendor': 'TOTAL DEPOSITS', 'Subtotal ($)': total, 'Transaction Count': grp['Transaction Count'].sum()}])
         out = pd.concat([grp, total_row], ignore_index=True)
-        return out[['Source/Vendor','Transaction Count','Subtotal ($)']]
+        return out[['Source/Vendor', 'Transaction Count', 'Subtotal ($)']]
 
     def generate_withdrawals_summary(self, transactions: List[Transaction]) -> pd.DataFrame:
         wds = [t for t in transactions if t.amount < 0]
@@ -568,12 +564,12 @@ class ReportGenerator:
         df = pd.DataFrame([asdict(t) for t in wds])
         df['amount'] = df['amount'].abs()
         df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0.0)
-        grp = df.groupby('vendor').agg({'amount':'sum', 'raw_line':'count'}).reset_index()
-        grp.columns = ['Vendor','Subtotal ($)','Transaction Count']
+        grp = df.groupby('vendor').agg({'amount': 'sum', 'raw_line': 'count'}).reset_index()
+        grp.columns = ['Vendor', 'Subtotal ($)', 'Transaction Count']
         total = grp['Subtotal ($)'].sum()
-        total_row = pd.DataFrame([{'Vendor':'TOTAL WITHDRAWALS','Subtotal ($)': total, 'Transaction Count': grp['Transaction Count'].sum()}])
+        total_row = pd.DataFrame([{'Vendor': 'TOTAL WITHDRAWALS', 'Subtotal ($)': total, 'Transaction Count': grp['Transaction Count'].sum()}])
         out = pd.concat([grp, total_row], ignore_index=True)
-        return out[['Vendor','Transaction Count','Subtotal ($)']]
+        return out[['Vendor', 'Transaction Count', 'Subtotal ($)']]
 
     def generate_pl_report(self, transactions: List[Transaction]) -> pd.DataFrame:
         s = self.generate_summary_statistics(transactions)
@@ -581,54 +577,50 @@ class ReportGenerator:
         total_expenses = s['Total Withdrawal Amount']
         net = s['Net Income']
         return pd.DataFrame([
-            {'Category':'Total Income','Amount ($)': total_income},
-            {'Category':'Total Expenses','Amount ($)': -total_expenses},
-            {'Category':'NET INCOME','Amount ($)': net}
+            {'Category': 'Total Income', 'Amount ($)': total_income},
+            {'Category': 'Total Expenses', 'Amount ($)': -total_expenses},
+            {'Category': 'NET INCOME', 'Amount ($)': net}
         ])
 
 # ----------------------------
-# Streamlit UI (single-file)
+# Streamlit UI
 # ----------------------------
 st.set_page_config(page_title="Bank Statement Analyzer (Hybrid)", layout="wide")
-st.title("💼 Bank Statement Analyzer — Deterministic + LLM (Hybrid)")
+st.title("💼 Bank Statement Analyzer — Rewritten Parser (Chase-first, Robust)")
 
 st.markdown(
-    "Upload a bank statement (PDF / CSV / DOCX). The app extracts deterministically, "
-    "then optionally cleans rows with an LLM (gpt-4o-mini). Totals are computed from parsed numeric amounts."
+    "Upload a bank statement (PDF / CSV / DOCX). The app uses a robust deterministic parser optimized for Chase-style multi-line "
+    "statements, with optional LLM enhancement. Totals and subtotals are computed from parsed numeric amounts."
 )
 
 with st.sidebar:
     st.header("Settings")
-    use_llm = st.checkbox("Enable LLM enhancement (cost)", value=True)
+    use_llm = st.checkbox("Enable LLM enhancement (cost)", value=False)
     llm_model = st.selectbox("LLM model", ["gpt-4o-mini"], index=0)
-    st.write("Put your OpenAI key in `.streamlit/secrets.toml` as: `OPENAI_API_KEY = \"sk-...\"`")
+    st.markdown("Put your OpenAI key in `.streamlit/secrets.toml` as: `OPENAI_API_KEY = \"sk-...\"`")
+    st.markdown("Sort vendor summaries by:")
+    sort_by = st.selectbox("Sort by", ["Subtotal (desc)", "Transaction Count (desc)"])
 
-uploaded = st.file_uploader("Upload statement (PDF, CSV, DOCX)", type=["pdf","csv","doc","docx"])
+uploaded = st.file_uploader("Upload statement (PDF, CSV, DOCX)", type=["pdf", "csv", "doc", "docx"])
 
 if uploaded:
     st.info(f"File: {uploaded.name} — {uploaded.size/1024:.1f} KB")
-    currency = st.selectbox("Currency", ["PKR","USD","EUR","GBP","AED","CAD","AUD"], index=0)
+    currency = st.selectbox("Currency", ["PKR", "USD", "EUR", "GBP", "AED", "CAD", "AUD"], index=1)
 
     if st.button("Process Statement"):
         with st.spinner("Parsing & processing..."):
             file_bytes = uploaded.read()
             dp = DocumentParser()
+            lines, ok, unreadable = dp.parse_document(file_bytes, uploaded.name)
+            if not ok or len(lines) < 1:
+                st.error("Could not read text from file.")
+                if unreadable:
+                    st.warning(f"Unreadable pages: {unreadable}")
+                st.stop()
 
-            # Try table extraction first
-            txs_table = dp.parse_pdf_table(file_bytes) if uploaded.name.lower().endswith(".pdf") else []
-            if txs_table:
-                transactions = txs_table
-                parsed_from = "pdf-table"
-            else:
-                lines, ok, unreadable = dp.parse_document(file_bytes, uploaded.name)
-                if not ok or len(lines) < 1:
-                    st.error("Could not read text from file.")
-                    if unreadable:
-                        st.warning(f"Unreadable pages: {unreadable}")
-                    st.stop()
-                fallback = FallbackStatementParser()
-                transactions, meta = fallback.parse_statement(lines)
-                parsed_from = meta.get("parsed_from", "fallback")
+            fallback = FallbackStatementParser()
+            transactions, meta = fallback.parse_statement(lines)
+            parsed_from = meta.get("parsed_from", "fallback")
 
             if not transactions:
                 st.error("No transactions extracted.")
@@ -667,6 +659,20 @@ if uploaded:
             withdrawals_df = rg.generate_withdrawals_summary(transactions)
             pl_df = rg.generate_pl_report(transactions)
 
+            # Sorting vendor summary based on UI
+            if deposits_df is not None and not deposits_df.empty:
+                if sort_by == "Subtotal (desc)":
+                    deposits_df = deposits_df.sort_values("Subtotal ($)", ascending=False).reset_index(drop=True)
+                else:
+                    deposits_df = deposits_df.sort_values("Transaction Count", ascending=False).reset_index(drop=True)
+
+            if withdrawals_df is not None and not withdrawals_df.empty:
+                if sort_by == "Subtotal (desc)":
+                    withdrawals_df = withdrawals_df.sort_values("Subtotal ($)", ascending=False).reset_index(drop=True)
+                else:
+                    withdrawals_df = withdrawals_df.sort_values("Transaction Count", ascending=False).reset_index(drop=True)
+
+            # store in session
             st.session_state.transactions = transactions
             st.session_state.stats = stats
             st.session_state.deposit_df = deposits_df
@@ -677,7 +683,7 @@ if uploaded:
 
             st.success(f"Processed {len(transactions)} transactions ({parsed_from}).")
 
-# Dashboard display
+# Dashboard
 if "transactions" in st.session_state and st.session_state.transactions:
     transactions: List[Transaction] = st.session_state.transactions
     stats = st.session_state.stats
@@ -690,7 +696,6 @@ if "transactions" in st.session_state and st.session_state.transactions:
     c3.metric("Net Income", f"{cur} {stats['Net Income']:,.2f}")
     c4.metric("Transactions", stats['Total Transactions'])
 
-    # reconcile computed sums
     computed_deposits = sum(t.amount for t in transactions if t.amount > 0)
     computed_withdrawals = sum(-t.amount for t in transactions if t.amount < 0)
     if abs(computed_deposits - stats['Total Deposit Amount']) > 0.001 or abs(computed_withdrawals - stats['Total Withdrawal Amount']) > 0.001:
@@ -719,7 +724,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
                 cnt = len(items)
                 with st.expander(f"{vendor} — {cnt} tx — {cur} {subtotal:,.2f}"):
                     details = pd.DataFrame([{
-                        "Date": it.date,
+                        "Date": it.date or "",
                         "Amount": f"{cur} {it.amount:,.2f}",
                         "Description": it.description,
                         "Needs Review": "⚠ Yes" if it.needs_review else "✅ No"
@@ -743,7 +748,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
                 cnt = len(items)
                 with st.expander(f"{vendor} — {cnt} tx — {cur} {subtotal:,.2f}"):
                     details = pd.DataFrame([{
-                        "Date": it.date,
+                        "Date": it.date or "",
                         "Amount": f"{cur} {abs(it.amount):,.2f}",
                         "Description": it.description,
                         "Needs Review": "⚠ Yes" if it.needs_review else "✅ No"
@@ -757,7 +762,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
     with tab4:
         st.subheader("All Transactions")
         all_df = pd.DataFrame([{
-            "Date": t.date,
+            "Date": t.date or "",
             "Type": t.transaction_type,
             "Vendor": t.vendor,
             "Amount": f"{cur} {t.amount:,.2f}",
@@ -779,3 +784,4 @@ if "transactions" in st.session_state and st.session_state.transactions:
         st.download_button("⬇ P&L CSV", pnl_csv, "pnl.csv", mime="text/csv")
 
     st.success("✅ Report generated. Verify totals against your bank statement.")
+
