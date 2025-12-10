@@ -210,9 +210,10 @@ class FallbackStatementParser:
     SECTION_PATTERNS = {
         "DEPOSITS": re.compile(r'\bdeposits\s+and\s+additions\b', re.I),
         "CHECKS": re.compile(r'\bchecks\s+paid\b', re.I),
-        "ATM": re.compile(r'\batm\b.*\bdebit\b|\batm\s*&\s*debit\b|\batm\s+withdrawal\b', re.I),
+        "ATM": re.compile(r'\batm\b.*\bdebit\b|\batm\s*&\s*debit\b|\batm\s+withdrawal\b|\batm\s*&\s*debit\s*card\s*withdrawals?', re.I),
         "ELECTRONIC_WITHDRAWALS": re.compile(r'\belectronic\s+withdrawals?\b', re.I),
         "FEES": re.compile(r'\bfees?\b', re.I),
+        "DAILY_BALANCE": re.compile(r'\bdaily\s+ending\s+balance\b|\bdaily ending balance\b|\bending\s+balance\b.*\bdaily\b', re.I),
     }
 
     SUMMARY_BLACKLIST = re.compile(
@@ -220,8 +221,33 @@ class FallbackStatementParser:
         re.I
     )
 
-    def _extract_vendor(self, block_text: str, date_raw: str, amount_token: str) -> str:
-        # first try common Chase patterns
+    def _extract_vendor(self, block_text: str, date_raw: str, amount_token: str, section: str = "") -> str:
+        # Handle specific sections first
+        if section == "CHECKS":
+            # Extract check number from format: "157 ^ 12/31 $1,800.00"
+            check_match = re.match(r'^(\d+)\s*\^?\s*\d{1,2}/\d{1,2}', block_text)
+            if check_match:
+                return f"Check #{check_match.group(1)}"
+            return "Check"
+        
+        if section == "ATM":
+            # Extract ATM location or just return "ATM Withdrawal"
+            if "ATM Withdrawal" in block_text:
+                # Try to extract location
+                location_match = re.search(r'ATM Withdrawal.*?(\d{4}\s+[A-Z].*?)(?:Card|\d{2}/\d{2}|$)', block_text)
+                if location_match:
+                    return f"ATM Withdrawal"
+            return "ATM Withdrawal"
+        
+        if section == "FEES":
+            # Extract fee description
+            fee_match = re.search(r'\d{1,2}/\d{1,2}\s+(.+?)(?:\$|\d+\.\d{2}|$)', block_text)
+            if fee_match:
+                fee_desc = fee_match.group(1).strip()
+                return fee_desc if fee_desc else "Bank Fee"
+            return "Bank Fee"
+        
+        # Regular electronic withdrawal patterns
         m = re.search(r'Orig Co Name[:\s]*([A-Za-z0-9\-\&\.\s\\\/\*]+?)(?:\s+Orig ID|\s+Descr|Trace#|Eed:|Descr:|Ind Name|Trn:|$)', block_text, re.I)
         if m:
             v = m.group(1).strip()
@@ -254,6 +280,7 @@ class FallbackStatementParser:
 
         low = ln.lower().strip()
 
+        # Skip pure section headers and summaries
         SUMMARY_PHRASES = [
             "summary", 
             "daily ending", 
@@ -262,33 +289,55 @@ class FallbackStatementParser:
             "closing balance",
             "statement period",
             "page ",
+            "balance november",
+            "balance december",
+            "throughdecember",
+            "through december",
         ]
 
-        # ONLY skip PURE summary lines
         for phrase in SUMMARY_PHRASES:
-            # must match whole line or be clearly a header
-            if low.startswith(phrase) or low.endswith(phrase):
+            if phrase in low:
                 return True
 
-        # Skip "Total ..." ONLY when entire line starts with Total
+        # Skip "Total ..." lines
         if re.match(r'^total\b', low):
             return True
+            
+        # Skip lines that are ONLY balance information (no vendor)
+        # Pattern: date followed by amount(s) but contains "balance" or "end daily"
+        if re.search(r'\bbalance\b|\bend\s+daily\b|\bdaily\s+ending\b', low):
+            return True
 
-        # DO NOT skip anything containing the word "deposit"
-        # DO NOT skip anything containing numbers like 12/02
-        # DO NOT skip ACH lines, Orig Co Name lines, etc.
         return False
 
 
     def parse_statement(self, lines: List[str]) -> Tuple[List[Transaction], Dict[str, Any]]:
         txs: List[Transaction] = []
 
-        # 1) Pre-clean: remove obvious summary/header lines anywhere
+        # 1) Pre-clean: remove ALL lines between *start*daily ending balance and *end*daily ending balance
         cleaned = []
+        skip_until_end_marker = None
+        
         for ln in lines:
             s = ln.strip()
             if not s:
                 continue
+            
+            # Check if we're entering a section to skip
+            if re.search(r'^\*start\*.*daily.*ending.*balance', s, re.I):
+                skip_until_end_marker = 'daily ending balance'
+                continue
+            
+            # Check if we're exiting the skip section
+            if skip_until_end_marker:
+                if re.search(rf'^\*end\*.*{skip_until_end_marker}', s, re.I):
+                    skip_until_end_marker = None
+                continue
+            
+            # Skip section markers (they're just metadata)
+            if re.match(r'^\*start\*|^\*end\*', s):
+                continue
+            
             if self._is_summary_line(s):
                 continue
             cleaned.append(s)
@@ -303,30 +352,43 @@ class FallbackStatementParser:
 
         for ln in cleaned:
             # update section if matches
+            section_matched = False
             for sec_name, pattern in self.SECTION_PATTERNS.items():
                 if pattern.search(ln):
-                    current_section = sec_name
-                    # finish any open block when section changes
+                    # finish any open block BEFORE changing section (with OLD section tag)
                     if current_block:
                         blocks.append((current_block, current_section))
                         current_block = None
-                    # don't append the section header as a transaction line
-                    current_block = None
+                    # now update to new section
+                    current_section = sec_name
+                    section_matched = True
                     break
+            
+            if section_matched:
+                continue
+            
+            # no section match — treat as potential transaction content
+            # Check for date at start OR check number format (for CHECKS section)
+            has_date = self.DATE_RE.search(ln)
+            # Pattern for checks: number, optional ^, then date
+            is_check_line = current_section == "CHECKS" and re.search(r'^\d+\s*\^?\s*\d{1,2}/\d{1,2}', ln)
+            # ATM lines may start with date OR contain "ATM Withdrawal"
+            is_atm_line = current_section == "ATM" and (has_date or "atm withdrawal" in ln.lower())
+            # Fees may not start with date; allow date or fee keyword
+            is_fee_line = current_section == "FEES" and (has_date or "fee" in ln.lower())
+            
+            if has_date or is_check_line or is_atm_line or is_fee_line:
+                # start a new block: finish previous
+                if current_block:
+                    blocks.append((current_block, current_section))
+                current_block = [ln]
             else:
-                # no section match — treat as potential transaction content
-                if self.DATE_RE.search(ln):
-                    # start a new block: finish previous
-                    if current_block:
-                        blocks.append((current_block, current_section))
-                    current_block = [ln]
+                # continuation line
+                if current_block is not None:
+                    current_block.append(ln)
                 else:
-                    # continuation line
-                    if current_block is not None:
-                        current_block.append(ln)
-                    else:
-                        # stray non-date lines outside a block — ignore
-                        continue
+                    # stray non-date lines outside a block — ignore
+                    continue
 
         # finalize last block
         if current_block:
@@ -335,14 +397,78 @@ class FallbackStatementParser:
         # 3) Parse each block: pick last amount, use section to determine direction
         for block_lines, section in blocks:
             block_text = " ".join(block_lines)
+            block_lower = block_text.lower()
+
+            # If section detection missed, infer from content to avoid misclassification
+            if section == "UNKNOWN":
+                if "atm withdrawal" in block_lower:
+                    section = "ATM"
+                elif block_lower.startswith("check") or re.match(r'^\d+\s*\^?\s*\d{1,2}/\d{1,2}', block_text):
+                    section = "CHECKS"
+                elif "fee" in block_lower:
+                    section = "FEES"
+            
+            # Skip entire DAILY_BALANCE section (contains multiple dates/amounts per line)
+            if section == "DAILY_BALANCE":
+                continue
+            
+            # CRITICAL FIRST FILTER: Detect daily balance lines by their distinctive pattern
+            # Daily balance format: "12/02 $11,805.75 12/11 23,765.22 12/20 26,876.38"
+            # Key insight: Daily balance has multiple DATE-AMOUNT pairs with NO descriptive text
+            
+            simple_date_pattern = re.compile(r'\b(\d{1,2}/\d{1,2})\b')
+            all_dates = simple_date_pattern.findall(block_text)
+            
+            # HARD GUARD: if multiple dates and no vendor keywords, drop as daily balance (all sections except checks/atm/fees)
+            if section not in ("CHECKS", "ATM", "FEES") and len(all_dates) >= 2:
+                has_vendor_keywords_any = bool(re.search(
+                    r'\b(orig|co name|ind name|descr|trace|payment|transfer|wise|irs|online|sec:|ccd|web|atm withdrawal|check|fee)\b',
+                    block_lower
+                ))
+                if not has_vendor_keywords_any:
+                    continue
+
+            # Skip checks, ATM, fees - they have special formats
+            if section not in ("CHECKS", "ATM", "FEES"):
+                if len(all_dates) >= 2:
+                    # Has multiple dates - check if it's a daily balance line
+                    # Daily balance lines have NO vendor-identifying text
+                    has_vendor_keywords = bool(re.search(
+                        r'\b(orig|co name|ind name|descr|trace|payment|transfer|wise|irs|online|sec:|ccd|web|atm withdrawal|check|fee)\b',
+                        block_lower
+                    ))
+                    
+                    # If multiple dates but no vendor keywords, it's daily balance
+                    if not has_vendor_keywords:
+                        continue
+                
+                # Additional safety: Skip blocks with 3+ dates (definitely daily balance)
+                if len(all_dates) >= 3:
+                    continue
+            
+            # Skip balance lines and end-of-day summaries
             if re.match(r'^(end|ending|end daily|daily ending|end daily ending balance|through)', block_text.strip(), re.I):
                 continue
-            # safety: skip blocks that look like totals
-            if re.search(r'\btotal\b.*\d', block_text, re.I):
+            if re.search(r'\b(balance|end daily|daily ending|throughdecember|through december)\b', block_lower):
                 continue
+            # Skip blocks that look like totals or summaries
+            if re.search(r'\btotal\b.*\d', block_lower):
+                continue
+            # Skip if it's ONLY a date and amount (balance reporting pattern)
+            if re.match(r'^\d{1,2}/\d{1,2}\s+[\d,\.\s]+$', block_text.strip()):
+                continue
+            # Skip if contains "november" or "december" without a vendor (balance date ranges)
+            if re.search(r'\b(november|december)\b', block_lower) and not re.search(r'\b(orig co name|ind name|descr|trace)\b', block_lower):
+                continue
+            
             # date from first line
+            # Try date at start first, then anywhere in the line (for checks)
             d_match = self.DATE_RE.search(block_lines[0])
-            date_raw = d_match.group(0) if d_match else ""
+            if not d_match:
+                # For checks format: "157 ^ 12/31 $1,800.00"
+                d_match = re.search(r'\b(\d{1,2}/\d{1,2})\b', block_lines[0])
+            
+            date_raw = d_match.group(1) if d_match else ""
             try:
                 month, day = date_raw.split('/')
                 year = datetime.now().year
@@ -351,11 +477,14 @@ class FallbackStatementParser:
                 date_norm = ""
 
 
-            # amounts: pick last
+            # amounts: for CHECKS pick the first amount; otherwise pick last
             amounts = self.AMOUNT_RE.findall(block_text)
             if not amounts:
                 continue
-            amount_raw = amounts[-1]
+            if section == "CHECKS":
+                amount_raw = amounts[0]
+            else:
+                amount_raw = amounts[-1]
             amt_val = _clean_amount_token(amount_raw)
             if amt_val is None:
                 continue
@@ -381,8 +510,22 @@ class FallbackStatementParser:
                     direction = "withdrawal"
                     signed_amount = -abs(amt_val)
 
+            # Skip this redundant filter - we already filtered above
+            
             # vendor extraction
-            vendor = self._extract_vendor(block_text, date_raw, amount_raw)
+            vendor = self._extract_vendor(block_text, date_raw, amount_raw, section)
+            
+            # Skip if vendor is empty or too generic (likely a balance line)
+            # BUT allow checks, ATM, and fees even if generic
+            if section not in ("CHECKS", "ATM", "FEES"):
+                if not vendor or vendor == "UNKNOWN" or len(vendor.strip()) < 3:
+                    continue
+                # Skip if vendor is purely numeric (daily balance fragments like "18.", "511.")
+                if re.match(r'^[\d\.,\s]+\.?$', vendor.strip()):
+                    continue
+            # Skip if vendor contains balance keywords
+            if re.search(r'\b(balance|end daily|ending|through)\b', vendor, re.I):
+                continue
 
             # optional: flag very large items for review (adjust threshold as needed)
             needs_review = abs(signed_amount) >= 20000.0

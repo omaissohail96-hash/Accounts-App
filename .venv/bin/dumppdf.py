@@ -1,4 +1,4 @@
-#!/Users/ibrahimsohail/Accounts_App/Accounts-App/.venv/bin/python
+#!/Users/ibrahimsohail/Accounts-App/.venv/bin/python
 """Extract pdf structure in XML format"""
 
 import logging
