@@ -1,6 +1,6 @@
 # bank_data_analysis.py
-# Option B — Rewritten & optimized single-file Bank Statement Analyzer (Deterministic + optional LLM)
-# Run: streamlit run bank_data_analysis.py
+# Hybrid Bank Statement Analyzer (deterministic + optional LLM)
+# Paste/replace your old file with this and run: streamlit run bank_data_analysis.py
 
 import io
 import re
@@ -15,13 +15,11 @@ import pdfplumber
 import pandas as pd
 import streamlit as st
 
-# Optional OpenAI usage (LLM enhancement). If you don't want LLM, leave secrets empty.
 try:
     import openai
 except Exception:
     openai = None
 
-# Logging
 logger = logging.getLogger("bank_analyzer")
 logging.basicConfig(level=logging.INFO)
 
@@ -43,44 +41,32 @@ class Transaction:
 # ----------------------------
 # Utilities
 # ----------------------------
-# Date recognition (many formats)
-DATE_RE = re.compile(r'^(\d{1,2}/\d{1,2})')
-
-
+DATE_TOKEN_RE = re.compile(r'(?P<d>\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?|\d{4}-\d{2}-\d{2}|\d{1,2}\s+[A-Za-z]{3,9}\s*\d{0,4})')
+DATE_AT_START = re.compile(r'^\s*(\d{1,2}/\d{1,2}(?:/\d{2,4})?)\b')
 AMOUNT_RE = re.compile(r'([+\-]?\(?\s*\d{1,3}(?:[,\s]\d{3})*(?:\.\d{1,2})\)?)')
-
-SUMMARY_KEYWORDS = [
-    "summary", "daily ending", "fees section", "beginning balance",
-    "ending balance", "total deposits", "total withdrawals",
-    "complete checking", "page", "instance", "amount", "balance",
-    "checking summary", "deposits and additions", "checks paid", "atm & debit"
-]
+MULTI_DATE_AMT_RE = re.compile(r'(\d{1,2}[/-]\d{1,2}|[+\-]?\(?\s*\d{1,3}(?:[,\s]\d{3})*(?:\.\d{1,2})\)?)')
 
 def _normalize_date_token(token: str) -> str:
     if not token:
         return ""
     t = token.strip().replace(",", "")
+    # try common formats, prefer m/d or d/m with assumption current year when no year
     formats = [
-        "%d/%m/%Y", "%d/%m/%y",
         "%m/%d/%Y", "%m/%d/%y",
+        "%d/%m/%Y", "%d/%m/%y",
         "%Y-%m-%d",
-        "%d-%m-%Y", "%d-%m-%y",
-        "%d %b %Y", "%d %b %y",
-        "%d %B %Y", "%d %B %y",
-        "%b %d %Y", "%b %d, %Y", "%B %d %Y",
-        "%m/%d", "%d/%m"
+        "%m/%d", "%d/%m",
+        "%d %b %Y", "%d %b %y", "%b %d %Y", "%B %d %Y"
     ]
     for fmt in formats:
         try:
             dt = datetime.strptime(t, fmt)
-            # If format had no year (mm/dd), assume current year
             if "%Y" not in fmt and "%y" not in fmt:
                 dt = dt.replace(year=datetime.now().year)
             return dt.strftime("%Y-%m-%d")
         except Exception:
             continue
-    # heuristics: "241203" style? not handling here — return raw
-    return t
+    return t  # fallback: return raw token
 
 def _clean_amount_token(token: str) -> Optional[float]:
     if not token:
@@ -91,14 +77,11 @@ def _clean_amount_token(token: str) -> Optional[float]:
         negative = True
     if s.startswith("-"):
         negative = True
-    # Remove currency letters & symbols, but not dot or minus
-    s = re.sub(r'[A-Za-z\$£€₹]', '', s)
-    # Remove commas and spaces used as thousand separators
+    s = re.sub(r'[A-Za-z\$£€₹]', '', s)  # drop currency letters
     s = s.replace(',', '').replace(' ', '')
     s = re.sub(r'[^0-9\.\-]', '', s)
     if not re.search(r'\d', s):
         return None
-    # if multiple dots, keep last as decimal separator
     parts = s.split('.')
     if len(parts) > 2:
         s = "".join(parts[:-1]) + "." + parts[-1]
@@ -108,35 +91,20 @@ def _clean_amount_token(token: str) -> Optional[float]:
         return None
     return -abs(val) if negative else abs(val)
 
-def _vendor_cleanup(raw: str) -> str:
-    if not raw:
-        return "UNKNOWN"
-    v = raw.strip()
-    v = re.sub(r'Orig Co Name[:\s]*', '', v, flags=re.I)
-    v = re.sub(r'Ind Name[:\s]*', '', v, flags=re.I)
-    # remove trace, id, trace#, sec: etc
-    v = re.sub(r'trace#?:?\s*\S+', '', v, flags=re.I)
-    v = re.sub(r'orig id[:\s]*\S+', '', v, flags=re.I)
-    v = re.sub(r'descr:?', '', v, flags=re.I)
-    v = re.sub(r'\b(sec|sec:|ccd|web|ccd|ccd:|entry)\b', '', v, flags=re.I)
-    v = re.sub(r'[^A-Za-z0-9\-\&\.\s]', ' ', v)
-    v = re.sub(r'\s{2,}', ' ', v).strip()
+def _short_vendor(v: str) -> str:
     if not v:
         return "UNKNOWN"
-    # Common normalizations
-    v = v.title()
-    v = re.sub(r'\bShopifypmt\b', 'Shopify', v, flags=re.I)
-    v = re.sub(r'\bShopifypmnt\b', 'Shopify', v, flags=re.I)
-    v = re.sub(r'\bTiktok\b', 'TikTok', v, flags=re.I)
-    v = re.sub(r'\bAmazoncom\b', 'Amazon', v, flags=re.I)
-    v = re.sub(r'\bEbay\b', 'Ebay', v, flags=re.I)
-    # short cutoff
-    if len(v) > 60:
-        v = v[:60] + "..."
-    return v
+    v2 = re.sub(r'[^A-Za-z0-9\-\&\.\s]', ' ', v)
+    v2 = re.sub(r'\s{2,}', ' ', v2).strip()
+    if not v2:
+        return "UNKNOWN"
+    v2 = v2.title()
+    if len(v2) > 60:
+        v2 = v2[:60] + "..."
+    return v2
 
 # ----------------------------
-# Document parsing
+# Document parsing helpers
 # ----------------------------
 class DocumentParser:
     def parse_pdf_text_lines(self, file_bytes: bytes) -> Tuple[List[str], List[int]]:
@@ -189,203 +157,180 @@ class DocumentParser:
             return [], False, []
 
 # ----------------------------
-# Robust fallback parser (date-segmented)
+# Fallback parser (Chase-optimized, robust)
 # ----------------------------
 class FallbackStatementParser:
-    """
-    Parser tuned for Chase-style statements that contain explicit section headings:
-      - Deposits and Additions
-      - Checks Paid
-      - ATM & Debit Card Withdrawals
-      - Electronic Withdrawals
-      - Fees
-    It strips summary blocks and totals, segments transactions by date, and uses section context
-    to determine deposit vs withdrawal.
-    """
-
-    DATE_RE = re.compile(r'^(\d{1,2}/\d{1,2})\b')
-    AMOUNT_RE = re.compile(r'([+\-]?\(?\s*\d{1,3}(?:[,\s]\d{3})*(?:\.\d{1,2})\)?)')
-
-    # Section header tokens (targeting the exact sections you listed + small variants)
     SECTION_PATTERNS = {
         "DEPOSITS": re.compile(r'\bdeposits\s+and\s+additions\b', re.I),
         "CHECKS": re.compile(r'\bchecks\s+paid\b', re.I),
-        "ATM": re.compile(r'\batm\b.*\bdebit\b|\batm\s*&\s*debit\b|\batm\s+withdrawal\b', re.I),
+        "ATM": re.compile(r'\batm\b.*\bdebit\b|\batm\s*&\s*debit\b|\batm\s+withdrawal\b|\batm\s+&\s+debit', re.I),
         "ELECTRONIC_WITHDRAWALS": re.compile(r'\belectronic\s+withdrawals?\b', re.I),
         "FEES": re.compile(r'\bfees?\b', re.I),
     }
 
-    SUMMARY_BLACKLIST = re.compile(
-        r'\b(total deposits|total withdrawals|beginning balance|ending balance|closing balance|statement|page of|deposits and additions summary|total)\b',
-        re.I
-    )
-
-    def _extract_vendor(self, block_text: str, date_raw: str, amount_token: str) -> str:
-        # first try common Chase patterns
-        m = re.search(r'Orig Co Name[:\s]*([A-Za-z0-9\-\&\.\s\\\/\*]+?)(?:\s+Orig ID|\s+Descr|Trace#|Eed:|Descr:|Ind Name|Trn:|$)', block_text, re.I)
-        if m:
-            v = m.group(1).strip()
-        else:
-            m2 = re.search(r'Ind Name[:\s]*([A-Za-z0-9\-\&\.\s\\\/\*]+?)(?:Trace#|Trn:|$)', block_text, re.I)
-            if m2:
-                v = m2.group(1).strip()
-            else:
-                # fallback: take words after date in first line
-                first_line = block_text.splitlines()[0] if '\n' in block_text else block_text
-                after_date = re.sub(self.DATE_RE, '', first_line, count=1).strip()
-                after_date = re.sub(r'[\d\|\-:\/\.\(\)\[\],]', ' ', after_date)
-                after_date = re.sub(r'\s{2,}', ' ', after_date).strip()
-                v = " ".join(after_date.split()[:6]) if after_date else "UNKNOWN"
-
-        # cleanup
-        v = re.sub(r'\b(sec|sec:|ccd|web|descr|trace#|trace)\b', ' ', v, flags=re.I)
-        v = re.sub(r'[^A-Za-z0-9\-\&\.\s]', ' ', v)
-        v = re.sub(r'\s{2,}', ' ', v).strip()
-        if not v:
-            return "UNKNOWN"
-        # shorten overly long vendors
-        if len(v) > 60:
-            v = v[:60].strip() + "..."
-        return v.title()
-
     def _is_summary_line(self, ln: str) -> bool:
         if not ln or not ln.strip():
             return True
-
         low = ln.lower().strip()
-
-        SUMMARY_PHRASES = [
-            "summary", 
-            "daily ending", 
-            "beginning balance",
-            "ending balance",
-            "closing balance",
-            "statement period",
-            "page ",
-        ]
-
-        # ONLY skip PURE summary lines
-        for phrase in SUMMARY_PHRASES:
-            # must match whole line or be clearly a header
-            if low.startswith(phrase) or low.endswith(phrase):
-                return True
-
-        # Skip "Total ..." ONLY when entire line starts with Total
-        if re.match(r'^total\b', low):
+        # lines that are obvious headings or totals
+        if re.match(r'^(daily ending balance|daily ending|daily ending balance|statement period|opening balance|ending balance|closing balance|total\b|page\s+\d+)', low):
             return True
-
-        # DO NOT skip anything containing the word "deposit"
-        # DO NOT skip anything containing numbers like 12/02
-        # DO NOT skip ACH lines, Orig Co Name lines, etc.
+        # If the line contains multiple date+amount pairs (daily ending tables) skip
+        # Count date tokens and amount tokens; if >1 of each, it's probably a table column row
+        date_count = len(DATE_TOKEN_RE.findall(ln))
+        amount_count = len(AMOUNT_RE.findall(ln))
+        if date_count >= 2 and amount_count >= 2:
+            return True
+        # "TOTAL DEPOSITS" or similar as a whole line
+        if re.search(r'\btotal deposits\b|\btotal withdrawals\b|\bdeposits and additions summary\b', low):
+            return True
         return False
+
+    def _line_has_vendor_like_text(self, ln: str) -> bool:
+        # A transaction usually has descriptive words (letters) after the date and possibly an amount
+        # If after removing date and amount there's still alphabetical content -> treat as transaction
+        text = ln
+        # remove leading date if present
+        text = re.sub(r'^\s*\d{1,2}[/-]\d{1,2}(?:/\d{2,4})?\s*', '', text)
+        # remove amounts
+        text = AMOUNT_RE.sub('', text)
+        # if leftover alphabetic words exist, it's descriptive
+        return bool(re.search(r'[A-Za-z]{2,}', text))
+
+    def _parse_date(self, token: str) -> Optional[str]:
+        try:
+            # Normalize forms like 12/03 -> YYYY-MM-DD
+            norm = _normalize_date_token(token)
+            return norm
+        except Exception:
+            return None
+
+    def _parse_amount(self, token: str) -> Optional[float]:
+        return _clean_amount_token(token)
+
+    # ------------------------
+# Improved vendor extractor
+# ------------------------
+    def extract_vendor(desc: str) -> str:
+        if not desc:
+            return "UNKNOWN"
+
+        # 1. If there's a "/" → take text after last slash
+        if "/" in desc:
+            after = desc.split("/")[-1].strip()
+            if re.search(r"[A-Za-z]", after):
+                return _short_vendor(after)
+
+        # 2. If "from" or "to" exists → take next word(s)
+        m = re.search(r'\bfrom\s+([A-Za-z][A-Za-z0-9\s\-]*)', desc, re.I)
+        if m:
+            return _short_vendor(m.group(1).strip())
+
+        m = re.search(r'\bto\s+([A-Za-z][A-Za-z0-9\s\-]*)', desc, re.I)
+        if m:
+            return _short_vendor(m.group(1).strip())
+
+        # 3. General fallback → find first token that has letters
+        for token in desc.split():
+            if re.search(r"[A-Za-z]", token):
+                return _short_vendor(token)
+
+        return "UNKNOWN"
 
 
     def parse_statement(self, lines: List[str]) -> Tuple[List[Transaction], Dict[str, Any]]:
         txs: List[Transaction] = []
-
-        # 1) Pre-clean: remove obvious summary/header lines anywhere
-        cleaned = []
-        for ln in lines:
-            s = ln.strip()
-            if not s:
-                continue
-            if self._is_summary_line(s):
-                continue
-            cleaned.append(s)
+        # 1. Pre-clean
+        cleaned = [ln for ln in (l.strip() for l in lines) if ln and not self._is_summary_line(ln)]
 
         if not cleaned:
             return [], {"parsed_from": "fallback", "transactions_extracted": 0}
 
-        # 2) Walk lines, detect section context and build date-started blocks
+        # 2. segment into blocks starting with a date at start (Chase style)
         blocks: List[Tuple[List[str], str]] = []
         current_section = "UNKNOWN"
         current_block: Optional[List[str]] = None
 
         for ln in cleaned:
-            # update section if matches
-            for sec_name, pattern in self.SECTION_PATTERNS.items():
-                if pattern.search(ln):
-                    current_section = sec_name
-                    # finish any open block when section changes
-                    if current_block:
-                        blocks.append((current_block, current_section))
-                        current_block = None
-                    # don't append the section header as a transaction line
-                    current_block = None
+            # detect section headers
+            matched_section = None
+            for sec_name, pat in self.SECTION_PATTERNS.items():
+                if pat.search(ln):
+                    matched_section = sec_name
                     break
-            else:
-                # no section match — treat as potential transaction content
-                if self.DATE_RE.search(ln):
-                    # start a new block: finish previous
-                    if current_block:
-                        blocks.append((current_block, current_section))
-                    current_block = [ln]
-                else:
-                    # continuation line
-                    if current_block is not None:
-                        current_block.append(ln)
-                    else:
-                        # stray non-date lines outside a block — ignore
-                        continue
+            if matched_section:
+                # finalize previously collected block
+                if current_block:
+                    blocks.append((current_block, current_section))
+                    current_block = None
+                current_section = matched_section
+                continue
 
-        # finalize last block
+            # must start with a date to start a new block; ignore stray lines that aren't transactions
+            if DATE_AT_START.match(ln):
+                # but ignore daily-ending rows that only contain date and amount(s) and no descriptive words
+                if not self._line_has_vendor_like_text(ln):
+                    # likely a daily ending line with no vendor -> skip
+                    continue
+                if current_block:
+                    blocks.append((current_block, current_section))
+                current_block = [ln]
+            else:
+                # continuation line appended to last block if any
+                if current_block is not None:
+                    current_block.append(ln)
+                else:
+                    # stray continuation without start - ignore
+                    continue
+
         if current_block:
             blocks.append((current_block, current_section))
 
-        # 3) Parse each block: pick last amount, use section to determine direction
+        # 3. parse each block
         for block_lines, section in blocks:
             block_text = " ".join(block_lines)
-            if re.match(r'^(end|ending|end daily|daily ending|end daily ending balance|through)', block_text.strip(), re.I):
-                continue
-            # safety: skip blocks that look like totals
+            # skip if looks like a total or header inside
             if re.search(r'\btotal\b.*\d', block_text, re.I):
                 continue
-            # date from first line
-            d_match = self.DATE_RE.search(block_lines[0])
-            date_raw = d_match.group(0) if d_match else ""
-            try:
-                month, day = date_raw.split('/')
-                year = datetime.now().year
-                date_norm = f"{year}-{int(month):02d}-{int(day):02d}"
-            except:
-                date_norm = ""
+            # get date from first line
+            first_line = block_lines[0]
+            dmatch = DATE_AT_START.match(first_line)
+            date_raw = dmatch.group(1) if dmatch else ""
+            date_norm = self._parse_date(date_raw) or ""
 
-
-            # amounts: pick last
-            amounts = self.AMOUNT_RE.findall(block_text)
+            # amounts: choose last amount-like token
+            amounts = AMOUNT_RE.findall(block_text)
             if not amounts:
                 continue
             amount_raw = amounts[-1]
-            amt_val = _clean_amount_token(amount_raw)
+            amt_val = self._parse_amount(amount_raw)
             if amt_val is None:
                 continue
 
-            # determine direction by section (strict)
+            # determine direction strictly by section where possible
             if section == "DEPOSITS":
-                direction = "deposit"
                 signed_amount = abs(amt_val)
             elif section in ("CHECKS", "ATM", "ELECTRONIC_WITHDRAWALS", "FEES"):
-                direction = "withdrawal"
                 signed_amount = -abs(amt_val)
             else:
-                # unknown section — fallback to heuristics
-                low_block = block_text.lower()
+                # heuristics
+                low = block_text.lower()
                 if amount_raw.strip().startswith("(") or "-" in amount_raw:
-                    direction = "withdrawal"
                     signed_amount = -abs(amt_val)
-                elif any(k in low_block for k in ["deposit", "credit", "received", "payout"]):
-                    direction = "deposit"
+                elif any(k in low for k in ["deposit", "credit", "received", "payout"]):
                     signed_amount = abs(amt_val)
                 else:
-                    # safer default: withdrawal
-                    direction = "withdrawal"
+                    # safe default withdrawal
                     signed_amount = -abs(amt_val)
 
-            # vendor extraction
             vendor = self._extract_vendor(block_text, date_raw, amount_raw)
-
-            # optional: flag very large items for review (adjust threshold as needed)
             needs_review = abs(signed_amount) >= 20000.0
+
+            # final safety: skip transactions that have UNKNOWN vendor and appear to be balance-only rows
+            if vendor == "UNKNOWN":
+                txt_low = block_text.lower()
+                if any(k in txt_low for k in ["daily ending", "ending balance", "daily ending balance", "opening balance", "closing balance", "daily ending", "through"]):
+                    continue
 
             txs.append(Transaction(
                 date=date_norm,
@@ -401,9 +346,114 @@ class FallbackStatementParser:
         meta = {"parsed_from": "chase_sectioned_fallback", "transactions_extracted": len(txs)}
         return txs, meta
 
+# ----------------------------
+# Universal parser fallback for simpler bank statements (SadaPay, sample banks)
+# - conservative: only picks blocks that start with a full date (YYYY-MM-DD or MM/DD) and have a description
+# ----------------------------
+class UniversalParser:
+    """
+    MULTILINE universal parser for simple statements like:
+      - SadaPay
+      - Wise
+      - Payoneer
+      - JazzCash / Easypaisa
+      - Simple bank PDFs
+    Does NOT interfere with Chase because Chase parser runs first.
+    """
+
+    DATE_ANYWHERE = re.compile(
+        r'(\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4})'
+    )
+
+    AMOUNT_ANYWHERE = re.compile(
+        r'([+\-]?\(?\s*\d{1,3}(?:,\d{3})*(?:\.\d{1,2})\)?)'
+    )
+
+    IGNORE = re.compile(
+        r'(running|ending\s+balance|daily\s+ending|opening|closing|balance\s+summary|total)', re.I
+    )
+
+    def parse(self, lines: List[str]) -> List[Transaction]:
+        txs = []
+        buf = []
+
+        def flush_block(block):
+            if not block:
+                return None
+            text = " ".join(block)
+
+            # skip balance-like
+            if self.IGNORE.search(text):
+                return None
+
+            # extract date ANYWHERE in block
+            dm = self.DATE_ANYWHERE.search(text)
+            if not dm:
+                return None
+            date_raw = dm.group(1)
+            date_norm = _normalize_date_token(date_raw)
+
+            # extract amount ANYWHERE
+            am = self.AMOUNT_ANYWHERE.findall(text)
+            if not am:
+                return None
+            amount_raw = am[-1]
+            amount_val = _clean_amount_token(amount_raw)
+            if amount_val is None:
+                return None
+
+            # DESCRIPTION = all text minus date & amount
+            desc = text.replace(date_raw, "")
+            desc = desc.replace(amount_raw, "")
+            desc = desc.strip()
+
+            # must contain letters
+            if not re.search(r'[A-Za-z]', desc):
+                return None
+
+            # pick vendor = first word of description
+            vendor = _short_vendor(desc.split()[0])
+
+            direction = "deposit" if amount_val > 0 else "withdrawal"
+
+            return Transaction(
+                date=date_norm,
+                transaction_type=direction,
+                vendor=vendor,
+                amount=amount_val,
+                description=desc,
+                raw_line=text
+            )
+
+        for ln in lines:
+            ln = ln.strip()
+            if not ln:
+                continue
+
+            # ignore useless lines
+            if self.IGNORE.search(ln):
+                continue
+
+            # SadaPay / simple bank blocks:
+            # New block starts when ANY line contains a date
+            if self.DATE_ANYWHERE.search(ln):
+                tx = flush_block(buf)
+                if tx:
+                    txs.append(tx)
+                buf = [ln]
+            else:
+                buf.append(ln)
+
+        # flush last block
+        tx = flush_block(buf)
+        if tx:
+            txs.append(tx)
+
+        return txs
+
 
 # ----------------------------
-# LLM enhancer (unchanged but safe)
+# LLM enhancer (unchanged)
 # ----------------------------
 class LLMEnhancer:
     def __init__(self, model: str = "gpt-4o-mini", max_tokens: int = 1200):
@@ -414,18 +464,15 @@ class LLMEnhancer:
         if openai is None:
             logger.info("openai package not installed — skipping LLM enhancement.")
             return transactions
-
         key = None
         try:
             key = st.secrets.get("OPENAI_API_KEY") if "OPENAI_API_KEY" in st.secrets else None
         except Exception:
             key = None
         if not key:
-            logger.info("No OPENAI_API_KEY found in Streamlit secrets — skipping LLM enhancement.")
+            logger.info("No OPENAI_API_KEY found — skipping LLM enhancement.")
             return transactions
-
         openai.api_key = key
-
         rows = []
         for i, t in enumerate(transactions[:200]):
             rows.append({
@@ -436,29 +483,19 @@ class LLMEnhancer:
                 "direction": "in" if t.amount > 0 else "out",
                 "description": t.description
             })
-
         prompt = (
             "You are a precise financial data cleaner. You will receive a JSON array of parsed transactions.\n"
             "Return a JSON array with exactly the same number of elements. Each element must contain:\n"
-            "  idx (int), date (YYYY-MM-DD or original), vendor (short), amount (number positive), direction ('in'/'out'), description (string)\n"
-            "Rules:\n"
-            "- Normalize amounts (e.g. '29 083.00' -> 29083.00). Return numeric amount (positive).\n"
-            "- Do NOT add or remove rows; keep idx mapping.\n"
-            "- If you can canonicalize the date to YYYY-MM-DD do so, otherwise return original date string.\n"
-            "- Return ONLY a JSON array (no explanation).\n\n"
-            "INPUT:\n" + json.dumps(rows, ensure_ascii=False)
+            " idx (int), date (YYYY-MM-DD or original), vendor (short), amount (number positive), direction ('in'/'out'), description (string)\n"
+            "Return ONLY a JSON array (no explanation).\n\nINPUT:\n" + json.dumps(rows, ensure_ascii=False)
         )
-
         try:
-            resp = openai.ChatCompletion.create(
-                model=self.model,
-                temperature=0,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=self.max_tokens
-            )
+            resp = openai.ChatCompletion.create(model=self.model, temperature=0,
+                                                messages=[{"role": "user", "content": prompt}],
+                                                max_tokens=self.max_tokens)
             content = resp.choices[0].message["content"]
             parsed = json.loads(content)
-            enhanced: List[Transaction] = []
+            enhanced = []
             for obj in parsed:
                 idx = int(obj.get("idx"))
                 amt = float(obj.get("amount", 0.0))
@@ -489,9 +526,6 @@ class LLMEnhancer:
 # Categorizer & dedupe
 # ----------------------------
 class TransactionCategorizer:
-    def __init__(self):
-        pass
-
     def process_transactions(self, txs: List[Transaction]) -> List[Transaction]:
         for t in txs:
             if t.amount > 0:
@@ -518,7 +552,6 @@ class TransactionCategorizer:
             key = (t.date, round(t.amount, 2), vendor_norm)
             if key in seen:
                 existing = seen[key]
-                # prefer existing that is not needs_review
                 if existing.needs_review and not t.needs_review:
                     seen[key] = t
             else:
@@ -586,11 +619,11 @@ class ReportGenerator:
 # Streamlit UI
 # ----------------------------
 st.set_page_config(page_title="Bank Statement Analyzer (Hybrid)", layout="wide")
-st.title("💼 Bank Statement Analyzer — Rewritten Parser (Chase-first, Robust)")
+st.title("💼 Bank Statement Analyzer — Improved Parser (Chase-first, Universal fallback)")
 
 st.markdown(
-    "Upload a bank statement (PDF / CSV / DOCX). The app uses a robust deterministic parser optimized for Chase-style multi-line "
-    "statements, with optional LLM enhancement. Totals and subtotals are computed from parsed numeric amounts."
+    "Upload a bank statement (PDF / CSV / DOCX). The app uses a robust deterministic parser optimized for Chase-style "
+    "statements (including ATM & Daily Ending Balance protections). If that fails, a conservative universal parser attempts extraction."
 )
 
 with st.sidebar:
@@ -598,8 +631,7 @@ with st.sidebar:
     use_llm = st.checkbox("Enable LLM enhancement (cost)", value=False)
     llm_model = st.selectbox("LLM model", ["gpt-4o-mini"], index=0)
     st.markdown("Put your OpenAI key in `.streamlit/secrets.toml` as: `OPENAI_API_KEY = \"sk-...\"`")
-    st.markdown("Sort vendor summaries by:")
-    sort_by = st.selectbox("Sort by", ["Subtotal (desc)", "Transaction Count (desc)"])
+    sort_by = st.selectbox("Sort vendor summaries by", ["Subtotal (desc)", "Transaction Count (desc)"])
 
 uploaded = st.file_uploader("Upload statement (PDF, CSV, DOCX)", type=["pdf", "csv", "doc", "docx"])
 
@@ -618,8 +650,19 @@ if uploaded:
                     st.warning(f"Unreadable pages: {unreadable}")
                 st.stop()
 
+            # First try Chase-optimized fallback
             fallback = FallbackStatementParser()
             transactions, meta = fallback.parse_statement(lines)
+
+            # If nothing extracted or too few rows, try UniversalParser conservative fallback
+            if not transactions or len(transactions) < 3:
+                up = UniversalParser()
+                u_txs = up.parse(lines)
+                if u_txs:
+                    # prefer universal only if it returns something meaningful
+                    transactions = u_txs
+                    meta = {"parsed_from": "universal_fallback", "transactions_extracted": len(transactions)}
+
             parsed_from = meta.get("parsed_from", "fallback")
 
             if not transactions:
@@ -683,7 +726,7 @@ if uploaded:
 
             st.success(f"Processed {len(transactions)} transactions ({parsed_from}).")
 
-# Dashboard
+# Dashboard (same UI as before)
 if "transactions" in st.session_state and st.session_state.transactions:
     transactions: List[Transaction] = st.session_state.transactions
     stats = st.session_state.stats
@@ -784,4 +827,3 @@ if "transactions" in st.session_state and st.session_state.transactions:
         st.download_button("⬇ P&L CSV", pnl_csv, "pnl.csv", mime="text/csv")
 
     st.success("✅ Report generated. Verify totals against your bank statement.")
-
