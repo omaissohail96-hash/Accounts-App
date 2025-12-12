@@ -209,34 +209,44 @@ class FallbackStatementParser:
         return _clean_amount_token(token)
 
     # ------------------------
-# Improved vendor extractor
-# ------------------------
-    def extract_vendor(desc: str) -> str:
+    # Improved vendor extractor
+    # ------------------------
+    def extract_vendor(self, desc: str, *args) -> str:
+        """
+        Robust vendor extractor used by FallbackStatementParser.
+        Accepts desc plus optional extra args (date_raw, amount_raw) — tolerant to various call sites.
+        """
         if not desc:
             return "UNKNOWN"
 
-        # 1. If there's a "/" → take text after last slash
-        if "/" in desc:
-            after = desc.split("/")[-1].strip()
+        d = desc.strip()
+
+        # 1) prefer text after last slash if that contains letters
+        if "/" in d:
+            after = d.split("/")[-1].strip()
             if re.search(r"[A-Za-z]", after):
                 return _short_vendor(after)
 
-        # 2. If "from" or "to" exists → take next word(s)
-        m = re.search(r'\bfrom\s+([A-Za-z][A-Za-z0-9\s\-]*)', desc, re.I)
+        # 2) 'from <name>' or 'to <name>'
+        m = re.search(r'\bfrom\s+([A-Za-z0-9\-\.\s&]+)', d, re.I)
         if m:
             return _short_vendor(m.group(1).strip())
 
-        m = re.search(r'\bto\s+([A-Za-z][A-Za-z0-9\s\-]*)', desc, re.I)
+        m = re.search(r'\bto\s+([A-Za-z0-9\-\.\s&]+)', d, re.I)
         if m:
             return _short_vendor(m.group(1).strip())
 
-        # 3. General fallback → find first token that has letters
-        for token in desc.split():
+        # 3) look for patterns like "PAYEE: XYZ" or "REMIT: XYZ"
+        m = re.search(r'\b(payee|remit|beneficiary|merchant)[:\-]\s*([A-Za-z0-9\-\.\s&]+)', d, re.I)
+        if m:
+            return _short_vendor(m.group(2).strip())
+
+        # 4) general fallback: first token that has letters
+        for token in d.split():
             if re.search(r"[A-Za-z]", token):
                 return _short_vendor(token)
 
         return "UNKNOWN"
-
 
     def parse_statement(self, lines: List[str]) -> Tuple[List[Transaction], Dict[str, Any]]:
         txs: List[Transaction] = []
@@ -323,7 +333,7 @@ class FallbackStatementParser:
                     # safe default withdrawal
                     signed_amount = -abs(amt_val)
 
-            vendor = self._extract_vendor(block_text, date_raw, amount_raw)
+            vendor = self.extract_vendor(block_text, date_raw, amount_raw)
             needs_review = abs(signed_amount) >= 20000.0
 
             # final safety: skip transactions that have UNKNOWN vendor and appear to be balance-only rows
@@ -352,105 +362,264 @@ class FallbackStatementParser:
 # ----------------------------
 class UniversalParser:
     """
-    MULTILINE universal parser for simple statements like:
-      - SadaPay
-      - Wise
-      - Payoneer
-      - JazzCash / Easypaisa
-      - Simple bank PDFs
-    Does NOT interfere with Chase because Chase parser runs first.
+    Universal Smart Parser (FINAL)
+    Supports:
+        • SadaPay 2-line format
+        • Single-line bank CSV-like PDFs
+        • Multi-column PDFs (date | description | debit | credit | balance)
+        • Financial statements with inline "Debit"/"Credit"
     """
 
-    DATE_ANYWHERE = re.compile(
-        r'(\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4})'
+    # Matches wide range of date formats
+    DATE_RE = re.compile(
+        r'(\d{1,2}\s+[A-Za-z]{3,9},?\s+\d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]?\d{2,4})'
     )
 
-    AMOUNT_ANYWHERE = re.compile(
-        r'([+\-]?\(?\s*\d{1,3}(?:,\d{3})*(?:\.\d{1,2})\)?)'
+    # Matches debit/credit amount ONLY (NOT balance)
+    AMOUNT_RE = re.compile(
+        r'([+\-]?\s?\d{1,3}(?:,\d{3})*(?:\.\d{1,2}))'
     )
 
-    IGNORE = re.compile(
-        r'(running|ending\s+balance|daily\s+ending|opening|closing|balance\s+summary|total)', re.I
-    )
+    IGNORE_WORDS = ["opening balance", "closing balance", "balance", "running balance"]
 
     def parse(self, lines: List[str]) -> List[Transaction]:
         txs = []
-        buf = []
 
-        def flush_block(block):
-            if not block:
-                return None
-            text = " ".join(block)
+        # -------- DETECT FORMAT --------
+        is_sadapay = any("transf" in ln.lower() or "cr/" in ln.lower() or "dr/" in ln.lower() for ln in lines)
+        is_tabular = any("Debit" in ln or "Credit" in ln for ln in lines)
 
-            # skip balance-like
-            if self.IGNORE.search(text):
-                return None
+        if is_sadapay:
+            return self._parse_sadapay(lines)
 
-            # extract date ANYWHERE in block
-            dm = self.DATE_ANYWHERE.search(text)
-            if not dm:
-                return None
-            date_raw = dm.group(1)
-            date_norm = _normalize_date_token(date_raw)
+        elif is_tabular:
+            return self._parse_tabular(lines)
 
-            # extract amount ANYWHERE
-            am = self.AMOUNT_ANYWHERE.findall(text)
-            if not am:
-                return None
-            amount_raw = am[-1]
-            amount_val = _clean_amount_token(amount_raw)
-            if amount_val is None:
-                return None
+        else:
+            return self._parse_simple(lines)
 
-            # DESCRIPTION = all text minus date & amount
-            desc = text.replace(date_raw, "")
-            desc = desc.replace(amount_raw, "")
-            desc = desc.strip()
+    # ===================================================================================
+    # 1) S A D A P A Y    P A R S E R
+    # ===================================================================================
+    def _parse_sadapay(self, lines: List[str]) -> List[Transaction]:
+        txs = []
+        i = 0
+        while i < len(lines):
+            ln = lines[i].strip()
 
-            # must contain letters
-            if not re.search(r'[A-Za-z]', desc):
-                return None
+            # A SadaPay block always starts with date line
+            d = self.DATE_RE.search(ln)
+            if d:
+                # Next line must be "TIME + REF"
+                if i + 1 < len(lines):
+                    line2 = lines[i+1].strip()
+                else:
+                    i += 1
+                    continue
 
-            # pick vendor = first word of description
-            vendor = _short_vendor(desc.split()[0])
+                block = ln + " " + line2
 
-            direction = "deposit" if amount_val > 0 else "withdrawal"
+                # Skip balance lines
+                if any(x in block.lower() for x in self.IGNORE_WORDS):
+                    i += 2
+                    continue
 
-            return Transaction(
-                date=date_norm,
-                transaction_type=direction,
-                vendor=vendor,
-                amount=amount_val,
-                description=desc,
-                raw_line=text
-            )
+                # Parse date
+                date_raw = d.group(1).replace(",", "")
+                date_norm = _normalize_date_token(date_raw)
 
-        for ln in lines:
-            ln = ln.strip()
-            if not ln:
+                # Parse amount
+                amt_m = self.AMOUNT_RE.search(ln)
+                if not amt_m:
+                    i += 2
+                    continue
+                amount_raw = amt_m.group(1).replace(" ", "")
+                amount_val = _clean_amount_token(amount_raw)
+                if amount_val is None:
+                    i += 2
+                    continue
+
+                ttype = "deposit" if amount_val > 0 else "withdrawal"
+
+                # Description (SadaPay format)
+                desc = ln.replace(date_raw, "").replace(amount_raw, "").strip() + " | " + line2
+
+                # Vendor extraction
+                vendor_words = [w for w in desc.split() if w.isalpha()]
+                vendor = " ".join(vendor_words[:3]).title() if vendor_words else "UNKNOWN"
+
+                txs.append(Transaction(
+                    date=date_norm,
+                    transaction_type=ttype,
+                    vendor=vendor,
+                    amount=amount_val,
+                    description=desc,
+                    raw_line=ln
+                ))
+
+                i += 2
                 continue
 
-            # ignore useless lines
-            if self.IGNORE.search(ln):
-                continue
-
-            # SadaPay / simple bank blocks:
-            # New block starts when ANY line contains a date
-            if self.DATE_ANYWHERE.search(ln):
-                tx = flush_block(buf)
-                if tx:
-                    txs.append(tx)
-                buf = [ln]
-            else:
-                buf.append(ln)
-
-        # flush last block
-        tx = flush_block(buf)
-        if tx:
-            txs.append(tx)
+            i += 1
 
         return txs
+    def _extract_vendor(self, desc: str) -> str:
+        if not desc:
+            return "UNKNOWN"
 
+        desc = desc.strip()
+
+        # Prefer text after slash
+        if "/" in desc:
+            after = desc.split("/")[-1].strip()
+            if re.search(r"[A-Za-z]", after):
+                return after.title()
+
+        # FROM xyz
+        m = re.search(r'\bfrom\s+([A-Za-z0-9\s\-]+)', desc, re.I)
+        if m:
+            return m.group(1).strip().title()
+
+        # TO xyz
+        m = re.search(r'\bto\s+([A-Za-z0-9\s\-]+)', desc, re.I)
+        if m:
+            return m.group(1).strip().title()
+
+        # fallback: first alpha word
+        for w in desc.split():
+            if re.search(r"[A-Za-z]", w):
+                return w.title()
+
+        return "UNKNOWN"
+
+    # ===================================================================================
+    # 2) T A B U L A R   P D F   P A R S E R  (sample_bank_statement)
+    # For PDFs like:
+    # Date | Description | Debit | Credit | Balance
+    # ===================================================================================
+    def _parse_tabular(self, lines: List[str]) -> List[Transaction]:
+        txs = []
+
+        expense_keywords = [
+            "purchase", "fee", "pos", "shop", "store", "withdraw", 
+            "atm", "payment", "transfer out", "charge", "debit"
+        ]
+        income_keywords = ["payout", "deposit", "salary", "refund", "credit"]
+
+        for ln in lines:
+            low = ln.lower()
+
+            # Ignore balance rows
+            if any(w in low for w in self.IGNORE_WORDS):
+                continue
+
+            # DATE
+            d = self.DATE_RE.search(ln)
+            if not d:
+                continue
+            date_raw = d.group(1).replace(",", "")
+            date_norm = _normalize_date_token(date_raw)
+
+            # Amounts (at least 2 numbers needed)
+            nums = re.findall(r'([+-]?\(?\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?\)?)', ln)
+            nums = [n for n in nums if re.search(r'\d', n)]
+            if len(nums) < 2:
+                continue
+
+            balance_raw = nums[-1]
+            amount_raw = nums[-2]
+            amount_val = _clean_amount_token(amount_raw)
+            if amount_val is None:
+                continue
+
+            # DESCRIPTION (extract BEFORE using desc_low!)
+            desc = (
+                ln.replace(date_raw, "")
+                .replace(amount_raw, "")
+                .replace(balance_raw, "")
+                .strip()
+            )
+            desc_low = desc.lower()
+
+            # SIGN DETECTION
+            if "(" in amount_raw or "-" in amount_raw:
+                signed = -abs(amount_val)
+            else:
+                signed = abs(amount_val)
+
+            # OVERRIDE SIGN BY DESCRIPTION
+            if any(k in desc_low for k in expense_keywords):
+                signed = -abs(amount_val)
+            elif any(k in desc_low for k in income_keywords):
+                signed = abs(amount_val)
+
+            ttype = "deposit" if signed > 0 else "withdrawal"
+
+            # Vendor extraction
+            vendor = self._extract_vendor(desc)
+
+            txs.append(Transaction(
+                date=date_norm,
+                transaction_type=ttype,
+                vendor=vendor,
+                amount=signed,
+                description=desc,
+                raw_line=ln
+            ))
+
+        return txs
+    # ===================================================================================
+    # 3) S I M P L E   O N E - L I N E   P A R S E R  (sample_financial_statement)
+    # ===================================================================================
+    def _parse_simple(self, lines: List[str]) -> List[Transaction]:
+        txs = []
+        for ln in lines:
+            low = ln.lower()
+
+            if any(w in low for w in self.IGNORE_WORDS):
+                continue
+
+            # DATE
+            d = self.DATE_RE.search(ln)
+            if not d:
+                continue
+            date_raw = d.group(1).replace(",", "")
+            date_norm = _normalize_date_token(date_raw)
+
+            # AMOUNT
+            m = self.AMOUNT_RE.findall(ln)
+            if not m:
+                continue
+
+            # ALWAYS ignore last number if more than one (balance)
+            if len(m) >= 2:
+                amount_raw = m[-2]  # second-last = TRUE amount
+            else:
+                amount_raw = m[-1]
+            # last number = transaction
+            amount = _clean_amount_token(amount_raw)
+            if amount is None:
+                continue
+
+            # Type from sign
+            ttype = "deposit" if amount > 0 else "withdrawal"
+
+            # Description
+            desc = ln.replace(date_raw, "").replace(amount_raw, "").strip()
+
+            vendor_words = [w for w in desc.split() if w.isalpha()]
+            vendor = " ".join(vendor_words[:4]).title() if vendor_words else "UNKNOWN"
+
+            txs.append(Transaction(
+                date=date_norm,
+                transaction_type=ttype,
+                vendor=vendor,
+                amount=amount,
+                description=desc,
+                raw_line=ln
+            ))
+
+        return txs
 
 # ----------------------------
 # LLM enhancer (unchanged)
