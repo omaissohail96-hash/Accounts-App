@@ -94,14 +94,145 @@ def _clean_amount_token(token: str) -> Optional[float]:
 def _short_vendor(v: str) -> str:
     if not v:
         return "UNKNOWN"
-    v2 = re.sub(r'[^A-Za-z0-9\-\&\.\s]', ' ', v)
+    
+    # Remove common ID patterns and codes
+    v2 = re.sub(r'\b(id|ref|code|num|number)[:\s]*\d+', '', v, flags=re.I)
+    v2 = re.sub(r'\b\d{5,}\b', '', v2)  # Remove long numeric IDs
+    
+    # Remove ACH noise words and prefixes
+    v2 = re.sub(r'\b(orig|co|name|entry|descr|desc)\b', '', v2, flags=re.I)
+    
+    # Clean special characters but keep important ones
+    v2 = re.sub(r'[^A-Za-z0-9\-\&\.\s]', ' ', v2)
     v2 = re.sub(r'\s{2,}', ' ', v2).strip()
+    
     if not v2:
         return "UNKNOWN"
+    
+    # Title case and limit length
     v2 = v2.title()
-    if len(v2) > 60:
-        v2 = v2[:60] + "..."
+    if len(v2) > 30:
+        v2 = v2[:30] + "..."
     return v2
+
+
+def _clean_description(desc: str, vendor: str = "", transaction_type: str = "") -> str:
+    """
+    Rewrite transaction description into a simple, human-readable format.
+    Removes technical codes, IDs, timestamps, and trace numbers.
+    Returns a clean, natural language description that anyone can understand.
+    """
+    if not desc:
+        if transaction_type == "deposit":
+            return f"Money received from {vendor}" if vendor else "Money received"
+        elif transaction_type == "withdrawal":
+            return f"Payment made to {vendor}" if vendor else "Payment made"
+        return "Transaction processed"
+    
+    original = desc.strip()
+    d = original
+    
+    # Remove leading dates
+    d = re.sub(r'^(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?|\d{1,2})\s+', '', d)
+    
+    # Extract meaningful parts before removing everything
+    # Check for specific transaction types
+    is_online_transfer = bool(re.search(r'online\s+transfer', d, re.I))
+    is_ach_payment = bool(re.search(r'ach\s+payment', d, re.I))
+    is_check = bool(re.search(r'\bcheck\b|\bchk\b', d, re.I))
+    is_card_payment = bool(re.search(r'card\s+(payment|ending)', d, re.I))
+    is_fee = bool(re.search(r'\bfee\b', d, re.I))
+    is_interest = bool(re.search(r'\binterest\b', d, re.I))
+    
+    # Extract check number if present
+    check_num = None
+    check_match = re.search(r'(?:check|chk)\s*\.?\.\.\s*(\d+)', d, re.I)
+    if check_match:
+        check_num = check_match.group(1)
+    
+    # Extract card ending digits if present
+    card_ending = None
+    card_match = re.search(r'(?:card\s+)?ending\s+(?:in\s+)?(\d{4})', d, re.I)
+    if card_match:
+        card_ending = card_match.group(1)
+    
+    # Now clean the description
+    # Remove IDs, reference numbers, trace numbers
+    d = re.sub(r'\b(id|ref|reference|trace|seq|number|num|code)[:\s#]*\d+', '', d, flags=re.I)
+    d = re.sub(r'\b\d{6,}\b', '', d)  # Long numeric IDs (6+ digits)
+    d = re.sub(r'\b(orig|co|entry|descr?)\s+(id|date|num)\b[:\s]*\S*', '', d, flags=re.I)
+    
+    # Remove timestamps and dates within description
+    d = re.sub(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}', '', d)
+    d = re.sub(r'\d{4}-\d{2}-\d{2}', '', d)
+    
+    # Remove technical ACH/banking keywords (but preserve context)
+    d = re.sub(r'\b(ppd|ccd|web|tel|auth|authorization)\b', '', d, flags=re.I)
+    
+    # Remove "Co Name", "Orig Co Name", "Co Entry Descr" patterns
+    d = re.sub(r'\b(orig\s+)?(co|company)\s+(name|entry|descr?)\b', '', d, flags=re.I)
+    
+    # Remove transaction type prefixes
+    d = re.sub(r'^\s*(online\s+)?(ach\s+)?(payment|transfer|withdrawal|deposit|debit|credit)\s+(to|from)\s+', '', d, flags=re.I)
+    
+    # Clean special characters but keep basic punctuation
+    d = re.sub(r'[^A-Za-z0-9\s\.\,\-]', ' ', d)
+    d = re.sub(r'\s{2,}', ' ', d).strip()
+    
+    # Build natural language description
+    result = ""
+    
+    if transaction_type == "deposit":
+        if vendor and vendor != "UNKNOWN":
+            result = f"Deposit received from {vendor}"
+        else:
+            result = "Deposit received"
+        
+        # Add context if available
+        if d and len(d) > 5 and d.lower() != vendor.lower():
+            result += f" - {d}"
+    
+    elif transaction_type == "withdrawal":
+        prefix = "Payment made to"
+        
+        if is_check and check_num:
+            prefix = f"Check payment #{check_num} to"
+        elif is_check:
+            prefix = "Check payment to"
+        elif is_card_payment and card_ending:
+            prefix = f"Card payment (ending {card_ending}) to"
+        elif is_card_payment:
+            prefix = "Card payment to"
+        elif is_online_transfer:
+            prefix = "Online transfer to"
+        elif is_ach_payment:
+            prefix = "Electronic payment to"
+        elif is_fee:
+            prefix = "Fee charged by"
+        
+        if vendor and vendor != "UNKNOWN":
+            result = f"{prefix} {vendor}"
+        else:
+            result = prefix.replace(" to", "").replace(" by", "")
+        
+        # Add context if available
+        if d and len(d) > 5 and d.lower() != vendor.lower():
+            result += f" - {d}"
+    
+    else:
+        result = f"Transaction with {vendor}" if vendor else "Transaction processed"
+        if d and len(d) > 5:
+            result += f" - {d}"
+    
+    # Add special context
+    if is_interest and "interest" not in result.lower():
+        result += " (interest)"
+    
+    # Limit length but try to keep meaningful content
+    if len(result) > 150:
+        result = result[:147] + "..."
+    
+    return result.strip() or "Transaction processed"
 
 # ----------------------------
 # Document parsing helpers
@@ -214,12 +345,41 @@ class FallbackStatementParser:
     def extract_vendor(self, desc: str, *args) -> str:
         """
         Robust vendor extractor used by FallbackStatementParser.
-        Accepts desc plus optional extra args (date_raw, amount_raw) — tolerant to various call sites.
+        Automatically cleans vendor names by removing dates, IDs, origin codes, and descriptions.
+        Returns only normalized company name.
         """
         if not desc:
             return "UNKNOWN"
 
         d = desc.strip()
+        
+        # Remove ALL leading date patterns aggressively
+        # Match: "21 ", "12/03 ", "12-03 ", etc.
+        d = re.sub(r'^\d{1,2}\s+', '', d)  # Remove day/month at start
+        d = re.sub(r'^\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\s+', '', d)  # Remove MM/DD or MM/DD/YYYY
+        
+        # Remove common transaction prefixes MORE AGGRESSIVELY
+        # Match any combination of: "21 Payment To", "Online Transfer To", "Online Ach Payment To"
+        d = re.sub(r'^\d{1,2}\s+', '', d)  # Remove any leading numbers again after first pass
+        d = re.sub(r'^\s*(online\s+)?(ach\s+)?(payment|transfer|withdrawal|deposit)\s+(to|from)\s+', '', d, flags=re.I)
+        
+        # ACH/Electronic transaction patterns - extract company name only
+        # Pattern 1: "Orig Co Name COMPANY NAME Orig Id 123..."
+        m = re.search(r'\b(?:orig\s+)?co\s+name\s+([A-Za-z0-9\s\-\.&]+?)(?:\s+(?:orig\s+)?(?:co\s+)?id\b)', d, re.I)
+        if m:
+            return _short_vendor(m.group(1).strip())
+        
+        # Pattern 2: "Desc COMPANY NAME Co Entry Descr..."
+        m = re.search(r'\bdesc\s+([A-Za-z0-9\s\-\.&]+?)(?:\s+(?:co\s+entry|orig\s+id|desc\s+date)\b)', d, re.I)
+        if m:
+            candidate = m.group(1).strip()
+            if not re.match(r'^\d+$', candidate):  # Skip if only digits
+                return _short_vendor(candidate)
+        
+        # Pattern 3: "Co Entry Descr COMPANY NAME"
+        m = re.search(r'\bco\s+entry\s+descr\s+([A-Za-z0-9\s\-\.&]+)', d, re.I)
+        if m:
+            return _short_vendor(m.group(1).strip())
 
         # 1) prefer text after last slash if that contains letters
         if "/" in d:
@@ -241,9 +401,19 @@ class FallbackStatementParser:
         if m:
             return _short_vendor(m.group(2).strip())
 
-        # 4) general fallback: first token that has letters
-        for token in d.split():
-            if re.search(r"[A-Za-z]", token):
+        # 4) general fallback: skip numeric tokens and dates, get first meaningful text
+        tokens = d.split()
+        for token in tokens:
+            # Skip pure numbers, dates, and common noise words
+            if re.search(r"[A-Za-z]", token) and not re.match(r'^\d+[/-]\d+$', token):
+                # Get first 3 meaningful words for compound names
+                idx = tokens.index(token)
+                name_tokens = []
+                for t in tokens[idx:idx+3]:
+                    if re.search(r"[A-Za-z]", t) and not t.lower() in ['id', 'ref', 'code', 'orig']:
+                        name_tokens.append(t)
+                if name_tokens:
+                    return _short_vendor(" ".join(name_tokens))
                 return _short_vendor(token)
 
         return "UNKNOWN"
@@ -342,12 +512,13 @@ class FallbackStatementParser:
                 if any(k in txt_low for k in ["daily ending", "ending balance", "daily ending balance", "opening balance", "closing balance", "daily ending", "through"]):
                     continue
 
+            ttype = 'deposit' if signed_amount > 0 else 'withdrawal'
             txs.append(Transaction(
                 date=date_norm,
-                transaction_type='deposit' if signed_amount > 0 else 'withdrawal',
+                transaction_type=ttype,
                 vendor=vendor,
                 amount=signed_amount,
-                description=block_text,
+                description=_clean_description(block_text, vendor, ttype),
                 raw_line=block_text,
                 section=section,
                 needs_review=needs_review
@@ -444,16 +615,17 @@ class UniversalParser:
                 # Description (SadaPay format)
                 desc = ln.replace(date_raw, "").replace(amount_raw, "").strip() + " | " + line2
 
-                # Vendor extraction
+                # Vendor extraction - clean and normalize
                 vendor_words = [w for w in desc.split() if w.isalpha()]
-                vendor = " ".join(vendor_words[:3]).title() if vendor_words else "UNKNOWN"
+                vendor = " ".join(vendor_words[:3]) if vendor_words else "UNKNOWN"
+                vendor = _short_vendor(vendor)
 
                 txs.append(Transaction(
                     date=date_norm,
                     transaction_type=ttype,
                     vendor=vendor,
                     amount=amount_val,
-                    description=desc,
+                    description=_clean_description(desc, vendor, ttype),
                     raw_line=ln
                 ))
 
@@ -464,31 +636,53 @@ class UniversalParser:
 
         return txs
     def _extract_vendor(self, desc: str) -> str:
+        """Extract clean vendor name using same logic as FallbackStatementParser."""
         if not desc:
             return "UNKNOWN"
 
-        desc = desc.strip()
-
+        d = desc.strip()
+        
+        # Remove ALL leading date patterns aggressively
+        d = re.sub(r'^\d{1,2}\s+', '', d)  # Remove day/month at start
+        d = re.sub(r'^\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\s+', '', d)  # Remove MM/DD or MM/DD/YYYY
+        
+        # Remove transaction type prefixes MORE AGGRESSIVELY
+        d = re.sub(r'^\d{1,2}\s+', '', d)  # Remove any leading numbers again
+        d = re.sub(r'^\s*(online\s+)?(ach\s+)?(payment|transfer|withdrawal|deposit)\s+(to|from)\s+', '', d, flags=re.I)
+        
+        # ACH patterns
+        m = re.search(r'\b(?:orig\s+)?co\s+name\s+([A-Za-z0-9\s\-\.&]+?)(?:\s+(?:orig\s+)?(?:co\s+)?id\b)', d, re.I)
+        if m:
+            return _short_vendor(m.group(1).strip())
+        
         # Prefer text after slash
-        if "/" in desc:
-            after = desc.split("/")[-1].strip()
+        if "/" in d:
+            after = d.split("/")[-1].strip()
             if re.search(r"[A-Za-z]", after):
-                return after.title()
+                return _short_vendor(after)
 
         # FROM xyz
-        m = re.search(r'\bfrom\s+([A-Za-z0-9\s\-]+)', desc, re.I)
+        m = re.search(r'\bfrom\s+([A-Za-z0-9\s\-\.&]+)', d, re.I)
         if m:
-            return m.group(1).strip().title()
+            return _short_vendor(m.group(1).strip())
 
         # TO xyz
-        m = re.search(r'\bto\s+([A-Za-z0-9\s\-]+)', desc, re.I)
+        m = re.search(r'\bto\s+([A-Za-z0-9\s\-\.&]+)', d, re.I)
         if m:
-            return m.group(1).strip().title()
+            return _short_vendor(m.group(1).strip())
 
-        # fallback: first alpha word
-        for w in desc.split():
-            if re.search(r"[A-Za-z]", w):
-                return w.title()
+        # fallback: skip numeric tokens, get meaningful words
+        tokens = d.split()
+        for token in tokens:
+            if re.search(r"[A-Za-z]", token) and not re.match(r'^\d+[/-]\d+$', token):
+                idx = tokens.index(token)
+                name_tokens = []
+                for t in tokens[idx:idx+3]:
+                    if re.search(r"[A-Za-z]", t) and t.lower() not in ['id', 'ref', 'code', 'orig']:
+                        name_tokens.append(t)
+                if name_tokens:
+                    return _short_vendor(" ".join(name_tokens))
+                return _short_vendor(token)
 
         return "UNKNOWN"
 
@@ -563,7 +757,7 @@ class UniversalParser:
                 transaction_type=ttype,
                 vendor=vendor,
                 amount=signed,
-                description=desc,
+                description=_clean_description(desc, vendor, ttype),
                 raw_line=ln
             ))
 
@@ -607,15 +801,17 @@ class UniversalParser:
             # Description
             desc = ln.replace(date_raw, "").replace(amount_raw, "").strip()
 
-            vendor_words = [w for w in desc.split() if w.isalpha()]
-            vendor = " ".join(vendor_words[:4]).title() if vendor_words else "UNKNOWN"
+            # Extract clean vendor name (skip numbers, get first meaningful words)
+            vendor_words = [w for w in desc.split() if w.isalpha() and len(w) > 1]
+            vendor = " ".join(vendor_words[:3]).title() if vendor_words else "UNKNOWN"
+            vendor = _short_vendor(vendor)
 
             txs.append(Transaction(
                 date=date_norm,
                 transaction_type=ttype,
                 vendor=vendor,
                 amount=amount,
-                description=desc,
+                description=_clean_description(desc, vendor, ttype),
                 raw_line=ln
             ))
 
@@ -934,7 +1130,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
             for vendor, items in sorted(grouped.items(), key=lambda x:(-len(x[1]), x[0])):
                 subtotal = sum(i.amount for i in items)
                 cnt = len(items)
-                with st.expander(f"{vendor} — {cnt} tx — {cur} {subtotal:,.2f}"):
+                with st.expander(f"{vendor}"):
                     details = pd.DataFrame([{
                         "Date": it.date or "",
                         "Amount": f"{cur} {it.amount:,.2f}",
@@ -958,7 +1154,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
             for vendor, items in sorted(grouped.items(), key=lambda x:(-len(x[1]), x[0])):
                 subtotal = sum(abs(i.amount) for i in items)
                 cnt = len(items)
-                with st.expander(f"{vendor} — {cnt} tx — {cur} {subtotal:,.2f}"):
+                with st.expander(f"{vendor}"):
                     details = pd.DataFrame([{
                         "Date": it.date or "",
                         "Amount": f"{cur} {abs(it.amount):,.2f}",

@@ -1,4 +1,4 @@
-#!/Users/ibrahimsohail/Accounts_App/Accounts-App/.venv/bin/python
+#!/Users/ibrahimsohail/Accounts-App/.venv/bin/python
 import sys
 from pdfplumber.cli import main
 if __name__ == '__main__':
