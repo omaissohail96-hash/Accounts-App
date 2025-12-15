@@ -1,3 +1,5 @@
+import pytesseract
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 # bank_data_analysis.py
 # Hybrid Bank Statement Analyzer (deterministic + optional LLM)
 # Paste/replace your old file with this and run: streamlit run bank_data_analysis.py
@@ -14,6 +16,78 @@ from typing import List, Tuple, Dict, Any, Optional
 import pdfplumber
 import pandas as pd
 import streamlit as st
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+# ============================
+# Schedule C Keyword Rules
+# ============================
+
+EXCLUDE_KEYWORDS = [
+    "TRANSFER", "ZELLE", "QUICKPAY", "INTERNAL",
+    "MOVE MONEY", "ONLINE TRANSFER",
+    "OWNER DRAW", "OWNER TRANSFER"
+]
+
+LINE_1_GROSS = [
+    "PAYROLL", "ACH CREDIT", "ORIG CO NAME",
+    "PAYMENT RECEIVED", "STRIPE", "PAYPAL",
+    "SQUARE", "SHOPIFY", "TIKTOK INC",
+    "AMAZON", "META", "GOOGLE"
+]
+
+LINE_8_ADVERTISING = [
+    "FACEBOOK", "META ADS", "GOOGLE ADS",
+    "TIKTOK ADS", "ADWORDS", "PROMOTION"
+]
+
+LINE_9_VEHICLE = [
+    "GAS", "FUEL", "PETROL", "SHELL",
+    "CHEVRON", "EXXON", "PARKING", "TOLL"
+]
+
+LINE_11_CONTRACT = [
+    "FREELANCER", "UPWORK", "FIVERR",
+    "CONTRACTOR", "CONSULTANT"
+]
+
+LINE_17_LEGAL = [
+    "LAW", "LEGAL", "ATTORNEY",
+    "CPA", "ACCOUNTANT", "BOOKKEEP"
+]
+
+LINE_18_OFFICE = [
+    "BANK FEE", "SERVICE FEE", "MONTHLY FEE",
+    "ADOBE", "MICROSOFT", "ZOOM",
+    "HOSTING", "DOMAIN", "GODADDY"
+]
+
+LINE_21_REPAIRS = [
+    "REPAIR", "MAINTENANCE", "FIX"
+]
+
+LINE_22_SUPPLIES = [
+    "SUPPLIES", "STATIONERY", "OFFICE DEPOT",
+    "INK", "PAPER"
+]
+
+LINE_23_TAXES = [
+    "LICENSE", "PERMIT", "TAX", "GOVERNMENT FEE"
+]
+
+LINE_24A_TRAVEL = [
+    "AIRLINE", "FLIGHT", "HOTEL",
+    "BOOKING.COM", "UBER TRIP", "LYFT TRIP"
+]
+
+LINE_24B_MEALS = [
+    "RESTAURANT", "CAFE", "FOOD",
+    "STARBUCKS", "MCDONALD", "KFC"
+]
+
+LINE_25_UTILITIES = [
+    "INTERNET", "MOBILE", "PHONE",
+    "ELECTRIC", "WATER"
+]
+
 
 try:
     import openai
@@ -108,22 +182,57 @@ def _short_vendor(v: str) -> str:
 # ----------------------------
 class DocumentParser:
     def parse_pdf_text_lines(self, file_bytes: bytes) -> Tuple[List[str], List[int]]:
-        unreadable_pages = []
         lines = []
+        unreadable_pages = []
+
+        # ---------- TRY NORMAL PDF TEXT ----------
         try:
             with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
                 for page in pdf.pages:
-                    txt = page.extract_text() or ""
-                    txt = txt.replace('\xa0', ' ')
-                    if txt.strip():
-                        page_lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
-                        lines.extend(page_lines)
-                    else:
-                        unreadable_pages.append(page.page_number)
-            return lines, unreadable_pages
+                    try:
+                        text = page.extract_text() or ""
+                        text = text.replace('\xa0', ' ').strip()
+                        if text:
+                            lines.extend(
+                                [ln.strip() for ln in text.splitlines() if ln.strip()]
+                            )
+                    except Exception:
+                        continue
+
+            # If text extracted successfully → return
+            if lines:
+                return lines, unreadable_pages
+
         except Exception as e:
-            logger.exception("PDF read failed: %s", e)
+            logger.warning("pdfplumber failed, switching to OCR-only mode")
+
+        # ---------- OCR FALLBACK (IMAGE-ONLY PDF) ----------
+        try:
+            from pdf2image import convert_from_bytes
+            from PIL import Image
+            import pytesseract
+
+            images = convert_from_bytes(file_bytes, dpi=300)
+
+            for i, img in enumerate(images):
+                try:
+                    ocr_text = pytesseract.image_to_string(img)
+                    if ocr_text.strip():
+                        lines.extend(
+                            [ln.strip() for ln in ocr_text.splitlines() if ln.strip()]
+                        )
+                    else:
+                        unreadable_pages.append(i + 1)
+                except Exception:
+                    unreadable_pages.append(i + 1)
+
+            return lines, unreadable_pages
+
+        except Exception as e:
+            logger.exception("OCR failed completely: %s", e)
             return [], []
+
+
 
     def parse_document(self, file_bytes: bytes, filename: str) -> Tuple[List[str], bool, List[int]]:
         ext = filename.lower().split('.')[-1]
@@ -155,7 +264,7 @@ class DocumentParser:
             return lines, True, []
         except Exception:
             return [], False, []
-
+    
 # ----------------------------
 # Fallback parser (Chase-optimized, robust)
 # ----------------------------
@@ -163,7 +272,7 @@ class FallbackStatementParser:
     SECTION_PATTERNS = {
         "DEPOSITS": re.compile(r'\bdeposits\s+and\s+additions\b', re.I),
         "CHECKS": re.compile(r'\bchecks\s+paid\b', re.I),
-        "ATM": re.compile(r'\batm\b.*\bdebit\b|\batm\s*&\s*debit\b|\batm\s+withdrawal\b|\batm\s+&\s+debit', re.I),
+        "ATM":re.compile(r'(\bATM\b|\bATM\s+WITHDRAWAL\b|\bCASH\s+WITHDRAWAL\b|\bATM\s+CASH\b|\bDEBIT\s+CARD\s+WITHDRAWAL\b)', re.I),
         "ELECTRONIC_WITHDRAWALS": re.compile(r'\belectronic\s+withdrawals?\b', re.I),
         "FEES": re.compile(r'\bfees?\b', re.I),
     }
@@ -179,7 +288,7 @@ class FallbackStatementParser:
         # Count date tokens and amount tokens; if >1 of each, it's probably a table column row
         date_count = len(DATE_TOKEN_RE.findall(ln))
         amount_count = len(AMOUNT_RE.findall(ln))
-        if date_count >= 2 and amount_count >= 2:
+        if "atm" not in ln.lower() and date_count >= 2 and amount_count >= 2:
             return True
         # "TOTAL DEPOSITS" or similar as a whole line
         if re.search(r'\btotal deposits\b|\btotal withdrawals\b|\bdeposits and additions summary\b', low):
@@ -187,15 +296,18 @@ class FallbackStatementParser:
         return False
 
     def _line_has_vendor_like_text(self, ln: str) -> bool:
-        # A transaction usually has descriptive words (letters) after the date and possibly an amount
-        # If after removing date and amount there's still alphabetical content -> treat as transaction
-        text = ln
-        # remove leading date if present
+        text = ln.lower()
+
+        # ALWAYS accept ATM withdrawals
+        if "atm" in text:
+            return True
+
+        # Remove date and amounts
         text = re.sub(r'^\s*\d{1,2}[/-]\d{1,2}(?:/\d{2,4})?\s*', '', text)
-        # remove amounts
         text = AMOUNT_RE.sub('', text)
-        # if leftover alphabetic words exist, it's descriptive
-        return bool(re.search(r'[A-Za-z]{2,}', text))
+
+        return bool(re.search(r'[a-z]{3,}', text))
+
 
     def _parse_date(self, token: str) -> Optional[str]:
         try:
@@ -212,41 +324,68 @@ class FallbackStatementParser:
     # Improved vendor extractor
     # ------------------------
     def extract_vendor(self, desc: str, *args) -> str:
-        """
-        Robust vendor extractor used by FallbackStatementParser.
-        Accepts desc plus optional extra args (date_raw, amount_raw) — tolerant to various call sites.
-        """
         if not desc:
             return "UNKNOWN"
 
-        d = desc.strip()
+        text = desc
 
-        # 1) prefer text after last slash if that contains letters
-        if "/" in d:
-            after = d.split("/")[-1].strip()
-            if re.search(r"[A-Za-z]", after):
+        # ---------------------------
+        # REMOVE DATE & AMOUNT FIRST
+        # ---------------------------
+        text = re.sub(r'\b\d{1,2}[/-]\d{1,2}([/-]\d{2,4})?\b', ' ', text)   # dates
+        text = re.sub(r'\$?\(?\d{1,3}(?:,\d{3})*(?:\.\d{1,2})\)?', ' ', text)  # amounts
+        text = re.sub(r'\bUSD\b|\bPKR\b|\bEUR\b', ' ', text, flags=re.I)
+
+        # ---------------------------
+        # 1️⃣ ACH FORMAT (MOST IMPORTANT)
+        # Orig CO Name:Shopify
+        # ---------------------------
+        m = re.search(r'orig\s+co\s+name\s*:\s*([A-Za-z][A-Za-z0-9 &\-\.]{2,})', text, re.I)
+        if m:
+            return _short_vendor(m.group(1))
+
+        # ---------------------------
+        # 2️⃣ Merchant / Payee patterns
+        # ---------------------------
+        m = re.search(r'\b(payee|merchant|beneficiary)\s*[:\-]\s*([A-Za-z][A-Za-z0-9 &\-\.]{2,})', text, re.I)
+        if m:
+            return _short_vendor(m.group(2))
+
+        # ---------------------------
+        # 3️⃣ From / To
+        # ---------------------------
+        m = re.search(r'\bfrom\s+([A-Za-z][A-Za-z0-9 &\-\.]{2,})', text, re.I)
+        if m:
+            return _short_vendor(m.group(1))
+
+        m = re.search(r'\bto\s+([A-Za-z][A-Za-z0-9 &\-\.]{2,})', text, re.I)
+        if m:
+            return _short_vendor(m.group(1))
+
+        # ---------------------------
+        # 4️⃣ Slash based (last part)
+        # ---------------------------
+        if "/" in text:
+            after = text.split("/")[-1]
+            if re.search(r"[A-Za-z]{3,}", after):
                 return _short_vendor(after)
 
-        # 2) 'from <name>' or 'to <name>'
-        m = re.search(r'\bfrom\s+([A-Za-z0-9\-\.\s&]+)', d, re.I)
-        if m:
-            return _short_vendor(m.group(1).strip())
+        # ---------------------------
+        # 5️⃣ SAFE TOKEN FALLBACK
+        # ---------------------------
+        stopwords = {
+            "orig", "co", "name", "desc", "date", "entry",
+            "sec", "ccd", "trace", "id", "payment", "transfer"
+        }
 
-        m = re.search(r'\bto\s+([A-Za-z0-9\-\.\s&]+)', d, re.I)
-        if m:
-            return _short_vendor(m.group(1).strip())
-
-        # 3) look for patterns like "PAYEE: XYZ" or "REMIT: XYZ"
-        m = re.search(r'\b(payee|remit|beneficiary|merchant)[:\-]\s*([A-Za-z0-9\-\.\s&]+)', d, re.I)
-        if m:
-            return _short_vendor(m.group(2).strip())
-
-        # 4) general fallback: first token that has letters
-        for token in d.split():
-            if re.search(r"[A-Za-z]", token):
-                return _short_vendor(token)
+        tokens = re.findall(r'[A-Za-z]{3,}', text)
+        for tok in tokens:
+            if tok.lower() not in stopwords:
+                return _short_vendor(tok)
 
         return "UNKNOWN"
+    
+
 
     def parse_statement(self, lines: List[str]) -> Tuple[List[Transaction], Dict[str, Any]]:
         txs: List[Transaction] = []
@@ -278,10 +417,6 @@ class FallbackStatementParser:
 
             # must start with a date to start a new block; ignore stray lines that aren't transactions
             if DATE_AT_START.match(ln):
-                # but ignore daily-ending rows that only contain date and amount(s) and no descriptive words
-                if not self._line_has_vendor_like_text(ln):
-                    # likely a daily ending line with no vendor -> skip
-                    continue
                 if current_block:
                     blocks.append((current_block, current_section))
                 current_block = [ln]
@@ -318,29 +453,40 @@ class FallbackStatementParser:
                 continue
 
             # determine direction strictly by section where possible
+            # determine direction strictly by section where possible
             if section == "DEPOSITS":
                 signed_amount = abs(amt_val)
-            elif section in ("CHECKS", "ATM", "ELECTRONIC_WITHDRAWALS", "FEES"):
+
+            elif "ATM" in section or "DEBIT" in section:
                 signed_amount = -abs(amt_val)
+
+            elif section in ("CHECKS", "ELECTRONIC_WITHDRAWALS", "FEES"):
+                signed_amount = -abs(amt_val)
+
             else:
-                # heuristics
-                low = block_text.lower()
                 if amount_raw.strip().startswith("(") or "-" in amount_raw:
                     signed_amount = -abs(amt_val)
-                elif any(k in low for k in ["deposit", "credit", "received", "payout"]):
-                    signed_amount = abs(amt_val)
                 else:
-                    # safe default withdrawal
-                    signed_amount = -abs(amt_val)
+                    signed_amount = abs(amt_val)
+
+
 
             vendor = self.extract_vendor(block_text, date_raw, amount_raw)
+            if section == "ATM AND DEBIT CARD WITHDRAWALS":
+                vendor = "ATM Withdrawal"
             needs_review = abs(signed_amount) >= 20000.0
 
             # final safety: skip transactions that have UNKNOWN vendor and appear to be balance-only rows
             if vendor == "UNKNOWN":
                 txt_low = block_text.lower()
-                if any(k in txt_low for k in ["daily ending", "ending balance", "daily ending balance", "opening balance", "closing balance", "daily ending", "through"]):
+
+                # ❌ skip ONLY balances, NEVER ATM
+                if section not in ("ATM",) and any(k in txt_low for k in [
+                    "daily ending", "ending balance", "opening balance", "closing balance"
+                ]):
                     continue
+
+
 
             txs.append(Transaction(
                 date=date_norm,
@@ -690,44 +836,112 @@ class LLMEnhancer:
         except Exception as e:
             logger.exception("LLM enhancement error: %s", e)
             return transactions
+class RuleEngineCategorizer:
+    def __init__(self, rules_path="rules.json"):
+        with open(rules_path, "r") as f:
+            self.rules = sorted(json.load(f), key=lambda x: x["priority"])
+
+    def apply(self, transactions: List[Transaction]) -> List[Transaction]:
+        for tx in transactions:
+            if tx.amount > 0:
+                tx.category = "Income"
+                continue
+
+            desc = (tx.description or "").upper()
+            vendor = (tx.vendor or "").upper()
+
+            matched = False
+            for rule in self.rules:
+                if rule["direction"] != "out":
+                    continue
+                if any(k in vendor or k in desc for k in rule["merchant_contains"]):
+                    tx.category = rule["category"]
+                    matched = True
+                    break
+
+            if not matched:
+                tx.category = "Uncategorized"
+
+        return transactions
 
 # ----------------------------
 # Categorizer & dedupe
 # ----------------------------
-class TransactionCategorizer:
-    def process_transactions(self, txs: List[Transaction]) -> List[Transaction]:
-        for t in txs:
-            if t.amount > 0:
-                t.category = "Income"
-            else:
-                low = (t.description or "").lower()
-                if 'uber' in low or 'careem' in low:
-                    t.category = "Transport"
-                elif 'starbuck' in low or 'pizza' in low or 'restaurant' in low:
-                    t.category = "Food"
-                elif 'wise' in low:
-                    t.category = "Transfer"
-                elif 'shopify' in low:
-                    t.category = "Sales"
-                else:
-                    t.category = "Expense"
-        return txs
+class ScheduleCMapper:
+    def __init__(self):
+        self.rules = [
+            ("EXCLUDE", None, EXCLUDE_KEYWORDS),
+            ("Line 1", "GROSS", LINE_1_GROSS),
+            ("Line 8", "ADVERTISING", LINE_8_ADVERTISING),
+            ("Line 9", "VEHICLE", LINE_9_VEHICLE),
+            ("Line 11", "CONTRACT", LINE_11_CONTRACT),
+            ("Line 17", "LEGAL", LINE_17_LEGAL),
+            ("Line 18", "OFFICE", LINE_18_OFFICE),
+            ("Line 21", "REPAIRS", LINE_21_REPAIRS),
+            ("Line 22", "SUPPLIES", LINE_22_SUPPLIES),
+            ("Line 23", "TAXES", LINE_23_TAXES),
+            ("Line 24a", "TRAVEL", LINE_24A_TRAVEL),
+            ("Line 24b", "MEALS", LINE_24B_MEALS),
+            ("Line 25", "UTILITIES", LINE_25_UTILITIES),
+        ]
 
-    def detect_duplicates(self, txs: List[Transaction]) -> List[Transaction]:
-        seen = {}
-        order = []
-        for t in txs:
-            vendor_norm = re.sub(r'\W+', '', (t.vendor or '').lower())
-            key = (t.date, round(t.amount, 2), vendor_norm)
-            if key in seen:
-                existing = seen[key]
-                if existing.needs_review and not t.needs_review:
-                    seen[key] = t
-            else:
-                seen[key] = t
-                order.append(key)
-        return [seen[k] for k in order]
+    def map_transactions(self, transactions):
+        rows = []
 
+        for tx in transactions:
+            desc = (tx.description or "").upper()
+
+            # income
+            if tx.amount > 0:
+                rows.append(("Line 1", "GROSS", "Gross receipts or sales", tx.amount))
+                continue
+
+            matched = False
+
+            for line, code, keywords in self.rules:
+                if any(k in desc for k in keywords):
+                    if line == "EXCLUDE":
+                        matched = True
+                        break
+                    rows.append((line, code, self._desc(line), abs(tx.amount)))
+                    matched = True
+                    break
+
+            if not matched:
+                rows.append(("Line 27a", "UNMAPPED", "Other expenses", abs(tx.amount)))
+
+        df = pd.DataFrame(rows, columns=[
+            "schedule_c_line",
+            "tax_line_code",
+            "tax_line_description",
+            "amount"
+        ])
+
+        return df.groupby(
+            ["schedule_c_line", "tax_line_code", "tax_line_description"],
+            as_index=False
+        ).agg(
+            raw_total_amount=("amount", "sum"),
+            deductible_amount=("amount", "sum"),
+            count=("amount", "count")
+        )
+
+    def _desc(self, line):
+        return {
+            "Line 8": "Advertising",
+            "Line 9": "Car and truck expenses",
+            "Line 11": "Contract labor",
+            "Line 17": "Legal and professional services",
+            "Line 18": "Office expense",
+            "Line 21": "Repairs and maintenance",
+            "Line 22": "Supplies",
+            "Line 23": "Taxes and licenses",
+            "Line 24a": "Travel",
+            "Line 24b": "Meals",
+            "Line 25": "Utilities",
+        }.get(line, "Other expenses")
+
+    
 # ----------------------------
 # Report generator
 # ----------------------------
@@ -794,6 +1008,15 @@ st.markdown(
     "Upload a bank statement (PDF / CSV / DOCX). The app uses a robust deterministic parser optimized for Chase-style "
     "statements (including ATM & Daily Ending Balance protections). If that fails, a conservative universal parser attempts extraction."
 )
+def filter_atm_withdrawals(transactions: List[Transaction]) -> List[Transaction]:
+    atm_txs = []
+    for t in transactions:
+        txt = (t.description or "").lower()
+        if "atm" in txt or "cash withdrawal" in txt or "atm w" in txt:
+            atm_txs.append(t)
+        else:
+            print(f"Skipping: {t.description}")  # Log any ATM-like text that is not detected
+    return atm_txs
 
 with st.sidebar:
     st.header("Settings")
@@ -860,9 +1083,8 @@ if uploaded:
                     st.warning("openai Python package not installed — skipping LLM enhancement.")
 
             # categorize & dedupe
-            cat = TransactionCategorizer()
-            transactions = cat.process_transactions(transactions)
-            transactions = cat.detect_duplicates(transactions)
+            categorizer = RuleEngineCategorizer()
+            transactions = categorizer.apply(transactions)
 
             # stats & reports
             rg = ReportGenerator()
@@ -870,6 +1092,9 @@ if uploaded:
             deposits_df = rg.generate_deposits_summary(transactions)
             withdrawals_df = rg.generate_withdrawals_summary(transactions)
             pl_df = rg.generate_pl_report(transactions)
+            sc_mapper = ScheduleCMapper()
+            schedule_c_df = sc_mapper.map_transactions(transactions)
+            st.session_state.schedule_c_df = schedule_c_df
 
             # Sorting vendor summary based on UI
             if deposits_df is not None and not deposits_df.empty:
@@ -916,7 +1141,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
         stats['Total Withdrawal Amount'] = float(computed_withdrawals)
         stats['Net Income'] = float(computed_deposits - computed_withdrawals)
 
-    tab1, tab2, tab3, tab4 = st.tabs(["💰 Deposits","💸 Withdrawals","📈 P&L","📋 All Transactions"])
+    tab1, tab2, tab3, tab4 , tab5 , tab6 = st.tabs(["💰 Deposits","💸 Withdrawals","📈 P&L","📋 All Transactions" , "📄 Schedule C" , "🏧 ATM Withdrawals"])
     rg = ReportGenerator()
 
     with tab1:
@@ -981,10 +1206,64 @@ if "transactions" in st.session_state and st.session_state.transactions:
             "Description": t.description
         } for t in transactions])
         st.dataframe(all_df, use_container_width=True, hide_index=True)
+    with tab5:
+        st.subheader("📄 Schedule C (IRS View)")
+        st.dataframe(
+            st.session_state.schedule_c_df,
+            use_container_width=True,
+            hide_index=True
+        )
+    with tab6:
+        st.subheader("ATM Withdrawals")
 
+        atm_txs = filter_atm_withdrawals(transactions)
+        atm_txs = [t for t in transactions if t.section == "ATM"]
+
+        if not atm_txs:
+            st.info("No ATM withdrawals found.")
+        else:
+            # Summary table
+            atm_df = pd.DataFrame([{
+                "Date": t.date or "",
+                "Vendor": t.vendor,
+                "Amount": abs(t.amount),
+                "Description": t.description,
+                "Needs Review": t.needs_review
+            } for t in atm_txs])
+
+            total_atm = sum(abs(t.amount) for t in atm_txs)
+
+            st.metric("Total ATM Withdrawals", f"{cur} {total_atm:,.2f}", f"{len(atm_txs)} tx")
+
+            st.dataframe(
+                atm_df.assign(
+                    Amount=lambda x: x["Amount"].map(lambda v: f"{cur} {v:,.2f}"),
+                    **{"Needs Review": atm_df["Needs Review"].map(lambda x: "⚠ Yes" if x else "✅ No")}
+                ),
+                use_container_width=True,
+                hide_index=True
+            )
+
+            # Group by ATM vendor (optional, nice touch)
+            grouped = {}
+            for t in atm_txs:
+                key = t.vendor or "UNKNOWN ATM"
+                grouped.setdefault(key, []).append(t)
+
+            for vendor, items in sorted(grouped.items(), key=lambda x: -len(x[1])):
+                subtotal = sum(abs(i.amount) for i in items)
+                cnt = len(items)
+                with st.expander(f"{vendor} — {cnt} tx — {cur} {subtotal:,.2f}"):
+                    details = pd.DataFrame([{
+                        "Date": it.date,
+                        "Amount": f"{cur} {abs(it.amount):,.2f}",
+                        "Description": it.description
+                    } for it in items])
+                    st.dataframe(details, use_container_width=True, hide_index=True)
+    
     # Downloads
     st.header("📥 Download")
-    c1,c2,c3 = st.columns(3)
+    c1,c2,c3 ,c4 = st.columns(4)
     with c1:
         dep_csv = st.session_state.deposit_df.to_csv(index=False) if (st.session_state.deposit_df is not None and not st.session_state.deposit_df.empty) else ""
         st.download_button("⬇ Deposits CSV", dep_csv, "deposits.csv", mime="text/csv")
@@ -994,5 +1273,13 @@ if "transactions" in st.session_state and st.session_state.transactions:
     with c3:
         pnl_csv = st.session_state.pl_df.to_csv(index=False) if (st.session_state.pl_df is not None and not st.session_state.pl_df.empty) else ""
         st.download_button("⬇ P&L CSV", pnl_csv, "pnl.csv", mime="text/csv")
+    with c4:
+        sc_csv = st.session_state.schedule_c_df.to_csv(index=False)
+        st.download_button(
+            "⬇ Schedule C CSV",
+            sc_csv,
+            "schedule_c.csv",
+            mime="text/csv"
+        )
 
     st.success("✅ Report generated. Verify totals against your bank statement.")

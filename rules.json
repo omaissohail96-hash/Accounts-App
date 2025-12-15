@@ -1,0 +1,10 @@
+[
+  { "priority": 1, "merchant_contains": ["UBER", "LYFT"], "direction": "out", "category": "Travel" },
+  { "priority": 2, "merchant_contains": ["DELTA", "UNITED", "AMERICAN AIR"], "direction": "out", "category": "Travel" },
+  { "priority": 3, "merchant_contains": ["DOORDASH", "UBEREATS", "STARBUCKS", "RESTAURANT"], "direction": "out", "category": "Meals" },
+  { "priority": 4, "merchant_contains": ["AMAZON", "AMZN"], "direction": "out", "category": "Office Supplies" },
+  { "priority": 5, "merchant_contains": ["UPS", "FEDEX", "DHL", "USPS"], "direction": "out", "category": "Shipping" },
+  { "priority": 6, "merchant_contains": ["GOOGLE ADS", "FACEBOOK ADS", "META", "TIKTOK ADS"], "direction": "out", "category": "Advertising" },
+  { "priority": 7, "merchant_contains": ["PAYPAL", "STRIPE", "SQUARE"], "direction": "out", "category": "Bank Fees" },
+  { "priority": 8, "merchant_contains": ["FIVERR", "UPWORK"], "direction": "out", "category": "Contract Labor" }
+]
