@@ -117,11 +117,16 @@ class Transaction:
 # ----------------------------
 DATE_TOKEN_RE = re.compile(r'(?P<d>\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?|\d{4}-\d{2}-\d{2}|\d{1,2}\s+[A-Za-z]{3,9}\s*\d{0,4})')
 DATE_AT_START = re.compile(r'^\s*(\d{1,2}/\d{1,2}(?:/\d{2,4})?)\b')
-AMOUNT_RE = AMOUNT_RE = re.compile(
+AMOUNT_RE = re.compile(
     r'([+\-]?\(?\s*\$?\d{1,3}(?:[,\s]\d{3})*\.\d{2}\)?)'
 )
 MULTI_DATE_AMT_RE = re.compile(r'(\d{1,2}[/-]\d{1,2}|[+\-]?\(?\s*\d{1,3}(?:[,\s]\d{3})*(?:\.\d{1,2})\)?)')
-
+CHECK_ROW_RE = re.compile(r'^\s*(\d{2,6})\b') 
+FEE_KEYWORDS_RE = re.compile(
+    r'\b(fee|service fee|monthly fee|maintenance fee|bank fee|account fee)\b',
+    re.I
+)
+CHECK_NO_RE = re.compile(r'\bcheck\s*(\d+)\b', re.I)
 def _normalize_date_token(token: str) -> str:
     if not token:
         return ""
@@ -468,17 +473,14 @@ class FallbackStatementParser:
     def _line_has_vendor_like_text(self, ln: str) -> bool:
         text = ln.lower()
 
-        # ALWAYS accept ATM withdrawals
-        if "atm" in text:
+        # ALWAYS accept ATM and FEES
+        if "atm" in text or "fee" in text:
             return True
 
-        # Remove date and amounts
         text = re.sub(r'^\s*\d{1,2}[/-]\d{1,2}(?:/\d{2,4})?\s*', '', text)
         text = AMOUNT_RE.sub('', text)
 
         return bool(re.search(r'[a-z]{3,}', text))
-
-
     def _parse_date(self, token: str) -> Optional[str]:
         try:
             # Normalize forms like 12/03 -> YYYY-MM-DD
@@ -550,6 +552,7 @@ class FallbackStatementParser:
         # ---------------------------
         # 2️⃣ Merchant / Payee patterns
         # ---------------------------
+        
         m = re.search(r'\b(payee|merchant|beneficiary)\s*[:\-]\s*([A-Za-z][A-Za-z0-9 &\-\.]{2,})', text, re.I)
         if m:
             return _short_vendor(m.group(2))
@@ -625,7 +628,7 @@ class FallbackStatementParser:
         blocks: List[Tuple[List[str], str]] = []
         current_section = "UNKNOWN"
         current_block: Optional[List[str]] = None
-
+        ALWAYS_ALLOW_SECTIONS = {"ATM", "CHECKS", "FEES"}
         for ln in cleaned:
             # detect section headers
             matched_section = None
@@ -642,21 +645,41 @@ class FallbackStatementParser:
                 continue
 
             # must start with a date to start a new block; ignore stray lines that aren't transactions
-            if DATE_AT_START.match(ln):
+            is_check_row = current_section == "CHECKS" and CHECK_ROW_RE.match(ln)
+            is_fee_row   = current_section == "FEES" and DATE_AT_START.match(ln)
+            # ---- PATCH: CHECKS PAID START ----
+            if current_section == "CHECKS":
+                # Chase checks start with check number, not date
+                if re.match(r'^\d{1,4}\s', ln):
+                    if current_block:
+                        blocks.append((current_block, current_section))
+                    current_block = [ln]
+                    continue
+            # ---- PATCH: CHECKS PAID END ----
+
+            if DATE_AT_START.match(ln) or is_check_row or is_fee_row:
                 if current_block:
                     blocks.append((current_block, current_section))
                 current_block = [ln]
             else:
-                # continuation line appended to last block if any
                 if current_block is not None:
                     current_block.append(ln)
-                else:
-                    # stray continuation without start - ignore
-                    continue
-
+            if DATE_AT_START.match(ln):
+                # ALLOW CHECKS & FEES even without vendor text
+                if (
+                    current_section not in ("ATM", "CHECKS", "FEES")
+                    and not self._line_has_vendor_like_text(ln)
+                ):
+                    continue        
+            # ---- PATCH: FEES PROTECTION ----
+            if current_section == "FEES":
+                pass  # never skip fee lines
+            elif self._is_summary_line(ln):
+                continue
+            # ---- PATCH END ----
+        
         if current_block:
             blocks.append((current_block, current_section))
-
         # 3. parse each block
         for block_lines, section in blocks:
             block_text = " ".join(block_lines)
@@ -701,6 +724,8 @@ class FallbackStatementParser:
 
 
             vendor = self.extract_vendor(block_text, date_raw, amount_raw)
+            if section == "FEES":
+                vendor = "Bank Fees"
             if section == "ATM":
                 vendor = "ATM Withdrawal"
             needs_review = abs(signed_amount) >= 20000.0
