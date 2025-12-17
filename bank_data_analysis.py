@@ -449,10 +449,16 @@ class FallbackStatementParser:
         "CHECKS": re.compile(r'\bchecks\s+paid\b', re.I),
         "ATM": re.compile(r"ATM\s*&\s*DEBIT\s*CARD\s*WITHDRAWALS", re.I),
         "ELECTRONIC_WITHDRAWALS": re.compile(r'\belectronic\s+withdrawals?\b', re.I),
-        "FEES": re.compile(r'\bfees?\b', re.I),
+        "FEES": re.compile(
+             r'(monthly\s+service\s+fee|service\s+fee|bank\s+fee|fees\s+charged)',
+            re.I),
+
     }
 
     def _is_summary_line(self, ln: str) -> bool:
+        low = ln.lower()
+        if any(k in low for k in ["fee", "service fee", "monthly fee", "bank fee"]):
+            return False
         if not ln or not ln.strip():
             return True
         low = ln.lower().strip()
@@ -463,18 +469,30 @@ class FallbackStatementParser:
         # Count date tokens and amount tokens; if >1 of each, it's probably a table column row
         date_count = len(DATE_TOKEN_RE.findall(ln))
         amount_count = len(AMOUNT_RE.findall(ln))
-        if "atm" not in ln.lower() and date_count >= 2 and amount_count >= 2:
+        if (
+            "atm" not in low
+            and "check" not in low
+            and "fee" not in low
+            and "ach" not in low
+            and date_count >= 2
+            and amount_count >= 2
+        ):
             return True
+
         # "TOTAL DEPOSITS" or similar as a whole line
         if re.search(r'\btotal deposits\b|\btotal withdrawals\b|\bdeposits and additions summary\b', low):
             return True
+        print("SKIPPED:", ln) 
         return False
 
     def _line_has_vendor_like_text(self, ln: str) -> bool:
         text = ln.lower()
 
         # ALWAYS accept ATM and FEES
-        if "atm" in text or "fee" in text:
+        if "fee" in text:
+            return True  # <-- ADD THIS LINE
+
+        if "atm" in text:
             return True
 
         text = re.sub(r'^\s*\d{1,2}[/-]\d{1,2}(?:/\d{2,4})?\s*', '', text)
@@ -620,6 +638,18 @@ class FallbackStatementParser:
         txs: List[Transaction] = []
         # 1. Pre-clean
         cleaned = [ln for ln in (l.strip() for l in lines) if ln and not self._is_summary_line(ln)]
+        forced_lines = []
+
+        for ln in cleaned:
+            # CHECK pattern
+            if re.search(r'\b\d{3,6}\b.*\d{1,3}(?:,\d{3})*\.\d{2}', ln):
+                forced_lines.append(ln)
+
+            # FEE pattern
+            elif re.search(r'\bfee\b', ln, re.I) and re.search(r'\d+\.\d{2}', ln):
+                forced_lines.append(ln)
+
+        cleaned = list(dict.fromkeys(cleaned + forced_lines))
 
         if not cleaned:
             return [], {"parsed_from": "fallback", "transactions_extracted": 0}
@@ -648,28 +678,37 @@ class FallbackStatementParser:
             is_check_row = current_section == "CHECKS" and CHECK_ROW_RE.match(ln)
             is_fee_row   = current_section == "FEES" and DATE_AT_START.match(ln)
             # ---- PATCH: CHECKS PAID START ----
-            if current_section == "CHECKS":
-                # Chase checks start with check number, not date
-                if re.match(r'^\d{1,4}\s', ln):
+            if current_section == "CHECKS" and re.match(r'^\d{2,6}\s', ln):
                     if current_block:
                         blocks.append((current_block, current_section))
                     current_block = [ln]
                     continue
             # ---- PATCH: CHECKS PAID END ----
 
-            if DATE_AT_START.match(ln) or is_check_row or is_fee_row:
+            # FORCE fees to start a block even if section header is missing
+            is_fee_line = (
+                DATE_AT_START.match(ln)
+                and FEE_KEYWORDS_RE.search(ln)
+            )
+
+            if DATE_AT_START.match(ln) or is_check_row or is_fee_row or is_fee_line:
                 if current_block:
                     blocks.append((current_block, current_section))
                 current_block = [ln]
+
+                # hard-lock section
+                if is_fee_line:
+                    current_section = "FEES"
+
             else:
                 if current_block is not None:
                     current_block.append(ln)
             if DATE_AT_START.match(ln):
                 # ALLOW CHECKS & FEES even without vendor text
-                if (
-                    current_section not in ("ATM", "CHECKS", "FEES")
-                    and not self._line_has_vendor_like_text(ln)
-                ):
+                if current_section not in ("ATM", "CHECKS", "FEES"):
+                    if not self._line_has_vendor_like_text(ln):
+                        continue
+                
                     continue        
             # ---- PATCH: FEES PROTECTION ----
             if current_section == "FEES":
@@ -681,10 +720,28 @@ class FallbackStatementParser:
         if current_block:
             blocks.append((current_block, current_section))
         # 3. parse each block
+        # ---- HARD CHECKS OVERRIDE ----
+        check_lines = []
+        in_checks = False
+        for ln in cleaned:
+            if self.SECTION_PATTERNS["CHECKS"].search(ln):
+                in_checks = True
+                continue
+            if in_checks and any(self.SECTION_PATTERNS[s].search(ln) for s in ["ATM", "FEES", "ELECTRONIC_WITHDRAWALS"]):
+                in_checks = False
+            if in_checks:
+                check_lines.append(ln)
+
+        check_txs = self._parse_checks_section(check_lines)
+        txs.extend(check_txs)
+        # ---- END CHECK OVERRIDE ----
+
         for block_lines, section in blocks:
+            if section == "CHECKS":
+                continue
             block_text = " ".join(block_lines)
             # skip if looks like a total or header inside
-            if re.search(r'\btotal\b.*\d', block_text, re.I):
+            if section != "FEES" and re.search(r'\btotal\b.*\d', block_text, re.I):
                 continue
             # get date from first line
             first_line = block_lines[0]
@@ -709,8 +766,12 @@ class FallbackStatementParser:
 
             elif section == "ATM":
                 signed_amount = -abs(amt_val)
+            # --- FORCE BANK FEES ---
+            elif re.search(r'\bfee\b', block_text, re.I):
+                signed_amount = -abs(amt_val)
+                vendor = "Bank Fees"
 
-            elif section in ("CHECKS", "ELECTRONIC_WITHDRAWALS", "FEES"):
+            elif section in ("CHECKS", "ELECTRONIC_WITHDRAWALS"):
                 signed_amount = -abs(amt_val)
 
             else:
@@ -724,8 +785,13 @@ class FallbackStatementParser:
 
 
             vendor = self.extract_vendor(block_text, date_raw, amount_raw)
+            if section == "CHECKS":
+                pass
             if section == "FEES":
                 vendor = "Bank Fees"
+            else:
+                vendor = self.extract_vendor(block_text, date_raw, amount_raw)
+
             if section == "ATM":
                 vendor = "ATM Withdrawal"
             needs_review = abs(signed_amount) >= 20000.0
@@ -756,6 +822,31 @@ class FallbackStatementParser:
 
         meta = {"parsed_from": "chase_sectioned_fallback", "transactions_extracted": len(txs)}
         return txs, meta
+    def _parse_checks_section(self, lines: List[str]) -> List[Transaction]:
+        txs = []
+
+        # --- HARD CHECKS PASS (page-break safe) ---
+        for ln in lines:
+            # Chase checks start with check number
+            m = re.match(r'^(\d{3,6})\s+.*?(\d{1,3}(?:,\d{3})*\.\d{2})$', ln)
+            if m:
+                amt = self._parse_amount(m.group(2))
+                if amt is None:
+                    continue
+
+                txs.append(Transaction(
+                    date="",  # Chase check dates are separate column
+                    transaction_type="withdrawal",
+                    vendor=f"Check #{m.group(1)}",
+                    amount=-abs(amt),
+                    description=ln,
+                    raw_line=ln,
+                    section="CHECKS",
+                    needs_review=False
+                ))
+
+        return txs
+
 
 # ----------------------------
 # Universal parser fallback for simpler bank statements (SadaPay, sample banks)
