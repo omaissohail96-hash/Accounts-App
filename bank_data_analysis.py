@@ -1436,9 +1436,13 @@ if uploaded:
             deposits_df = rg.generate_deposits_summary(transactions)
             withdrawals_df = rg.generate_withdrawals_summary(transactions)
             pl_df = rg.generate_pl_report(transactions)
-            sc_mapper = ScheduleCMapper()
-            schedule_c_df = sc_mapper.map_transactions(transactions)
+            # Use the comprehensive Schedule C categorizer
+            from schedule_c_categorizer import ScheduleCCategorizer
+            sc_categorizer = ScheduleCCategorizer()
+            categorized_transactions = sc_categorizer.categorize_transactions(transactions)
+            schedule_c_df = sc_categorizer.generate_schedule_c_dataframe(categorized_transactions)
             st.session_state.schedule_c_df = schedule_c_df
+            st.session_state.categorized_transactions = categorized_transactions  # Store for detail view
 
             # Sorting vendor summary based on UI
             if deposits_df is not None and not deposits_df.empty:
@@ -1552,11 +1556,131 @@ if "transactions" in st.session_state and st.session_state.transactions:
         st.dataframe(all_df, use_container_width=True, hide_index=True)
     with tab5:
         st.subheader("📄 Schedule C (IRS View)")
-        st.dataframe(
-            st.session_state.schedule_c_df,
-            use_container_width=True,
-            hide_index=True
-        )
+        
+        schedule_c_df = st.session_state.schedule_c_df
+        if schedule_c_df is None or schedule_c_df.empty:
+            st.info("No Schedule C data available.")
+        else:
+            # Add toggle for P&L format vs IRS Schedule C format
+            view_format = st.radio(
+                "View Format:",
+                ["IRS Schedule C (Line Numbers)", "Profit & Loss (Account Codes)"],
+                horizontal=True
+            )
+            
+            if view_format == "Profit & Loss (Account Codes)":
+                # Show P&L format with account codes
+                if "categorized_transactions" in st.session_state:
+                    from schedule_c_categorizer import ScheduleCCategorizer
+                    from datetime import datetime
+                    
+                    sc_categorizer = ScheduleCCategorizer()
+                    categorized_transactions = st.session_state.categorized_transactions
+                    
+                    # Auto-detect period from transactions
+                    if transactions:
+                        dates = [tx.date for tx in transactions if tx.date]
+                        if dates:
+                            try:
+                                # Try to parse dates and get the month/year
+                                sample_date = dates[0]
+                                if sample_date:
+                                    if isinstance(sample_date, str):
+                                        # Parse date string
+                                        date_obj = datetime.strptime(sample_date, "%Y-%m-%d")
+                                    else:
+                                        date_obj = sample_date
+                                    month_name = date_obj.strftime("%B")
+                                    year = date_obj.strftime("%Y")
+                                    period = f"{month_name} {year}"
+                                else:
+                                    period = datetime.now().strftime("%B %Y")
+                            except:
+                                period = datetime.now().strftime("%B %Y")
+                        else:
+                            period = datetime.now().strftime("%B %Y")
+                    else:
+                        period = datetime.now().strftime("%B %Y")
+                    
+                    # Optional: Allow user to override business name and period
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        business_name = st.text_input("Business Name (optional):", value="", key="business_name_pl")
+                    with col2:
+                        period_input = st.text_input("Period (optional):", value=period, key="period_pl")
+                    
+                    # Generate P&L report
+                    pl_report = sc_categorizer.generate_pl_report_with_account_codes(
+                        categorized_transactions,
+                        business_name=business_name if business_name else "",
+                        period=period_input if period_input else period
+                    )
+                    
+                    # Display as formatted text in a code block for better formatting
+                    st.code(pl_report, language=None)
+                    
+                    # Download button
+                    st.download_button(
+                        label="⬇️ Download P&L Report",
+                        data=pl_report,
+                        file_name=f"P&L_{period_input.replace(' ', '_') if period_input else 'Report'}.txt",
+                        mime="text/plain"
+                    )
+            else:
+                # Display summary table (IRS Schedule C format)
+                st.dataframe(
+                    schedule_c_df,
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                # Show expandable details for each category
+                if "categorized_transactions" in st.session_state:
+                    categorized_transactions = st.session_state.categorized_transactions
+                    
+                    # Group transactions by Schedule C category
+                    category_groups = {}
+                    for transaction, category in categorized_transactions:
+                        # Skip excluded and owner draws
+                        if category.is_excluded or category.is_owner_draw or not category.line_number:
+                            continue
+                        
+                        # Create a unique key for each category
+                        category_key = (category.line_number, category.tax_code, category.category_name)
+                        if category_key not in category_groups:
+                            category_groups[category_key] = []
+                        category_groups[category_key].append((transaction, category))
+                    
+                    # Display expandable sections for each category
+                    for (line_number, tax_code, category_name), items in sorted(
+                        category_groups.items(),
+                        key=lambda x: (
+                            # Sort by line number (extract numeric part)
+                            float(re.search(r'(\d+)', x[0][0]).group(1)) if re.search(r'(\d+)', x[0][0]) else 999,
+                            x[0][0]  # Then by line number string
+                        )
+                    ):
+                        # Calculate subtotal for this category
+                        subtotal = sum(
+                            abs(tx.amount) if tx.amount < 0 else tx.amount
+                            for tx, cat in items
+                        )
+                        count = len(items)
+                        
+                        # Create expander label with summary info
+                        expander_label = f"{line_number} · {category_name} - {cur} {subtotal:,.2f} ({count} tx)"
+                        
+                        with st.expander(expander_label):
+                            # Create detail table
+                            details = pd.DataFrame([{
+                                "Date": tx.date or "",
+                                "Vendor": tx.vendor or "",
+                                "Amount": f"{cur} {abs(tx.amount):,.2f}" if tx.amount < 0 else f"{cur} {tx.amount:,.2f}",
+                                "Description": tx.description,
+                                "Tax Code": cat.tax_code,
+                                "Needs Review": "⚠ Yes" if tx.needs_review else "✅ No"
+                            } for tx, cat in items])
+                            st.dataframe(details, use_container_width=True, hide_index=True)
     with tab6:
         st.subheader("ATM Withdrawals")
 

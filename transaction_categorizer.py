@@ -136,13 +136,20 @@ class TransactionCategorizer:
         unique_transactions = []
         
         for trans in transactions:
-            # Create a unique key based on date, amount, and description
-            # Allow small variations in description (normalize)
+            # Create a unique key based on date, amount, description, vendor, and raw_line
+            # Include vendor (which contains check number for checks) to distinguish 
+            # different checks with same amount
+            # Also include raw_line hash to catch any edge cases
             desc_normalized = re.sub(r'[^a-z0-9]', '', trans.description.lower())[:30]
+            vendor_normalized = re.sub(r'[^a-z0-9]', '', (trans.vendor or '').lower())[:30]
+            raw_line_hash = hash(trans.raw_line) if trans.raw_line else 0
+            
             key = (
                 trans.date,
                 round(trans.amount, 2),
-                desc_normalized
+                desc_normalized,
+                vendor_normalized,
+                raw_line_hash
             )
             
             if key not in seen:
