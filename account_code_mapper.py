@@ -109,4 +109,3 @@ class AccountCodeMapper:
         Format account name for display (e.g., "601 · SALES")
         """
         return f"{account_code} · {account_name}"
-

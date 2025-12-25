@@ -127,6 +127,10 @@ FEE_KEYWORDS_RE = re.compile(
     re.I
 )
 CHECK_NO_RE = re.compile(r'\bcheck\s*(\d+)\b', re.I)
+OPENING_BALANCE_RE = re.compile(
+    r'(opening balance|beginning balance)[^\d\-]*([\$]?\(?\d{1,3}(?:,\d{3})*(?:\.\d{2})\)?)',
+    re.IGNORECASE
+)
 def _normalize_date_token(token: str) -> str:
     if not token:
         return ""
@@ -444,6 +448,11 @@ def extract_true_amount(text: str) -> Optional[float]:
     return None
 
 class FallbackStatementParser:
+    def __init__(self, include_opening_balance: bool = False):
+        self.include_opening_balance = include_opening_balance
+        self.opening_balance: Optional[float] = None
+        self.statement_start_date: Optional[str] = None
+
     SECTION_PATTERNS = {
         "DEPOSITS": re.compile(r'\bdeposits\s+and\s+additions\b', re.I),
         "CHECKS": re.compile(r'\bchecks\s+paid\b', re.I),
@@ -454,7 +463,17 @@ class FallbackStatementParser:
             re.I),
 
     }
+    def _extract_opening_balance(self, line: str):
+        if self.opening_balance is not None:
+            return
 
+        m = OPENING_BALANCE_RE.search(line)
+        if not m:
+            return
+
+        raw = m.group(2)
+        amt = float(raw.replace('$', '').replace(',', '').replace('(', '').replace(')', ''))
+        self.opening_balance = amt
     def _is_summary_line(self, ln: str) -> bool:
         low = ln.lower()
         if any(k in low for k in ["fee", "service fee", "monthly fee", "bank fee"]):
@@ -637,6 +656,8 @@ class FallbackStatementParser:
     def parse_statement(self, lines: List[str]) -> Tuple[List[Transaction], Dict[str, Any]]:
         txs: List[Transaction] = []
         # 1. Pre-clean
+        for ln in lines:
+            self._extract_opening_balance(ln)
         cleaned = [ln for ln in (l.strip() for l in lines) if ln and not self._is_summary_line(ln)]
         forced_lines = []
 
@@ -748,7 +769,8 @@ class FallbackStatementParser:
             dmatch = DATE_AT_START.match(first_line)
             date_raw = dmatch.group(1) if dmatch else ""
             date_norm = self._parse_date(date_raw) or ""
-
+            if not self.statement_start_date and date_norm:
+                self.statement_start_date = date_norm
             # amounts: choose last amount-like token
             amounts = AMOUNT_RE.findall(block_text)
             if not amounts:
@@ -820,6 +842,24 @@ class FallbackStatementParser:
                 needs_review=needs_review
             ))
 
+        
+        # ----------------------------------
+        # Inject Opening Balance (OPTIONAL)
+        # ----------------------------------
+        if (
+            self.include_opening_balance
+            and self.opening_balance is not None
+        ):
+            txs.insert(0, Transaction(
+                date=self.statement_start_date or "",
+                transaction_type="deposit",
+                vendor="Opening Balance",
+                amount=abs(self.opening_balance),
+                description="Opening balance from bank statement",
+                raw_line="OPENING_BALANCE",
+                section="OPENING",
+                needs_review=False
+            ))
         meta = {"parsed_from": "chase_sectioned_fallback", "transactions_extracted": len(txs)}
         return txs, meta
     def _parse_checks_section(self, lines: List[str]) -> List[Transaction]:
@@ -1396,6 +1436,11 @@ uploaded = st.file_uploader("Upload statement (PDF, CSV, DOCX)", type=["pdf", "c
 if uploaded:
     st.info(f"File: {uploaded.name} — {uploaded.size/1024:.1f} KB")
     currency = st.selectbox("Currency", ["PKR", "USD", "EUR", "GBP", "AED", "CAD", "AUD"], index=1)
+    include_opening_balance = st.checkbox(
+    "Include Opening Balance",
+    value=False,
+    help="Adds opening balance as a deposit before transactions"
+)
 
     if st.button("Process Statement"):
         with st.spinner("Parsing & processing..."):
@@ -1409,7 +1454,7 @@ if uploaded:
                 st.stop()
 
             # First try Chase-optimized fallback
-            fallback = FallbackStatementParser()
+            fallback = FallbackStatementParser(include_opening_balance=include_opening_balance)
             transactions, meta = fallback.parse_statement(lines)
 
             # If nothing extracted or too few rows, try UniversalParser conservative fallback
@@ -1555,132 +1600,193 @@ if "transactions" in st.session_state and st.session_state.transactions:
         } for t in transactions])
         st.dataframe(all_df, use_container_width=True, hide_index=True)
     with tab5:
-        st.subheader("📄 Schedule C (IRS View)")
-        
-        schedule_c_df = st.session_state.schedule_c_df
+        st.subheader("📄 Schedule C / Profit & Loss")
+
+        schedule_c_df = st.session_state.get("schedule_c_df")
+
         if schedule_c_df is None or schedule_c_df.empty:
             st.info("No Schedule C data available.")
-        else:
-            # Add toggle for P&L format vs IRS Schedule C format
-            view_format = st.radio(
-                "View Format:",
-                ["IRS Schedule C (Line Numbers)", "Profit & Loss (Account Codes)"],
-                horizontal=True
-            )
-            
-            if view_format == "Profit & Loss (Account Codes)":
-                # Show P&L format with account codes
-                if "categorized_transactions" in st.session_state:
-                    from schedule_c_categorizer import ScheduleCCategorizer
-                    from datetime import datetime
-                    
-                    sc_categorizer = ScheduleCCategorizer()
-                    categorized_transactions = st.session_state.categorized_transactions
-                    
-                    # Auto-detect period from transactions
-                    if transactions:
-                        dates = [tx.date for tx in transactions if tx.date]
-                        if dates:
-                            try:
-                                # Try to parse dates and get the month/year
-                                sample_date = dates[0]
-                                if sample_date:
-                                    if isinstance(sample_date, str):
-                                        # Parse date string
-                                        date_obj = datetime.strptime(sample_date, "%Y-%m-%d")
-                                    else:
-                                        date_obj = sample_date
-                                    month_name = date_obj.strftime("%B")
-                                    year = date_obj.strftime("%Y")
-                                    period = f"{month_name} {year}"
-                                else:
-                                    period = datetime.now().strftime("%B %Y")
-                            except:
-                                period = datetime.now().strftime("%B %Y")
-                        else:
-                            period = datetime.now().strftime("%B %Y")
-                    else:
-                        period = datetime.now().strftime("%B %Y")
-                    
-                    # Optional: Allow user to override business name and period
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        business_name = st.text_input("Business Name (optional):", value="", key="business_name_pl")
-                    with col2:
-                        period_input = st.text_input("Period (optional):", value=period, key="period_pl")
-                    
-                    # Generate P&L report
-                    pl_report = sc_categorizer.generate_pl_report_with_account_codes(
-                        categorized_transactions,
-                        business_name=business_name if business_name else "",
-                        period=period_input if period_input else period
-                    )
-                    
-                    # Display as formatted text in a code block for better formatting
-                    st.code(pl_report, language=None)
-                    
-                    # Download button
-                    st.download_button(
-                        label="⬇️ Download P&L Report",
-                        data=pl_report,
-                        file_name=f"P&L_{period_input.replace(' ', '_') if period_input else 'Report'}.txt",
-                        mime="text/plain"
-                    )
+            st.stop()
+
+        view_format = st.radio(
+            "View Format:",
+            ["IRS Schedule C (Line Numbers)", "Profit & Loss (Account Codes)"],
+            horizontal=True
+        )
+
+        categorized_transactions = st.session_state.get("categorized_transactions", [])
+        transactions = st.session_state.get("transactions", [])
+
+        from datetime import datetime
+        import pandas as pd
+        import re
+
+        cur = "USD"
+
+        # ===============================
+        # PROFIT & LOSS VIEW
+        # ===============================
+        if view_format == "Profit & Loss (Account Codes)":
+
+            from schedule_c_categorizer import ScheduleCCategorizer
+            sc_categorizer = ScheduleCCategorizer()
+
+            # ---- Robust period detection (min → max date)
+            date_objs = []
+            for tx in transactions:
+                if tx.date:
+                    try:
+                        date_objs.append(
+                            datetime.strptime(tx.date, "%Y-%m-%d")
+                        )
+                    except:
+                        pass
+
+            if date_objs:
+                start = min(date_objs)
+                end = max(date_objs)
+                default_period = f"{start.strftime('%b %Y')} – {end.strftime('%b %Y')}"
             else:
-                # Display summary table (IRS Schedule C format)
-                st.dataframe(
-                    schedule_c_df,
-                    use_container_width=True,
-                    hide_index=True
+                default_period = datetime.now().strftime("%B %Y")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                business_name = st.text_input("Business Name (optional):", key="pl_business")
+            with col2:
+                period_input = st.text_input("Period:", value=default_period, key="pl_period")
+
+            # ---- Generate P&L text
+            pl_text = sc_categorizer.generate_pl_report_with_account_codes(
+                categorized_transactions,
+                business_name=business_name or "",
+                period=period_input
+            )
+
+            st.subheader("📊 Profit & Loss Statement")
+            st.code(pl_text)
+
+            # ---- Build structured P&L dataframe
+            rows = []
+            review_total = 0
+            review_count = 0
+
+            for tx, cat in categorized_transactions:
+                if cat.is_excluded or cat.is_owner_draw:
+                    continue
+
+                amt = abs(tx.amount)
+
+                rows.append({
+                    "Account Code": cat.tax_code,
+                    "Account Name": cat.category_name,
+                    "Type": "Income" if tx.amount > 0 else "Expense",
+                    "Amount": amt,
+                    "Needs Review": tx.needs_review
+                })
+
+                if tx.needs_review:
+                    review_total += amt
+                    review_count += 1
+
+            pl_df = pd.DataFrame(rows)
+
+            if not pl_df.empty:
+                summary_df = (
+                    pl_df
+                    .groupby(["Account Code", "Account Name", "Type"])
+                    .agg(
+                        Amount=("Amount", "sum"),
+                        Transactions=("Amount", "count")
+                    )
+                    .reset_index()
+                    .sort_values(by=["Type", "Account Code"])
                 )
-                
-                # Show expandable details for each category
-                if "categorized_transactions" in st.session_state:
-                    categorized_transactions = st.session_state.categorized_transactions
-                    
-                    # Group transactions by Schedule C category
-                    category_groups = {}
-                    for transaction, category in categorized_transactions:
-                        # Skip excluded and owner draws
-                        if category.is_excluded or category.is_owner_draw or not category.line_number:
-                            continue
-                        
-                        # Create a unique key for each category
-                        category_key = (category.line_number, category.tax_code, category.category_name)
-                        if category_key not in category_groups:
-                            category_groups[category_key] = []
-                        category_groups[category_key].append((transaction, category))
-                    
-                    # Display expandable sections for each category
-                    for (line_number, tax_code, category_name), items in sorted(
-                        category_groups.items(),
-                        key=lambda x: (
-                            # Sort by line number (extract numeric part)
-                            float(re.search(r'(\d+)', x[0][0]).group(1)) if re.search(r'(\d+)', x[0][0]) else 999,
-                            x[0][0]  # Then by line number string
-                        )
-                    ):
-                        # Calculate subtotal for this category
-                        subtotal = sum(
-                            abs(tx.amount) if tx.amount < 0 else tx.amount
-                            for tx, cat in items
-                        )
-                        count = len(items)
-                        
-                        # Create expander label with summary info
-                        expander_label = f"{line_number} · {category_name} - {cur} {subtotal:,.2f} ({count} tx)"
-                        
-                        with st.expander(expander_label):
-                            # Create detail table
-                            details = pd.DataFrame([{
-                                "Date": tx.date or "",
-                                "Vendor": tx.vendor or "",
-                                "Amount": f"{cur} {abs(tx.amount):,.2f}" if tx.amount < 0 else f"{cur} {tx.amount:,.2f}",
-                                "Description": tx.description,
-                                "Tax Code": cat.tax_code,
-                                "Needs Review": "⚠ Yes" if tx.needs_review else "✅ No"
-                            } for tx, cat in items])
-                            st.dataframe(details, use_container_width=True, hide_index=True)
+
+                st.subheader("📑 P&L Summary Table")
+                st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+            if review_count:
+                st.warning(
+                    f"⚠ {review_count} transactions need review "
+                    f"({cur} {review_total:,.2f})"
+                )
+
+            # ---- Drill-down expanders
+            st.subheader("🔍 Transaction Drill-Down")
+
+            grouped = {}
+            for tx, cat in categorized_transactions:
+                if cat.is_excluded or cat.is_owner_draw:
+                    continue
+                key = (cat.tax_code, cat.category_name)
+                grouped.setdefault(key, []).append(tx)
+
+            for (code, name), txs in sorted(grouped.items()):
+                subtotal = sum(abs(t.amount) for t in txs)
+                label = f"{code} · {name} — {cur} {subtotal:,.2f} ({len(txs)} tx)"
+
+                with st.expander(label):
+                    detail_df = pd.DataFrame([{
+                        "Date": t.date or "",
+                        "Vendor": t.vendor or "",
+                        "Amount": f"{cur} {abs(t.amount):,.2f}",
+                        "Description": t.description,
+                        "Needs Review": "⚠ Yes" if t.needs_review else "✅ No"
+                    } for t in txs])
+
+                    st.dataframe(detail_df, use_container_width=True, hide_index=True)
+
+            # ---- CSV Export
+            csv_data = summary_df.to_csv(index=False)
+            st.download_button(
+                "⬇️ Download P&L (CSV)",
+                csv_data,
+                file_name=f"P&L_{period_input.replace(' ', '_')}.csv",
+                mime="text/csv"
+            )
+
+        # ===============================
+        # IRS SCHEDULE C VIEW
+        # ===============================
+        else:
+            st.subheader("🧾 IRS Schedule C Summary")
+            st.dataframe(schedule_c_df, use_container_width=True, hide_index=True)
+
+            if not categorized_transactions:
+                st.stop()
+
+            category_groups = {}
+
+            for tx, cat in categorized_transactions:
+                if cat.is_excluded or cat.is_owner_draw or not cat.line_number:
+                    continue
+                key = (cat.line_number, cat.tax_code, cat.category_name)
+                category_groups.setdefault(key, []).append((tx, cat))
+
+            for (line, code, name), items in sorted(
+                category_groups.items(),
+                key=lambda x: (
+                    float(re.search(r'(\d+)', x[0][0]).group(1))
+                    if re.search(r'(\d+)', x[0][0]) else 999
+                )
+            ):
+                subtotal = sum(abs(tx.amount) for tx, _ in items)
+                count = len(items)
+
+                label = f"{line} · {name} — {cur} {subtotal:,.2f} ({count} tx)"
+
+                with st.expander(label):
+                    df = pd.DataFrame([{
+                        "Date": tx.date or "",
+                        "Vendor": tx.vendor or "",
+                        "Amount": f"{cur} {abs(tx.amount):,.2f}",
+                        "Description": tx.description,
+                        "Tax Code": cat.tax_code,
+                        "Needs Review": "⚠ Yes" if tx.needs_review else "✅ No"
+                    } for tx, cat in items])
+
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+
     with tab6:
         st.subheader("ATM Withdrawals")
 
