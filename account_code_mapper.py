@@ -109,8 +109,5 @@ class AccountCodeMapper:
         Format account name for display (e.g., "601 · SALES")
         """
         return f"{account_code} · {account_name}"
-<<<<<<< HEAD
 
  
-=======
->>>>>>> 46d86dca18e7c065dccc3394fb9edd8e4fb26158
