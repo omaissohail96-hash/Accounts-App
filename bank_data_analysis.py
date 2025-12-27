@@ -1534,7 +1534,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
         stats['Total Withdrawal Amount'] = float(computed_withdrawals)
         stats['Net Income'] = float(computed_deposits - computed_withdrawals)
 
-    tab1, tab2, tab3, tab4 , tab5 , tab6 = st.tabs(["💰 Deposits","💸 Withdrawals","📈 P&L","📋 All Transactions" , "📄 Schedule C" , "🏧 ATM Withdrawals"])
+    tab1, tab2, tab3, tab4 , tab5 , tab6 = st.tabs(["💰 Deposits","💸 Withdrawals","📈 P&L","📋 All Transactions" , "📄 Schedule C", "📊 P&L (Account Codes)"])
     rg = ReportGenerator()
 
     with tab1:
@@ -1600,155 +1600,33 @@ if "transactions" in st.session_state and st.session_state.transactions:
         } for t in transactions])
         st.dataframe(all_df, use_container_width=True, hide_index=True)
     with tab5:
-        st.subheader("📄 Schedule C / Profit & Loss")
+        st.subheader("📄 Schedule C")
 
         schedule_c_df = st.session_state.get("schedule_c_df")
 
         if schedule_c_df is None or schedule_c_df.empty:
             st.info("No Schedule C data available.")
-            st.stop()
+        else:
+            categorized_transactions = st.session_state.get("categorized_transactions", [])
+            transactions = st.session_state.get("transactions", [])
 
-        view_format = st.radio(
-            "View Format:",
-            ["IRS Schedule C (Line Numbers)", "Profit & Loss (Account Codes)"],
-            horizontal=True
-        )
+            from datetime import datetime
+            import pandas as pd
+            import re
 
-        categorized_transactions = st.session_state.get("categorized_transactions", [])
-        transactions = st.session_state.get("transactions", [])
+            cur = "USD"
 
-        from datetime import datetime
-        import pandas as pd
-        import re
-
-        cur = "USD"
-
-        # ===============================
-        # PROFIT & LOSS VIEW
-        # ===============================
-        if view_format == "Profit & Loss (Account Codes)":
-
+            # ===============================
+            # IRS SCHEDULE C VIEW
+            # ===============================
             from schedule_c_categorizer import ScheduleCCategorizer
             sc_categorizer = ScheduleCCategorizer()
 
-            # ---- Robust period detection (min → max date)
-            date_objs = []
-            for tx in transactions:
-                if tx.date:
-                    try:
-                        date_objs.append(
-                            datetime.strptime(tx.date, "%Y-%m-%d")
-                        )
-                    except:
-                        pass
+            # ---- Generate Schedule C report
+            schedule_c_text = sc_categorizer.generate_schedule_c_report(categorized_transactions)
+            st.subheader("📄 IRS Schedule C Report")
+            st.code(schedule_c_text)
 
-            if date_objs:
-                start = min(date_objs)
-                end = max(date_objs)
-                default_period = f"{start.strftime('%b %Y')} – {end.strftime('%b %Y')}"
-            else:
-                default_period = datetime.now().strftime("%B %Y")
-
-            col1, col2 = st.columns(2)
-            with col1:
-                business_name = st.text_input("Business Name (optional):", key="pl_business")
-            with col2:
-                period_input = st.text_input("Period:", value=default_period, key="pl_period")
-
-            # ---- Generate P&L text
-            pl_text = sc_categorizer.generate_pl_report_with_account_codes(
-                categorized_transactions,
-                business_name=business_name or "",
-                period=period_input
-            )
-
-            st.subheader("📊 Profit & Loss Statement")
-            st.code(pl_text)
-
-            # ---- Build structured P&L dataframe
-            rows = []
-            review_total = 0
-            review_count = 0
-
-            for tx, cat in categorized_transactions:
-                if cat.is_excluded or cat.is_owner_draw:
-                    continue
-
-                amt = abs(tx.amount)
-
-                rows.append({
-                    "Account Code": cat.tax_code,
-                    "Account Name": cat.category_name,
-                    "Type": "Income" if tx.amount > 0 else "Expense",
-                    "Amount": amt,
-                    "Needs Review": tx.needs_review
-                })
-
-                if tx.needs_review:
-                    review_total += amt
-                    review_count += 1
-
-            pl_df = pd.DataFrame(rows)
-
-            if not pl_df.empty:
-                summary_df = (
-                    pl_df
-                    .groupby(["Account Code", "Account Name", "Type"])
-                    .agg(
-                        Amount=("Amount", "sum"),
-                        Transactions=("Amount", "count")
-                    )
-                    .reset_index()
-                    .sort_values(by=["Type", "Account Code"])
-                )
-
-                st.subheader("📑 P&L Summary Table")
-                st.dataframe(summary_df, use_container_width=True, hide_index=True)
-
-            if review_count:
-                st.warning(
-                    f"⚠ {review_count} transactions need review "
-                    f"({cur} {review_total:,.2f})"
-                )
-
-            # ---- Drill-down expanders
-            st.subheader("🔍 Transaction Drill-Down")
-
-            grouped = {}
-            for tx, cat in categorized_transactions:
-                if cat.is_excluded or cat.is_owner_draw:
-                    continue
-                key = (cat.tax_code, cat.category_name)
-                grouped.setdefault(key, []).append(tx)
-
-            for (code, name), txs in sorted(grouped.items()):
-                subtotal = sum(abs(t.amount) for t in txs)
-                label = f"{code} · {name} — {cur} {subtotal:,.2f} ({len(txs)} tx)"
-
-                with st.expander(label):
-                    detail_df = pd.DataFrame([{
-                        "Date": t.date or "",
-                        "Vendor": t.vendor or "",
-                        "Amount": f"{cur} {abs(t.amount):,.2f}",
-                        "Description": t.description,
-                        "Needs Review": "⚠ Yes" if t.needs_review else "✅ No"
-                    } for t in txs])
-
-                    st.dataframe(detail_df, use_container_width=True, hide_index=True)
-
-            # ---- CSV Export
-            csv_data = summary_df.to_csv(index=False)
-            st.download_button(
-                "⬇️ Download P&L (CSV)",
-                csv_data,
-                file_name=f"P&L_{period_input.replace(' ', '_')}.csv",
-                mime="text/csv"
-            )
-
-        # ===============================
-        # IRS SCHEDULE C VIEW
-        # ===============================
-        else:
             st.subheader("🧾 IRS Schedule C Summary")
             st.dataframe(schedule_c_df, use_container_width=True, hide_index=True)
 
@@ -1788,52 +1666,126 @@ if "transactions" in st.session_state and st.session_state.transactions:
                     st.dataframe(df, use_container_width=True, hide_index=True)
 
     with tab6:
-        st.subheader("ATM Withdrawals")
+        st.subheader("📊 Profit & Loss (Account Codes)")
 
-        atm_txs = filter_atm_withdrawals(transactions)
-        
+        categorized_transactions = st.session_state.get("categorized_transactions", [])
+        transactions = st.session_state.get("transactions", [])
 
-        if not atm_txs:
-            st.info("No ATM withdrawals found.")
+        if not categorized_transactions or not transactions:
+            st.info("No transaction data available for P&L report.")
         else:
-            # Summary table
-            atm_df = pd.DataFrame([{
-                "Date": t.date or "",
-                "Vendor": t.vendor,
-                "Amount": abs(t.amount),
-                "Description": t.description,
-                "Needs Review": t.needs_review
-            } for t in atm_txs])
+            from datetime import datetime
+            import pandas as pd
+            from schedule_c_categorizer import ScheduleCCategorizer
 
-            total_atm = sum(abs(t.amount) for t in atm_txs)
+            sc_categorizer = ScheduleCCategorizer()
+            cur = "USD"
 
-            st.metric("Total ATM Withdrawals", f"{cur} {total_atm:,.2f}", f"{len(atm_txs)} tx")
+            # ---- Robust period detection (min → max date)
+            date_objs = []
+            for tx in transactions:
+                if tx.date:
+                    try:
+                        date_objs.append(datetime.strptime(tx.date, "%Y-%m-%d"))
+                    except:
+                        pass
 
-            st.dataframe(
-                atm_df.assign(
-                    Amount=lambda x: x["Amount"].map(lambda v: f"{cur} {v:,.2f}"),
-                    **{"Needs Review": atm_df["Needs Review"].map(lambda x: "⚠ Yes" if x else "✅ No")}
-                ),
-                use_container_width=True,
-                hide_index=True
+            if date_objs:
+                start = min(date_objs)
+                end = max(date_objs)
+                default_period = f"{start.strftime('%b %Y')} – {end.strftime('%b %Y')}"
+            else:
+                default_period = datetime.now().strftime("%B %Y")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                business_name = st.text_input("Business Name (optional):", key="pl_account_business")
+            with col2:
+                period_input = st.text_input("Period:", value=default_period, key="pl_account_period")
+
+            # ---- Generate P&L text with account codes
+            pl_text = sc_categorizer.generate_pl_report_with_account_codes(
+                categorized_transactions,
+                business_name=business_name or "",
+                period=period_input
             )
 
-            # Group by ATM vendor (optional, nice touch)
-            grouped = {}
-            for t in atm_txs:
-                key = t.vendor or "UNKNOWN ATM"
-                grouped.setdefault(key, []).append(t)
+            st.subheader("📊 Profit & Loss Statement")
+            st.code(pl_text)
 
-            for vendor, items in sorted(grouped.items(), key=lambda x: -len(x[1])):
-                subtotal = sum(abs(i.amount) for i in items)
-                cnt = len(items)
-                with st.expander(f"{vendor} — {cnt} tx — {cur} {subtotal:,.2f}"):
-                    details = pd.DataFrame([{
-                        "Date": it.date,
-                        "Amount": f"{cur} {abs(it.amount):,.2f}",
-                        "Description": it.description
-                    } for it in items])
-                    st.dataframe(details, use_container_width=True, hide_index=True)
+            # ---- Build structured P&L dataframe
+            from account_code_mapper import AccountCodeMapper
+            mapper = AccountCodeMapper()
+            
+            rows = []
+            for tx, cat in categorized_transactions:
+                if cat.is_excluded or cat.is_owner_draw:
+                    continue
+
+                is_income = tx.amount > 0 or tx.transaction_type == "deposit"
+                account_code, account_name = mapper.get_account_code(
+                    tx.vendor, 
+                    tx.description, 
+                    cat, 
+                    is_income=is_income
+                )
+
+                rows.append({
+                    "Account Code": account_code,
+                    "Account Name": account_name,
+                    "Date": tx.date or "",
+                    "Vendor": tx.vendor or "",
+                    "Amount": abs(tx.amount),
+                    "Type": "Income" if is_income else "Expense",
+                    "Needs Review": "⚠ Yes" if tx.needs_review else "✅ No"
+                })
+
+            if rows:
+                summary_df = pd.DataFrame(rows)
+                
+                st.subheader("📋 Transaction Details")
+                st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+                # Group by account code
+                st.subheader("💼 By Account Code")
+                grouped = {}
+                for tx, cat in categorized_transactions:
+                    if cat.is_excluded or cat.is_owner_draw:
+                        continue
+                    
+                    is_income = tx.amount > 0 or tx.transaction_type == "deposit"
+                    account_code, account_name = mapper.get_account_code(
+                        tx.vendor, 
+                        tx.description, 
+                        cat, 
+                        is_income=is_income
+                    )
+                    key = (account_code, account_name)
+                    grouped.setdefault(key, []).append(tx)
+
+                for (code, name), txs in sorted(grouped.items()):
+                    subtotal = sum(abs(t.amount) for t in txs)
+                    label = f"{code} · {name} — {cur} {subtotal:,.2f} ({len(txs)} tx)"
+
+                    with st.expander(label):
+                        detail_df = pd.DataFrame([{
+                            "Date": t.date or "",
+                            "Vendor": t.vendor or "",
+                            "Amount": f"{cur} {abs(t.amount):,.2f}",
+                            "Description": t.description,
+                            "Needs Review": "⚠ Yes" if t.needs_review else "✅ No"
+                        } for t in txs])
+
+                        st.dataframe(detail_df, use_container_width=True, hide_index=True)
+
+                # ---- CSV Export
+                csv_data = summary_df.to_csv(index=False)
+                st.download_button(
+                    "⬇️ Download P&L Account Codes (CSV)",
+                    csv_data,
+                    file_name=f"PL_Account_Codes_{period_input.replace(' ', '_')}.csv",
+                    mime="text/csv"
+                )
     
     # Downloads
     st.header("📥 Download")

@@ -2,6 +2,8 @@
 Account Code Mapper
 Maps Schedule C categories to QuickBooks-style account codes for P&L reporting
 """
+import json
+from pathlib import Path
 from typing import Dict, Optional
 from schedule_c_categorizer import ScheduleCCategory
 
@@ -13,6 +15,9 @@ class AccountCodeMapper:
     """
     
     def __init__(self):
+        # Load keyword-based rules from JSON
+        self.keyword_rules = self._load_keyword_rules("account_keywords.json")
+        
         # Map Schedule C tax codes to account codes and names
         self.account_code_map = {
             # INCOME (600 series)
@@ -59,19 +64,83 @@ class AccountCodeMapper:
             "upwork": ("807", "TEMPORARY HELP"),
         }
     
-    def get_account_code(self, category: ScheduleCCategory, vendor: Optional[str] = None, description: Optional[str] = None) -> tuple:
+    def _load_keyword_rules(self, file_path: str) -> dict:
         """
-        Get account code and name for a Schedule C category.
+        Load keyword-based account mapping rules from JSON file.
         
         Args:
-            category: ScheduleCCategory object
+            file_path: Path to the JSON file containing keyword rules
+            
+        Returns:
+            Dictionary of account mappings, or empty dict if file not found
+        """
+        try:
+            json_path = Path(file_path)
+            if json_path.exists():
+                with open(json_path, 'r') as f:
+                    return json.load(f)
+            return {}
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"Warning: Could not load keyword rules from {file_path}: {e}")
+            return {}
+    
+    def _match_by_keywords(self, vendor: Optional[str], description: Optional[str]) -> Optional[tuple]:
+        """
+        Match transaction against keyword rules from JSON file.
+        
+        Args:
+            vendor: Vendor name
+            description: Transaction description
+            
+        Returns:
+            Tuple of (account_code, account_name) if match found, None otherwise
+        """
+        if not self.keyword_rules:
+            print(f"⚠️ Warning: No keyword rules loaded from JSON")
+            return None
+        
+        # Combine vendor and description for keyword matching
+        search_text = ""
+        if vendor:
+            search_text += vendor.lower() + " "
+        if description:
+            search_text += description.lower()
+        
+        search_text = search_text.strip()
+        if not search_text:
+            return None
+        
+        # Check each account's keywords
+        for account_code, account_data in self.keyword_rules.items():
+            keywords = account_data.get("keywords", [])
+            for keyword in keywords:
+                if keyword.lower() in search_text:
+                    account_name = account_data.get("name", "UNKNOWN")
+                    print(f"✅ Matched '{search_text[:50]}...' → {account_code} · {account_name} (keyword: '{keyword}')")
+                    return (account_code, account_name)
+        
+        print(f"❌ No keyword match for: '{search_text[:80]}...'")
+        return None
+    
+    def get_account_code(self, vendor: Optional[str] = None, description: Optional[str] = None, category: Optional[ScheduleCCategory] = None, is_income: bool = False) -> tuple:
+        """
+        Get account code and name based on vendor and description.
+        
+        Args:
             vendor: Vendor name (for vendor-specific mapping)
-            description: Description (for vendor-specific mapping)
+            description: Description (for keyword and vendor-specific mapping)
+            category: Optional ScheduleCCategory object (for backward compatibility)
+            is_income: Whether this is an income transaction (deposit) or expense (withdrawal)
             
         Returns:
             Tuple of (account_code, account_name)
         """
-        # Check vendor-specific mapping first
+        # Check keyword-based matching first (highest priority)
+        keyword_match = self._match_by_keywords(vendor, description)
+        if keyword_match:
+            return keyword_match
+        
+        # Check vendor-specific mapping
         if vendor:
             vendor_lower = vendor.lower()
             for key, (code, name) in self.vendor_specific_map.items():
@@ -84,25 +153,10 @@ class AccountCodeMapper:
                 if key in desc_lower:
                     return (code, name)
         
-        # Check tax code mapping
-        tax_code = category.tax_code
-        
-        # Special handling for contract labor vs offshore
-        if tax_code == "CONTRACT_LABOR":
-            if vendor and any(k in vendor.lower() for k in ["offshore", "fiverr", "overseas"]):
-                return ("808", "OFFSHORE EXP")
-            if vendor and any(k in vendor.lower() for k in ["upwork", "freelancer"]):
-                return ("807", "TEMPORARY HELP")
-            return ("807", "TEMPORARY HELP")
-        
-        # Special handling for utilities
-        if tax_code == "UTILITIES":
-            if description and any(k in description.lower() for k in ["electric", "electricity", "power"]):
-                return ("946", "UTILITIES - ELECTRICITY")
-            return ("941", "TELEPHONE")
-        
-        # Default mapping
-        return self.account_code_map.get(tax_code, ("999", "OTHER EXPENSES"))
+        # Default fallback based on transaction type (no Schedule C logic)
+        if is_income:
+            return ("601", "SALES")  # Default income to SALES
+        return ("999", "OTHER EXPENSES")  # Default expense to OTHER EXPENSES
     
     def get_account_name_display(self, account_code: str, account_name: str) -> str:
         """

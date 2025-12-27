@@ -1,0 +1,303 @@
+{
+  "601": {
+    "name": "SALES",
+    "keywords": [
+      "sale",
+      "sales",
+      "revenue",
+      "payment received",
+      "customer payment",
+      "deposit received",
+      "stripe",
+      "square",
+      "paypal",
+      "shopify",
+      "tiktok",
+      "ebay",
+      "amazon",
+      "etsy",
+      "walmart",
+      "mercari",
+      "poshmark",
+      "shoppay",
+      "affirm"
+    ]
+  },
+  "602": {
+    "name": "RETURNS & ALLOWANCES",
+    "keywords": [
+      "refund",
+      "return",
+      "chargeback",
+      "reversal",
+      "dispute"
+    ]
+  },
+  "603": {
+    "name": "OTHER INCOME",
+    "keywords": [
+      "interest earned",
+      "cashback",
+      "rebate",
+      "misc income",
+      "fx gain",
+      "opening balance",
+      "beginning balance"
+    ]
+  },
+  "701": {
+    "name": "PURCHASES",
+    "keywords": [
+      "purchase",
+      "inventory",
+      "supplier",
+      "wholesale",
+      "amazon business",
+      "alibaba"
+    ]
+  },
+  "702": {
+    "name": "SHIPPING SUPPLIES",
+    "keywords": [
+      "shipping",
+      "postage",
+      "freight",
+      "ups",
+      "fedex",
+      "usps",
+      "dhl"
+    ]
+  },
+  "703": {
+    "name": "DIRECT MATERIALS",
+    "keywords": [
+      "raw materials",
+      "components",
+      "parts",
+      "manufacturing supplies"
+    ]
+  },
+  "704": {
+    "name": "CUSTOMS & DUTIES",
+    "keywords": [
+      "customs",
+      "duty",
+      "import tax",
+      "brokerage",
+      "tariff"
+    ]
+  },
+  "801": {
+    "name": "SALARIES-OFFICERS",
+    "keywords": [
+      "salary",
+      "payroll",
+      "executive pay",
+      "adp",
+      "gusto"
+    ]
+  },
+  "807": {
+    "name": "TEMPORARY HELP",
+    "keywords": [
+      "temp staff",
+      "contract labor",
+      "staffing agency",
+      "upwork",
+      "freelancer"
+    ]
+  },
+  "808": {
+    "name": "OFFSHORE EXP",
+    "keywords": [
+      "offshore",
+      "freelancer",
+      "va",
+      "fiverr",
+      "deel",
+      "wise",
+      "payoneer",
+      "international",
+      "intl",
+      "transfer",
+      "remittance",
+      "zelle"
+    ]
+  },
+  "821": {
+    "name": "PAYROLL TAXES",
+    "keywords": [
+      "payroll tax",
+      "irs",
+      "tax payment",
+      "futa",
+      "suta",
+      "withholding",
+      "workforce",
+      "unemployment tax",
+      "ui tax",
+      "federal tax",
+      "state tax"
+    ]
+  },
+  "851": {
+    "name": "ACCOUNTING & LEGAL",
+    "keywords": [
+      "cpa",
+      "bookkeeping",
+      "accounting",
+      "attorney",
+      "law firm",
+      "tax preparation"
+    ]
+  },
+  "854": {
+    "name": "ADVERTISEMENT",
+    "keywords": [
+      "advertising",
+      "marketing",
+      "google ads",
+      "meta ads",
+      "facebook ads",
+      "instagram ads",
+      "tiktok ads"
+    ]
+  },
+  "860": {
+    "name": "BANK & EBAY CHARGES",
+    "keywords": [
+      "service fee",
+      "svc chg",
+      "ach fee",
+      "wire fee",
+      "nsf",
+      "overdraft",
+      "ebay fees",
+      "bank fees",
+      "fee charged",
+      "standard ach",
+      "initial fee"
+    ]
+  },
+  "880": {
+    "name": "DUES AND SUBSCRIPTION",
+    "keywords": [
+      "subscription",
+      "recurring",
+      "monthly bill",
+      "saas",
+      "membership"
+    ]
+  },
+  "928": {
+    "name": "RENT",
+    "keywords": [
+      "rent",
+      "lease",
+      "office rent",
+      "wework",
+      "regus",
+      "public storage"
+    ]
+  },
+  "935": {
+    "name": "STORE SUPPLIES",
+    "keywords": [
+      "store supplies",
+      "office supplies",
+      "cleaning",
+      "consumables",
+      "staples"
+    ]
+  },
+  "941": {
+    "name": "TELEPHONE",
+    "keywords": [
+      "phone bill",
+      "telephone",
+      "mobile",
+      "internet",
+      "att",
+      "verizon",
+      "comcast",
+      "ringcentral"
+    ]
+  },
+  "942": {
+    "name": "TRAVEL",
+    "keywords": [
+      "travel",
+      "flight",
+      "airline",
+      "hotel",
+      "lodging",
+      "uber",
+      "lyft",
+      "meals"
+    ]
+  },
+  "946": {
+    "name": "UTILITIES - ELECTRICITY",
+    "keywords": [
+      "electric",
+      "electricity",
+      "power",
+      "energy",
+      "kwh",
+      "meter"
+    ]
+  },
+  "950": {
+    "name": "INSURANCE",
+    "keywords": [
+      "insurance",
+      "insurance premium",
+      "liability",
+      "auto insurance",
+      "policy"
+    ]
+  },
+  "951": {
+    "name": "REPAIRS & MAINTENANCE",
+    "keywords": [
+      "repair",
+      "maintenance",
+      "service call",
+      "hvac",
+      "plumbing"
+    ]
+  },
+  "952": {
+    "name": "CAR & TRUCK EXPENSES",
+    "keywords": [
+      "gas",
+      "fuel",
+      "auto repair",
+      "vehicle maintenance",
+      "tolls",
+      "parking",
+      "atm withdrawal",
+      "atm",
+      "cash withdrawal"
+    ]
+  },
+  "999": {
+    "name": "OTHER EXPENSES",
+    "keywords": [
+      "misc",
+      "miscellaneous",
+      "adjustment",
+      "rounding",
+      "check",
+      "card payment",
+      "credit card",
+      "loan payment",
+      "transfer",
+      "online payment"
+    ]
+  }
+},
+      "uncategorized"
+    ]
+  }
+}
