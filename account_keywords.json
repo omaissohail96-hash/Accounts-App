@@ -1,7 +1,20 @@
 {
+  "602": {
+    "name": "RETURNS & ALLOWANCES",
+    "rank": 1,
+    "include_keywords": [
+      "refund",
+      "return",
+      "chargeback",
+      "reversal",
+      "dispute"
+    ],
+    "exclude_keywords": []
+  },
   "601": {
     "name": "SALES",
-    "keywords": [
+    "rank": 2,
+    "include_keywords": [
       "sale",
       "sales",
       "revenue",
@@ -21,21 +34,16 @@
       "poshmark",
       "shoppay",
       "affirm"
-    ]
-  },
-  "602": {
-    "name": "RETURNS & ALLOWANCES",
-    "keywords": [
+    ],
+    "exclude_keywords": [
       "refund",
-      "return",
-      "chargeback",
-      "reversal",
-      "dispute"
+      "return"
     ]
   },
   "603": {
     "name": "OTHER INCOME",
-    "keywords": [
+    "rank": 3,
+    "include_keywords": [
       "interest earned",
       "cashback",
       "rebate",
@@ -43,22 +51,26 @@
       "fx gain",
       "opening balance",
       "beginning balance"
-    ]
+    ],
+    "exclude_keywords": []
   },
   "701": {
     "name": "PURCHASES",
-    "keywords": [
+    "rank": 4,
+    "include_keywords": [
       "purchase",
       "inventory",
       "supplier",
       "wholesale",
       "amazon business",
       "alibaba"
-    ]
+    ],
+    "exclude_keywords": []
   },
   "702": {
     "name": "SHIPPING SUPPLIES",
-    "keywords": [
+    "rank": 5,
+    "include_keywords": [
       "shipping",
       "postage",
       "freight",
@@ -66,52 +78,63 @@
       "fedex",
       "usps",
       "dhl"
-    ]
+    ],
+    "exclude_keywords": []
   },
   "703": {
     "name": "DIRECT MATERIALS",
-    "keywords": [
+    "rank": 6,
+    "include_keywords": [
       "raw materials",
       "components",
       "parts",
       "manufacturing supplies"
-    ]
+    ],
+    "exclude_keywords": []
   },
   "704": {
     "name": "CUSTOMS & DUTIES",
-    "keywords": [
+    "rank": 7,
+    "include_keywords": [
       "customs",
       "duty",
       "import tax",
       "brokerage",
       "tariff"
-    ]
+    ],
+    "exclude_keywords": []
   },
   "801": {
     "name": "SALARIES-OFFICERS",
-    "keywords": [
+    "rank": 8,
+    "include_keywords": [
       "salary",
       "payroll",
       "executive pay",
       "adp",
       "gusto"
+    ],
+    "exclude_keywords": [
+      "tax"
     ]
   },
   "807": {
     "name": "TEMPORARY HELP",
-    "keywords": [
+    "rank": 9,
+    "include_keywords": [
       "temp staff",
       "contract labor",
       "staffing agency",
       "upwork",
       "freelancer"
-    ]
+    ],
+    "exclude_keywords": []
   },
   "808": {
     "name": "OFFSHORE EXP",
-    "keywords": [
+    "rank": 10,
+    "include_keywords": [
       "offshore",
-      "freelancer",
       "va",
       "fiverr",
       "deel",
@@ -119,41 +142,43 @@
       "payoneer",
       "international",
       "intl",
-      "transfer",
-      "remittance",
-      "zelle"
-    ]
+      "remittance"
+    ],
+    "exclude_keywords": []
   },
   "821": {
     "name": "PAYROLL TAXES",
-    "keywords": [
+    "rank": 11,
+    "include_keywords": [
       "payroll tax",
       "irs",
-      "tax payment",
       "futa",
       "suta",
       "withholding",
-      "workforce",
       "unemployment tax",
       "ui tax",
       "federal tax",
       "state tax"
-    ]
+    ],
+    "exclude_keywords": []
   },
   "851": {
     "name": "ACCOUNTING & LEGAL",
-    "keywords": [
+    "rank": 12,
+    "include_keywords": [
       "cpa",
       "bookkeeping",
       "accounting",
       "attorney",
       "law firm",
       "tax preparation"
-    ]
+    ],
+    "exclude_keywords": []
   },
   "854": {
     "name": "ADVERTISEMENT",
-    "keywords": [
+    "rank": 13,
+    "include_keywords": [
       "advertising",
       "marketing",
       "google ads",
@@ -161,11 +186,13 @@
       "facebook ads",
       "instagram ads",
       "tiktok ads"
-    ]
+    ],
+    "exclude_keywords": []
   },
   "860": {
     "name": "BANK & EBAY CHARGES",
-    "keywords": [
+    "rank": 14,
+    "include_keywords": [
       "service fee",
       "svc chg",
       "ach fee",
@@ -174,45 +201,51 @@
       "overdraft",
       "ebay fees",
       "bank fees",
-      "fee charged",
-      "standard ach",
-      "initial fee"
-    ]
+      "fee charged"
+    ],
+    "exclude_keywords": []
   },
   "880": {
     "name": "DUES AND SUBSCRIPTION",
-    "keywords": [
+    "rank": 15,
+    "include_keywords": [
       "subscription",
       "recurring",
       "monthly bill",
       "saas",
       "membership"
-    ]
+    ],
+    "exclude_keywords": []
   },
   "928": {
     "name": "RENT",
-    "keywords": [
+    "rank": 16,
+    "include_keywords": [
       "rent",
       "lease",
       "office rent",
       "wework",
       "regus",
       "public storage"
-    ]
+    ],
+    "exclude_keywords": []
   },
   "935": {
     "name": "STORE SUPPLIES",
-    "keywords": [
+    "rank": 17,
+    "include_keywords": [
       "store supplies",
       "office supplies",
       "cleaning",
       "consumables",
       "staples"
-    ]
+    ],
+    "exclude_keywords": []
   },
   "941": {
     "name": "TELEPHONE",
-    "keywords": [
+    "rank": 18,
+    "include_keywords": [
       "phone bill",
       "telephone",
       "mobile",
@@ -221,11 +254,13 @@
       "verizon",
       "comcast",
       "ringcentral"
-    ]
+    ],
+    "exclude_keywords": []
   },
   "942": {
     "name": "TRAVEL",
-    "keywords": [
+    "rank": 19,
+    "include_keywords": [
       "travel",
       "flight",
       "airline",
@@ -234,70 +269,71 @@
       "uber",
       "lyft",
       "meals"
-    ]
+    ],
+    "exclude_keywords": []
   },
   "946": {
     "name": "UTILITIES - ELECTRICITY",
-    "keywords": [
+    "rank": 20,
+    "include_keywords": [
       "electric",
       "electricity",
       "power",
       "energy",
       "kwh",
       "meter"
-    ]
+    ],
+    "exclude_keywords": []
   },
   "950": {
     "name": "INSURANCE",
-    "keywords": [
+    "rank": 21,
+    "include_keywords": [
       "insurance",
       "insurance premium",
       "liability",
       "auto insurance",
       "policy"
-    ]
+    ],
+    "exclude_keywords": []
   },
   "951": {
     "name": "REPAIRS & MAINTENANCE",
-    "keywords": [
+    "rank": 22,
+    "include_keywords": [
       "repair",
       "maintenance",
       "service call",
       "hvac",
       "plumbing"
-    ]
+    ],
+    "exclude_keywords": []
   },
   "952": {
     "name": "CAR & TRUCK EXPENSES",
-    "keywords": [
+    "rank": 23,
+    "include_keywords": [
       "gas",
       "fuel",
       "auto repair",
       "vehicle maintenance",
       "tolls",
-      "parking",
-      "atm withdrawal",
-      "atm",
-      "cash withdrawal"
-    ]
+      "parking"
+    ],
+    "exclude_keywords": []
   },
   "999": {
     "name": "OTHER EXPENSES",
-    "keywords": [
+    "rank": 99,
+    "include_keywords": [
       "misc",
       "miscellaneous",
       "adjustment",
       "rounding",
       "check",
-      "card payment",
-      "credit card",
       "loan payment",
-      "transfer",
-      "online payment"
-    ]
-  }
-},
-      "uncategorized"
-    ]
+      "transfer"
+    ],
+    "exclude_keywords": []
   }
 }

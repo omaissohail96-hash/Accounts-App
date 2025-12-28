@@ -87,6 +87,15 @@ class AccountCodeMapper:
     def _match_by_keywords(self, vendor: Optional[str], description: Optional[str]) -> Optional[tuple]:
         """
         Match transaction against keyword rules from JSON file.
+        Uses rank-based priority with include/exclude keyword logic.
+        
+        Algorithm:
+        1. Sort categories by rank (1 = highest priority)
+        2. For each category:
+           - Normalize search text (lowercase, trim)
+           - Check exclude_keywords - if any match, skip this category
+           - Check include_keywords - if any match, assign this category and stop
+        3. Return None if no match (will default to uncategorized)
         
         Args:
             vendor: Vendor name
@@ -102,20 +111,44 @@ class AccountCodeMapper:
         # Combine vendor and description for keyword matching
         search_text = ""
         if vendor:
-            search_text += vendor.lower() + " "
+            search_text += vendor.lower().strip() + " "
         if description:
-            search_text += description.lower()
+            search_text += description.lower().strip()
         
         search_text = search_text.strip()
         if not search_text:
             return None
         
-        # Check each account's keywords
-        for account_code, account_data in self.keyword_rules.items():
-            keywords = account_data.get("keywords", [])
-            for keyword in keywords:
-                if keyword.lower() in search_text:
-                    account_name = account_data.get("name", "UNKNOWN")
+        # Sort categories by rank (ascending - 1 is highest priority)
+        sorted_categories = sorted(
+            self.keyword_rules.items(),
+            key=lambda x: x[1].get("rank", 999)
+        )
+        
+        # Check each category in rank order
+        for account_code, account_data in sorted_categories:
+            account_name = account_data.get("name", "UNKNOWN")
+            
+            # Get include and exclude keywords
+            include_keywords = account_data.get("include_keywords", [])
+            exclude_keywords = account_data.get("exclude_keywords", [])
+            
+            # Check exclude keywords first - if any match, skip this category
+            exclude_match = False
+            for keyword in exclude_keywords:
+                keyword_normalized = keyword.lower().strip()
+                if keyword_normalized and keyword_normalized in search_text:
+                    print(f"⛔ Excluded '{search_text[:50]}...' from {account_code} · {account_name} (exclude: '{keyword}')")
+                    exclude_match = True
+                    break
+            
+            if exclude_match:
+                continue
+            
+            # Check include keywords - if any match, assign this category
+            for keyword in include_keywords:
+                keyword_normalized = keyword.lower().strip()
+                if keyword_normalized and keyword_normalized in search_text:
                     print(f"✅ Matched '{search_text[:50]}...' → {account_code} · {account_name} (keyword: '{keyword}')")
                     return (account_code, account_name)
         
