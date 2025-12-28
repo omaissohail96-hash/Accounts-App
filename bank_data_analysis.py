@@ -1726,7 +1726,6 @@ if "transactions" in st.session_state and st.session_state.transactions:
                 account_code, account_name = mapper.get_account_code(
                     tx.vendor, 
                     tx.description, 
-                    cat, 
                     is_income=is_income
                 )
 
@@ -1757,7 +1756,6 @@ if "transactions" in st.session_state and st.session_state.transactions:
                     account_code, account_name = mapper.get_account_code(
                         tx.vendor, 
                         tx.description, 
-                        cat, 
                         is_income=is_income
                     )
                     key = (account_code, account_name)

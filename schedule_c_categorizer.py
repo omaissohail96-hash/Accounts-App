@@ -1199,7 +1199,7 @@ class ScheduleCCategorizer:
                 tax_code=data["tax_code"]
             )
             
-            account_code, account_name = mapper.get_account_code(vendor, description, temp_category, is_income=True)
+            account_code, account_name = mapper.get_account_code(vendor, description, is_income=True)
             amount = data["total_amount"]
             pct = (amount / income_total * 100) if income_total > 0 else 0
             income_items.append((account_code, account_name, amount, pct))
@@ -1232,7 +1232,7 @@ class ScheduleCCategorizer:
                     tax_code=data["tax_code"]
                 )
                 
-                account_code, account_name = mapper.get_account_code(vendor, description, temp_category, is_income=False)
+                account_code, account_name = mapper.get_account_code(vendor, description, is_income=False)
                 amount = data["total_amount"]
                 pct = (amount / income_total * 100) if income_total > 0 else 0
                 cogs_items.append((account_code, account_name, amount, pct))
@@ -1279,7 +1279,7 @@ class ScheduleCCategorizer:
                 tax_code=data["tax_code"]
             )
             
-            account_code, account_name = mapper.get_account_code(vendor, description, temp_category, is_income=False)
+            account_code, account_name = mapper.get_account_code(vendor, description, is_income=False)
             amount = data["total_amount"]
             pct = (amount / income_total * 100) if income_total > 0 else 0
             expense_items.append((account_code, account_name, amount, pct))

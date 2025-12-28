@@ -5,7 +5,6 @@ Maps Schedule C categories to QuickBooks-style account codes for P&L reporting
 import json
 from pathlib import Path
 from typing import Dict, Optional
-from schedule_c_categorizer import ScheduleCCategory
 
 
 class AccountCodeMapper:
@@ -155,14 +154,13 @@ class AccountCodeMapper:
         print(f"❌ No keyword match for: '{search_text[:80]}...'")
         return None
     
-    def get_account_code(self, vendor: Optional[str] = None, description: Optional[str] = None, category: Optional[ScheduleCCategory] = None, is_income: bool = False) -> tuple:
+    def get_account_code(self, vendor: Optional[str] = None, description: Optional[str] = None, is_income: bool = False) -> tuple:
         """
         Get account code and name based on vendor and description.
         
         Args:
             vendor: Vendor name (for vendor-specific mapping)
             description: Description (for keyword and vendor-specific mapping)
-            category: Optional ScheduleCCategory object (for backward compatibility)
             is_income: Whether this is an income transaction (deposit) or expense (withdrawal)
             
         Returns:
