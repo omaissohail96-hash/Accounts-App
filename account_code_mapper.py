@@ -171,18 +171,18 @@ class AccountCodeMapper:
         if keyword_match:
             return keyword_match
         
-        # Check vendor-specific mapping
-        if vendor:
-            vendor_lower = vendor.lower()
-            for key, (code, name) in self.vendor_specific_map.items():
-                if key in vendor_lower:
-                    return (code, name)
+        # Check vendor-specific mapping (DISABLED - only using JSON keywords)
+        # if vendor:
+        #     vendor_lower = vendor.lower()
+        #     for key, (code, name) in self.vendor_specific_map.items():
+        #         if key in vendor_lower:
+        #             return (code, name)
         
-        if description:
-            desc_lower = description.lower()
-            for key, (code, name) in self.vendor_specific_map.items():
-                if key in desc_lower:
-                    return (code, name)
+        # if description:
+        #     desc_lower = description.lower()
+        #     for key, (code, name) in self.vendor_specific_map.items():
+        #         if key in desc_lower:
+        #             return (code, name)
         
         # Default fallback based on transaction type (no Schedule C logic)
         if is_income:
