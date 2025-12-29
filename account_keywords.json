@@ -25,6 +25,7 @@
       "square",
       "paypal",
       "shopify",
+      "shopify id",
       "tiktok",
       "ebay",
       "amazon",
@@ -37,7 +38,11 @@
     ],
     "exclude_keywords": [
       "refund",
-      "return"
+      "return",
+      "fee",
+      "fees",
+      "charge",
+      "charges"
     ]
   },
   "603": {
@@ -65,7 +70,12 @@
       "amazon business",
       "alibaba"
     ],
-    "exclude_keywords": []
+    "exclude_keywords": [
+      "check",
+      "chk",
+      "check payment",
+      "check #"
+    ]
   },
   "702": {
     "name": "SHIPPING SUPPLIES",
@@ -79,7 +89,11 @@
       "usps",
       "dhl"
     ],
-    "exclude_keywords": []
+    "exclude_keywords": [
+      "check",
+      "chk",
+      "check payment"
+    ]
   },
   "703": {
     "name": "DIRECT MATERIALS",
@@ -90,7 +104,11 @@
       "parts",
       "manufacturing supplies"
     ],
-    "exclude_keywords": []
+    "exclude_keywords": [
+      "check",
+      "chk",
+      "check payment"
+    ]
   },
   "704": {
     "name": "CUSTOMS & DUTIES",
@@ -102,7 +120,11 @@
       "brokerage",
       "tariff"
     ],
-    "exclude_keywords": []
+    "exclude_keywords": [
+      "check",
+      "chk",
+      "check payment"
+    ]
   },
   "801": {
     "name": "SALARIES-OFFICERS",
@@ -197,11 +219,17 @@
       "svc chg",
       "ach fee",
       "wire fee",
-      "nsf",
+      "nsf fee",
+      "nsf charge",
       "overdraft",
       "ebay fees",
+      "ebay fee",
+      "marketplace fee",
+      "marketplace fees",
       "bank fees",
-      "fee charged"
+      "bank fee",
+      "fee charged",
+      "transaction fee"
     ],
     "exclude_keywords": []
   },
@@ -331,8 +359,14 @@
       "adjustment",
       "rounding",
       "check",
+      "chk",
+      "check payment",
+      "check transaction",
       "loan payment",
-      "transfer"
+      "transfer",
+      "atm withdrawal",
+      "cash withdrawal",
+      "withdrawal"
     ],
     "exclude_keywords": []
   }
