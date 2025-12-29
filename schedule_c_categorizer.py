@@ -56,7 +56,7 @@ class ScheduleCCategorizer:
         # PART I - INCOME
         self.income_gross_receipts = [
             # Payment processors
-            "shopify", "ebay", "stripe", "paypal", "square", "venmo", "zelle",
+            "shopify", "shopify id", "ebay", "stripe", "paypal", "square", "venmo", "zelle",
             "tiktok", "tiktok shop", "meta pay", "google pay", "apple pay",
             # E-commerce platforms
             "amazon pay", "etsy", "woocommerce", "bigcommerce", "squarespace",
@@ -111,7 +111,7 @@ class ScheduleCCategorizer:
         
         self.expense_bank_fees = [
             "bank fee", "service charge", "monthly fee", "maintenance fee",
-            "transaction fee", "processing fee", "nsf", "overdraft",
+            "transaction fee", "processing fee", "nsf fee", "nsf charge", "overdraft",
             "atm fee", "wire transfer fee", "international fee",
             "platform fee", "payment processing fee"
         ]
@@ -263,11 +263,21 @@ class ScheduleCCategorizer:
         if exclusion_result:
             return exclusion_result
         
-        # STEP 2: Handle deposits (Income)
-        if transaction.amount > 0 or transaction.transaction_type == "deposit":
+        # STEP 2: Check if this is a payment processor transaction (Shopify, eBay, Amazon, etc.)
+        # These should be categorized by keywords, not by transaction direction
+        # This ensures ALL Shopify deposits AND withdrawals are properly categorized
+        is_payment_processor = any(keyword in combined_text for keyword in [
+            "shopify", "ebay", "amazon", "etsy", "tiktok", "stripe", "paypal",
+            "square", "venmo", "mercari", "poshmark", "walmart marketplace"
+        ])
+        
+        # STEP 3: Handle deposits OR payment processor transactions (Income)
+        # Payment processor transactions are categorized as income regardless of direction
+        # (unless they contain fee/charge keywords, which are caught by exclusions in account_keywords.json)
+        if transaction.amount > 0 or transaction.transaction_type == "deposit" or is_payment_processor:
             return self._categorize_income(transaction, combined_text)
         
-        # STEP 3: Handle withdrawals (Expenses or COGS)
+        # STEP 4: Handle withdrawals (Expenses or COGS)
         # Check COGS first (inventory-related costs)
         cogs_result = self._categorize_cogs(transaction, combined_text)
         if cogs_result:
@@ -296,8 +306,19 @@ class ScheduleCCategorizer:
         """Check if transaction should be excluded or marked as owner draw"""
         
         # Check transfers FIRST (before personal, as transfers are more specific)
+        # BUT: Exempt payment processors and check payments from transfer exclusion
+        # (Shopify, eBay, check payments, etc. use "Transfer" in descriptions but are legitimate expenses)
         # Transfers between own accounts → Exclude
-        if any(keyword in combined_text for keyword in self.exclude_transfers):
+        is_payment_processor = any(keyword in combined_text for keyword in [
+            "shopify", "ebay", "amazon", "etsy", "tiktok", "stripe", "paypal",
+            "square", "venmo", "mercari", "poshmark", "walmart marketplace"
+        ])
+        
+        is_check_payment = any(keyword in combined_text for keyword in [
+            "check payment", "chk", "check #", "check number"
+        ])
+        
+        if not is_payment_processor and not is_check_payment and any(keyword in combined_text for keyword in self.exclude_transfers):
             return ScheduleCCategory(
                 part="Excluded",
                 line_number=None,
@@ -307,17 +328,19 @@ class ScheduleCCategorizer:
                 exclusion_reason="Transfer between own accounts - Not income or expense"
             )
         
-        # ATM withdrawals → Owner draw (NOT expense)
+        # ATM withdrawals → Mark as Other Expenses (will be mapped to 999 in P&L)
+        # Note: For Schedule C tax purposes, these would be owner draws,
+        # but for P&L accounting, we show them as OTHER EXPENSES
         if any(keyword in combined_text for keyword in self.atm_keywords):
             if transaction.transaction_type == "withdrawal" or transaction.amount < 0:
                 return ScheduleCCategory(
-                    part="Excluded",
-                    line_number=None,
-                    category_name="Owner draw",
-                    tax_code="OWNER_DRAW",
-                    is_excluded=False,  # Not excluded, but not an expense
-                    is_owner_draw=True,
-                    exclusion_reason="ATM withdrawal - Owner draw, not business expense"
+                    part="Part V",
+                    line_number="Line 27a",
+                    category_name="Other expenses",
+                    tax_code="OTHER_EXPENSES",
+                    is_excluded=False,
+                    is_owner_draw=False,  # Changed: Show in P&L as expense, not owner draw
+                    exclusion_reason=None
                 )
         
         # Personal spending → Exclude (check last, after more specific exclusions)
@@ -407,6 +430,17 @@ class ScheduleCCategorizer:
     
     def _categorize_expenses(self, transaction: Transaction, combined_text: str) -> Optional[ScheduleCCategory]:
         """Categorize business expenses"""
+        
+        # Check payments - handle these as OTHER EXPENSES (before bank fees check)
+        # This catches check payments that might otherwise be misclassified
+        check_keywords = ["check payment", "chk ", " chk", "check #", "check number", "check transaction"]
+        if any(keyword in combined_text for keyword in check_keywords):
+            return ScheduleCCategory(
+                part="Part V",
+                line_number="Line 27a",
+                category_name="Other expenses",
+                tax_code="OTHER_EXPENSES"
+            )
         
         # Advertising
         if any(keyword in combined_text for keyword in self.expense_advertising):

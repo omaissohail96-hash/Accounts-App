@@ -1636,7 +1636,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
             category_groups = {}
 
             for tx, cat in categorized_transactions:
-                if cat.is_excluded or cat.is_owner_draw or not cat.line_number:
+                if cat.is_excluded or not cat.line_number:
                     continue
                 key = (cat.line_number, cat.tax_code, cat.category_name)
                 category_groups.setdefault(key, []).append((tx, cat))
@@ -1719,15 +1719,20 @@ if "transactions" in st.session_state and st.session_state.transactions:
             
             rows = []
             for tx, cat in categorized_transactions:
-                if cat.is_excluded or cat.is_owner_draw:
+                if cat.is_excluded:
                     continue
 
-                is_income = tx.amount > 0 or tx.transaction_type == "deposit"
+                # First pass: determine likely type for account code lookup
+                is_income_hint = tx.amount > 0 or tx.transaction_type == "deposit"
                 account_code, account_name = mapper.get_account_code(
                     tx.vendor, 
                     tx.description, 
-                    is_income=is_income
+                    is_income=is_income_hint
                 )
+
+                # Final type determination: based on account code (600s = Income)
+                # 601 SALES, 602 RETURNS, 603 OTHER INCOME should always be Income
+                is_income = account_code.startswith('6')
 
                 rows.append({
                     "Account Code": account_code,
@@ -1749,15 +1754,17 @@ if "transactions" in st.session_state and st.session_state.transactions:
                 st.subheader("💼 By Account Code")
                 grouped = {}
                 for tx, cat in categorized_transactions:
-                    if cat.is_excluded or cat.is_owner_draw:
+                    if cat.is_excluded:
                         continue
                     
-                    is_income = tx.amount > 0 or tx.transaction_type == "deposit"
+                    # First pass: determine likely type for account code lookup
+                    is_income_hint = tx.amount > 0 or tx.transaction_type == "deposit"
                     account_code, account_name = mapper.get_account_code(
                         tx.vendor, 
                         tx.description, 
-                        is_income=is_income
+                        is_income=is_income_hint
                     )
+                    # Note: Final type is determined by account code (600s = Income)
                     key = (account_code, account_name)
                     grouped.setdefault(key, []).append(tx)
 

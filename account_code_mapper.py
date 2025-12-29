@@ -87,13 +87,14 @@ class AccountCodeMapper:
         """
         Match transaction against keyword rules from JSON file.
         Uses rank-based priority with include/exclude keyword logic.
+        Now with robust case-insensitive partial string matching.
         
         Algorithm:
         1. Sort categories by rank (1 = highest priority)
         2. For each category:
-           - Normalize search text (lowercase, trim)
+           - Normalize search text (lowercase, trim, remove extra spaces)
            - Check exclude_keywords - if any match, skip this category
-           - Check include_keywords - if any match, assign this category and stop
+           - Check include_keywords - if any match (case-insensitive partial), assign category and stop
         3. Return None if no match (will default to uncategorized)
         
         Args:
@@ -108,13 +109,15 @@ class AccountCodeMapper:
             return None
         
         # Combine vendor and description for keyword matching
+        # Normalize: lowercase, strip, remove extra spaces
         search_text = ""
         if vendor:
-            search_text += vendor.lower().strip() + " "
+            search_text += " ".join(vendor.lower().strip().split()) + " "
         if description:
-            search_text += description.lower().strip()
+            search_text += " ".join(description.lower().strip().split())
         
-        search_text = search_text.strip()
+        search_text = " ".join(search_text.strip().split())  # Remove extra spaces
+        
         if not search_text:
             return None
         
@@ -135,7 +138,7 @@ class AccountCodeMapper:
             # Check exclude keywords first - if any match, skip this category
             exclude_match = False
             for keyword in exclude_keywords:
-                keyword_normalized = keyword.lower().strip()
+                keyword_normalized = " ".join(keyword.lower().strip().split())
                 if keyword_normalized and keyword_normalized in search_text:
                     print(f"⛔ Excluded '{search_text[:50]}...' from {account_code} · {account_name} (exclude: '{keyword}')")
                     exclude_match = True
@@ -144,9 +147,9 @@ class AccountCodeMapper:
             if exclude_match:
                 continue
             
-            # Check include keywords - if any match, assign this category
+            # Check include keywords - if any match (case-insensitive partial), assign this category
             for keyword in include_keywords:
-                keyword_normalized = keyword.lower().strip()
+                keyword_normalized = " ".join(keyword.lower().strip().split())
                 if keyword_normalized and keyword_normalized in search_text:
                     print(f"✅ Matched '{search_text[:50]}...' → {account_code} · {account_name} (keyword: '{keyword}')")
                     return (account_code, account_name)
@@ -157,6 +160,7 @@ class AccountCodeMapper:
     def get_account_code(self, vendor: Optional[str] = None, description: Optional[str] = None, is_income: bool = False) -> tuple:
         """
         Get account code and name based on vendor and description.
+        ALWAYS returns a valid account code - no transaction is left uncategorized.
         
         Args:
             vendor: Vendor name (for vendor-specific mapping)
@@ -164,30 +168,21 @@ class AccountCodeMapper:
             is_income: Whether this is an income transaction (deposit) or expense (withdrawal)
             
         Returns:
-            Tuple of (account_code, account_name)
+            Tuple of (account_code, account_name) - ALWAYS returns a valid code
         """
         # Check keyword-based matching first (highest priority)
         keyword_match = self._match_by_keywords(vendor, description)
         if keyword_match:
             return keyword_match
         
-        # Check vendor-specific mapping (DISABLED - only using JSON keywords)
-        # if vendor:
-        #     vendor_lower = vendor.lower()
-        #     for key, (code, name) in self.vendor_specific_map.items():
-        #         if key in vendor_lower:
-        #             return (code, name)
-        
-        # if description:
-        #     desc_lower = description.lower()
-        #     for key, (code, name) in self.vendor_specific_map.items():
-        #         if key in desc_lower:
-        #             return (code, name)
-        
-        # Default fallback based on transaction type (no Schedule C logic)
+        # SAFE FALLBACK - Always returns a valid account code
+        # This ensures NO transaction is left without an account code
         if is_income:
+            print(f"⚠️ No match found for income transaction, defaulting to 601 SALES: '{vendor or description}'")
             return ("601", "SALES")  # Default income to SALES
-        return ("999", "OTHER EXPENSES")  # Default expense to OTHER EXPENSES
+        else:
+            print(f"⚠️ No match found for expense transaction, defaulting to 999 OTHER EXPENSES: '{vendor or description}'")
+            return ("999", "OTHER EXPENSES")  # Default expense to OTHER EXPENSES
     
     def get_account_name_display(self, account_code: str, account_name: str) -> str:
         """
