@@ -1666,123 +1666,148 @@ if "transactions" in st.session_state and st.session_state.transactions:
                     st.dataframe(df, use_container_width=True, hide_index=True)
 
     with tab6:
-        st.subheader("📊 Profit & Loss (Account Codes)")
+            st.subheader("📊 Profit & Loss (Account Codes)")
 
-        categorized_transactions = st.session_state.get("categorized_transactions", [])
-        transactions = st.session_state.get("transactions", [])
+            categorized_transactions = st.session_state.get("categorized_transactions", [])
+            transactions = st.session_state.get("transactions", [])
 
-        if not categorized_transactions or not transactions:
-            st.info("No transaction data available for P&L report.")
-        else:
-            from datetime import datetime
-            import pandas as pd
-            from schedule_c_categorizer import ScheduleCCategorizer
-
-            sc_categorizer = ScheduleCCategorizer()
-            cur = "USD"
-
-            # ---- Robust period detection (min → max date)
-            date_objs = []
-            for tx in transactions:
-                if tx.date:
-                    try:
-                        date_objs.append(datetime.strptime(tx.date, "%Y-%m-%d"))
-                    except:
-                        pass
-
-            if date_objs:
-                start = min(date_objs)
-                end = max(date_objs)
-                default_period = f"{start.strftime('%b %Y')} – {end.strftime('%b %Y')}"
+            if not categorized_transactions or not transactions:
+                st.info("No transaction data available for P&L report.")
             else:
-                default_period = datetime.now().strftime("%B %Y")
+                from datetime import datetime
+                import pandas as pd
+                from schedule_c_categorizer import ScheduleCCategorizer
+                from account_code_mapper import AccountCodeMapper
 
-            col1, col2 = st.columns(2)
-            with col1:
-                business_name = st.text_input("Business Name (optional):", key="pl_account_business")
-            with col2:
-                period_input = st.text_input("Period:", value=default_period, key="pl_account_period")
+                sc_categorizer = ScheduleCCategorizer()
+                mapper = AccountCodeMapper()
+                cur = "USD"
 
-            # ---- Generate P&L text with account codes
-            pl_text = sc_categorizer.generate_pl_report_with_account_codes(
-                categorized_transactions,
-                business_name=business_name or "",
-                period=period_input
-            )
+                # -----------------------------
+                # 1. Robust period detection
+                # -----------------------------
+                date_objs = []
+                for tx in transactions:
+                    if tx.date:
+                        try:
+                            date_objs.append(datetime.strptime(tx.date, "%Y-%m-%d"))
+                        except:
+                            pass
 
-            st.subheader("📊 Profit & Loss Statement")
-            st.code(pl_text)
+                if date_objs:
+                    start = min(date_objs)
+                    end = max(date_objs)
+                    default_period = f"{start.strftime('%b %Y')} – {end.strftime('%b %Y')}"
+                else:
+                    default_period = datetime.now().strftime("%B %Y")
 
-            # ---- Build structured P&L dataframe
-            from account_code_mapper import AccountCodeMapper
-            mapper = AccountCodeMapper()
-            
-            rows = []
-            for tx, cat in categorized_transactions:
-                if cat.is_excluded or cat.is_owner_draw:
-                    continue
+                col1, col2 = st.columns(2)
+                with col1:
+                    business_name = st.text_input(
+                        "Business Name (optional):",
+                        key="pl_account_business"
+                    )
+                with col2:
+                    period_input = st.text_input(
+                        "Period:",
+                        value=default_period,
+                        key="pl_account_period"
+                    )
 
-                is_income = tx.amount > 0 or tx.transaction_type == "deposit"
-                account_code, account_name = mapper.get_account_code(
-                    tx.vendor, 
-                    tx.description, 
-                    is_income=is_income
+                # -----------------------------
+                # 2. SINGLE SOURCE OF TRUTH
+                # -----------------------------
+                income_dict = sc_categorizer.generate_income_statement_dict(
+                    categorized_transactions
                 )
 
-                rows.append({
-                    "Account Code": account_code,
-                    "Account Name": account_name,
-                    "Date": tx.date or "",
-                    "Vendor": tx.vendor or "",
-                    "Amount": abs(tx.amount),
-                    "Type": "Income" if is_income else "Expense",
-                    "Needs Review": "⚠ Yes" if tx.needs_review else "✅ No"
-                })
+                # -----------------------------
+                # 3. Excluded transactions (audit clarity)
+                # -----------------------------
+                excluded_total = sum(
+                    abs(tx.amount)
+                    for tx, cat in categorized_transactions
+                    if cat.is_excluded or cat.is_owner_draw
+                )
 
-            if rows:
-                summary_df = pd.DataFrame(rows)
-                
-                st.subheader("📋 Transaction Details")
-                st.dataframe(summary_df, use_container_width=True, hide_index=True)
+                if excluded_total > 0:
+                    st.info(
+                        f"Excluded from P&L (opening balance, transfers, owner draws): "
+                        f"{cur} {excluded_total:,.2f}"
+                    )
 
-                # Group by account code
-                st.subheader("💼 By Account Code")
-                grouped = {}
+                # -----------------------------
+                # 4. Render formatted P&L text
+                # -----------------------------
+                pl_text = sc_categorizer.generate_pl_report_with_account_codes(
+                    categorized_transactions,
+                    business_name=business_name or "",
+                    period=period_input
+                )
+
+                st.subheader("📊 Profit & Loss Statement")
+                st.code(pl_text)
+
+                # -----------------------------
+                # 5. Build transaction-level table
+                # -----------------------------
+                rows = []
                 for tx, cat in categorized_transactions:
                     if cat.is_excluded or cat.is_owner_draw:
                         continue
-                    
+
                     is_income = tx.amount > 0 or tx.transaction_type == "deposit"
+
                     account_code, account_name = mapper.get_account_code(
-                        tx.vendor, 
-                        tx.description, 
+                        tx.vendor,
+                        tx.description,
                         is_income=is_income
                     )
-                    key = (account_code, account_name)
-                    grouped.setdefault(key, []).append(tx)
 
-                for (code, name), txs in sorted(grouped.items()):
-                    subtotal = sum(abs(t.amount) for t in txs)
-                    label = f"{code} · {name} — {cur} {subtotal:,.2f} ({len(txs)} tx)"
+                    rows.append({
+                        "Account Code": account_code,
+                        "Account Name": account_name,
+                        "Date": tx.date or "",
+                        "Vendor": tx.vendor or "",
+                        "Amount": abs(tx.amount),
+                        "Type": "Income" if is_income else "Expense",
+                        "Needs Review": "⚠ Yes" if tx.needs_review else "✅ No"
+                    })
 
-                    with st.expander(label):
-                        detail_df = pd.DataFrame([{
-                            "Date": t.date or "",
-                            "Vendor": t.vendor or "",
-                            "Amount": f"{cur} {abs(t.amount):,.2f}",
-                            "Description": t.description,
-                            "Needs Review": "⚠ Yes" if t.needs_review else "✅ No"
-                        } for t in txs])
+                if not rows:
+                    st.warning("No P&L-eligible transactions found.")
+                else:
+                    df = pd.DataFrame(rows)
 
-                        st.dataframe(detail_df, use_container_width=True, hide_index=True)
+                    st.subheader("📋 Transaction Details")
+                    st.dataframe(df, use_container_width=True, hide_index=True)
 
-                # ---- CSV Export
-                csv_data = summary_df.to_csv(index=False)
-                st.download_button(
-                    "⬇️ Download P&L Account Codes (CSV)",
-                    csv_data,
-                    file_name=f"PL_Account_Codes_{period_input.replace(' ', '_')}.csv",
-                    mime="text/csv"
+                    # -----------------------------
+                    # 6. Group by account code
+                    # -----------------------------
+                    st.subheader("💼 By Account Code")
+
+                    grouped = {}
+                    for row in rows:
+                        key = (row["Account Code"], row["Account Name"])
+                        grouped.setdefault(key, []).append(row)
+
+                    for (code, name), items in sorted(grouped.items()):
+                        subtotal = sum(i["Amount"] for i in items)
+                        label = f"{code} · {name} — {cur} {subtotal:,.2f} ({len(items)} tx)"
+
+                        with st.expander(label):
+                            detail_df = pd.DataFrame(items)
+                            detail_df["Amount"] = detail_df["Amount"].apply(
+                                lambda x: f"{cur} {x:,.2f}"
+                            )
+                            st.dataframe(detail_df, use_container_width=True, hide_index=True)
+
+                # -----------------------------
+                # 7. Net Income summary (clarity)
+                # -----------------------------
+                st.success(
+                    f"Net Income: {cur} {income_dict['totals']['net_income']:,.2f}"
                 )
     
     # Downloads
