@@ -1713,6 +1713,34 @@ if "transactions" in st.session_state and st.session_state.transactions:
             st.subheader("📊 Profit & Loss Statement")
             st.code(pl_text)
 
+            # ---- Validation and Reconciliation Checks
+            validation_result = sc_categorizer.validate_classifications(categorized_transactions)
+            reconciliation_result = sc_categorizer.reconcile_totals(transactions, categorized_transactions)
+            
+            # Display validation warnings
+            if validation_result["error_count"] > 0 or validation_result["warning_count"] > 0:
+                st.subheader("⚠️ Validation & Reconciliation")
+                
+                if validation_result["error_count"] > 0:
+                    st.error(f"❌ Found {validation_result['error_count']} classification error(s):")
+                    for error in validation_result["errors"]:
+                        st.error(error["message"])
+                
+                if validation_result["warning_count"] > 0:
+                    st.warning(f"⚠️ Found {validation_result['warning_count']} warning(s):")
+                    for warning in validation_result["warnings"]:
+                        st.warning(warning["message"])
+            
+            # Display reconciliation status
+            if not reconciliation_result["fully_reconciled"]:
+                st.warning("⚠️ Reconciliation Mismatch Detected:")
+                if not reconciliation_result["income_reconciled"]:
+                    st.warning(f"  Income: Raw deposits ${reconciliation_result['raw_deposits_total']:,.2f} vs Categorized ${reconciliation_result['categorized_income_total']:,.2f} (Diff: ${reconciliation_result['income_difference']:,.2f})")
+                if not reconciliation_result["expenses_reconciled"]:
+                    st.warning(f"  Expenses: Raw withdrawals ${reconciliation_result['raw_withdrawals_total']:,.2f} vs Categorized ${reconciliation_result['categorized_expenses_total']:,.2f} (Diff: ${reconciliation_result['expenses_difference']:,.2f})")
+            else:
+                st.success("✅ Reconciliation: All totals match!")
+            
             # ---- Build structured P&L dataframe
             from account_code_mapper import AccountCodeMapper
             mapper = AccountCodeMapper()
@@ -1722,17 +1750,33 @@ if "transactions" in st.session_state and st.session_state.transactions:
                 if cat.is_excluded:
                     continue
 
-                # First pass: determine likely type for account code lookup
-                is_income_hint = tx.amount > 0 or tx.transaction_type == "deposit"
+                # DATA-DRIVEN CLASSIFICATION: Use transaction_type as source of truth
+                # Deposits → Income, Withdrawals → Expenses
+                is_income = tx.transaction_type == "deposit"
+                
+                # Get account code based on transaction type
                 account_code, account_name = mapper.get_account_code(
                     tx.vendor, 
                     tx.description, 
-                    is_income=is_income_hint
+                    is_income=is_income,
+                    transaction_type=tx.transaction_type
                 )
-
-                # Final type determination: based on account code (600s = Income)
-                # 601 SALES, 602 RETURNS, 603 OTHER INCOME should always be Income
-                is_income = account_code.startswith('6')
+                
+                # Ensure account code matches transaction type
+                # If withdrawal but got income code (600s), force to expense code
+                if tx.transaction_type == "withdrawal" and account_code.startswith('6'):
+                    # Force to expense code (999 OTHER EXPENSES as fallback)
+                    account_code, account_name = mapper.get_account_code(
+                        tx.vendor,
+                        tx.description,
+                        is_income=False,
+                        transaction_type="withdrawal"
+                    )
+                
+                # If deposit but got expense code, force to income code
+                if tx.transaction_type == "deposit" and not account_code.startswith('6'):
+                    # Force to income code (601 SALES as default)
+                    account_code, account_name = ("601", "SALES")
 
                 rows.append({
                     "Account Code": account_code,
@@ -1741,6 +1785,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
                     "Vendor": tx.vendor or "",
                     "Amount": abs(tx.amount),
                     "Type": "Income" if is_income else "Expense",
+                    "Transaction Type": tx.transaction_type.title(),
                     "Needs Review": "⚠ Yes" if tx.needs_review else "✅ No"
                 })
 
@@ -1757,14 +1802,26 @@ if "transactions" in st.session_state and st.session_state.transactions:
                     if cat.is_excluded:
                         continue
                     
-                    # First pass: determine likely type for account code lookup
-                    is_income_hint = tx.amount > 0 or tx.transaction_type == "deposit"
+                    # DATA-DRIVEN: Use transaction_type as source of truth
+                    is_income = tx.transaction_type == "deposit"
                     account_code, account_name = mapper.get_account_code(
                         tx.vendor, 
                         tx.description, 
-                        is_income=is_income_hint
+                        is_income=is_income,
+                        transaction_type=tx.transaction_type
                     )
-                    # Note: Final type is determined by account code (600s = Income)
+                    
+                    # Ensure account code matches transaction type
+                    if tx.transaction_type == "withdrawal" and account_code.startswith('6'):
+                        account_code, account_name = mapper.get_account_code(
+                            tx.vendor,
+                            tx.description,
+                            is_income=False,
+                            transaction_type="withdrawal"
+                        )
+                    if tx.transaction_type == "deposit" and not account_code.startswith('6'):
+                        account_code, account_name = ("601", "SALES")
+                    
                     key = (account_code, account_name)
                     grouped.setdefault(key, []).append(tx)
 

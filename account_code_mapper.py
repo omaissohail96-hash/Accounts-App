@@ -5,6 +5,9 @@ Maps Schedule C categories to QuickBooks-style account codes for P&L reporting
 import json
 from pathlib import Path
 from typing import Dict, Optional
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class AccountCodeMapper:
@@ -161,37 +164,102 @@ class AccountCodeMapper:
         print(f"❌ No keyword match for: '{search_text[:80]}...'")
         return None
     
-    def get_account_code(self, vendor: Optional[str] = None, description: Optional[str] = None, is_income: bool = False) -> tuple:
+    def get_account_code(self,
+        vendor: Optional[str] = None,
+        description: Optional[str] = None,
+        is_income: bool = False,
+        transaction_type: Optional[str] = None
+    ) -> tuple:
         """
-        Get account code and name based on vendor and description.
-        ALWAYS returns a valid account code - no transaction is left uncategorized.
-        
-        Args:
-            vendor: Vendor name (for vendor-specific mapping)
-            description: Description (for keyword and vendor-specific mapping)
-            is_income: Whether this is an income transaction (deposit) or expense (withdrawal)
-            
-        Returns:
-            Tuple of (account_code, account_name) - ALWAYS returns a valid code
+        Direction-first account mapping.
+
+        Rules enforced here:
+        1) If transaction direction indicates withdrawal (is_income False) => ALWAYS return an expense
+           - Keyword matches that map to income are ignored
+           - Default fallback: ("999", "OTHER EXPENSES")
+        2) If transaction direction indicates deposit (is_income True) => ALWAYS return an income
+           - Keyword matches that map to expenses are ignored
+           - Default fallback: ("601", "SALES")
+        3) Defensive: if explicit words in the text strongly indicate deposit/withdrawal, they override a wrong is_income flag
+        4) Keyword JSON logic is preserved and used only to pick an account within the chosen direction
         """
-        # Check keyword-based matching first (highest priority)
+
+        text = f"{vendor or ''} {description or ''}".lower()
+
+        # Defensive detection of explicit direction words
+        # include multi-word phrases that indicate money leaving the account
+        # broadened to catch Zelle/ACH/online payment patterns that are withdrawals
+        withdrawal_words = [
+            "withdrawal", "withdraw", "payout", "fee", "charge", "debit", "atm",
+            "payment to", "payment made to", "paid to", "transfer to", "transfer", "xfer to", "sent to",
+            "payment sent", "zelle", "zelle payment", "zelle payment to", "online payment to", "ach payment to",
+            "zelle transfer", "sent via zelle"
+        ]
+        # Avoid overly generic tokens like 'payment' which are ambiguous; keep deposit indicators focused
+        deposit_words = ["deposit", "payment received", "payment from", "credit", "received", "refund", "deposit received"]
+
+        forced_direction = None
+        if any(w in text for w in withdrawal_words):
+            forced_direction = "expense"
+        elif any(w in text for w in deposit_words):
+            forced_direction = "income"
+
+        # Final direction precedence (DATA-DRIVEN):
+        # 1) explicit transaction_type param (HIGHEST PRIORITY - source of truth)
+        # 2) forced_direction detected from text phrases (only if transaction_type not provided)
+        # 3) provided is_income boolean (fallback)
+        if transaction_type:
+            # transaction_type is the source of truth - accept common variants
+            t = transaction_type.lower().strip()
+            # treat any variant containing 'withdraw' as a withdrawal (expense)
+            if 'withdraw' in t or t in ('debit', 'debit_card', 'payment_out', 'payment_sent', 'sent'):
+                is_income_final = False
+            # treat deposit/credit variants as income
+            elif 'deposit' in t or t in ('credit', 'credit_card', 'payment_in', 'received'):
+                is_income_final = True
+            else:
+                # Unknown transaction_type, fall back to other indicators
+                is_income_final = True if forced_direction == "income" else False if forced_direction == "expense" else bool(is_income)
+        else:
+            # No transaction_type provided, use forced_direction or is_income
+            is_income_final = True if forced_direction == "income" else False if forced_direction == "expense" else bool(is_income)
+
+        def _is_income_code(code: str) -> bool:
+            return bool(code) and str(code).strip().startswith("6")
+
+        def _is_expense_code(code: str) -> bool:
+            # treat 7xx/8xx/9xx and special 860 as expense buckets
+            return bool(code) and (str(code).strip().startswith(("7", "8", "9")) or str(code).strip() == "860")
+
+        # EXPENSE path
+        if not is_income_final:
+            # No processor-specific hard-coded rules here — direction wins.
+            keyword_match = self._match_by_keywords(vendor, description)
+            if keyword_match:
+                code = keyword_match[0]
+                if _is_expense_code(code):
+                    logger.debug(f"get_account_code: text='{text[:80]}', keyword matched expense -> {keyword_match}")
+                    return keyword_match
+                # if matched code is income, ignore it because direction wins
+            logger.debug(f"get_account_code: text='{text[:80]}', no expense keyword match -> fallback 999")
+            return ("999", "OTHER EXPENSES")
+
+        # INCOME path
         keyword_match = self._match_by_keywords(vendor, description)
         if keyword_match:
-            return keyword_match
-        
-        # SAFE FALLBACK - Always returns a valid account code
-        # This ensures NO transaction is left without an account code
-        if is_income:
-            print(f"⚠️ No match found for income transaction, defaulting to 601 SALES: '{vendor or description}'")
-            return ("601", "SALES")  # Default income to SALES
-        else:
-            print(f"⚠️ No match found for expense transaction, defaulting to 999 OTHER EXPENSES: '{vendor or description}'")
-            return ("999", "OTHER EXPENSES")  # Default expense to OTHER EXPENSES
-    
+            code = keyword_match[0]
+            if _is_income_code(code):
+                logger.debug(f"get_account_code: text='{text[:80]}', keyword matched income -> {keyword_match}")
+                return keyword_match
+            # matched expense code - ignore because direction wins
+
+        logger.debug(f"get_account_code: text='{text[:80]}', fallback income -> 601")
+        return ("601", "SALES")
+
+
     def get_account_name_display(self, account_code: str, account_name: str) -> str:
         """
         Format account name for display (e.g., "601 · SALES")
         """
         return f"{account_code} · {account_name}"
 
- 

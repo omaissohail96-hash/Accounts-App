@@ -118,3 +118,5 @@ if __name__ == "__main__":
     # Or export to file
     # export_income_statement_to_file(categorizer, categorized, "income_statement.csv", period="Oct 25")
 
+
+
