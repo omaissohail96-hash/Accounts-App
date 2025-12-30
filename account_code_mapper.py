@@ -61,6 +61,10 @@ class AccountCodeMapper:
             "offshore": ("808", "OFFSHORE EXP"),
             "fiverr": ("808", "OFFSHORE EXP"),
             "upwork": ("807", "TEMPORARY HELP"),
+            "tiktok": ("601", "SALES"), "shopify": ("601", "SALES"), 
+            "wise": ("808", "OFFSHORE EXP"), 
+            "irs": ("821", "PAYROLL TAXES"),
+            "credit union": ("999", "OTHER EXPENSES")
         }
     
     def _load_keyword_rules(self, file_path: str) -> dict:
