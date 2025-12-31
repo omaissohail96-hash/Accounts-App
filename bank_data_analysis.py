@@ -866,7 +866,7 @@ class FallbackStatementParser:
             self.include_opening_balance
             and self.opening_balance is not None
         ):
-            txs.insert(0, Transaction(
+            txs.append(0, Transaction(
                 date=self.statement_start_date or "",
                 transaction_type="deposit",
                 vendor="Opening Balance",
@@ -1521,7 +1521,7 @@ if uploaded:
             fallback = FallbackStatementParser(include_opening_balance=include_opening_balance)
             bank_txs, meta = FallbackStatementParser().parse_statement(lines)
 
-            all_txs = bank_txs.copy()
+            all_txs = list(bank_txs.copy())
 
             # ---- CREDIT CARD SUPPORT ----
             if credit_card_file is not None:
