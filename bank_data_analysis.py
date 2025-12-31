@@ -866,7 +866,7 @@ class FallbackStatementParser:
             self.include_opening_balance
             and self.opening_balance is not None
         ):
-            txs.append(0, Transaction(
+            txs.insert(0, Transaction(
                 date=self.statement_start_date or "",
                 transaction_type="deposit",
                 vendor="Opening Balance",
@@ -1519,7 +1519,7 @@ if uploaded:
 
             # First try Chase-optimized fallback
             fallback = FallbackStatementParser(include_opening_balance=include_opening_balance)
-            bank_txs, meta = FallbackStatementParser().parse_statement(lines)
+            bank_txs, meta = fallback.parse_statement(lines)
 
             all_txs = list(bank_txs.copy())
 
