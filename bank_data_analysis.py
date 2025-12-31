@@ -111,6 +111,7 @@ class Transaction:
     section: Optional[str] = None
     category: Optional[str] = None
     needs_review: bool = False
+    source: Optional[str] = "BANK"
 
 # ----------------------------
 # Utilities
@@ -200,6 +201,21 @@ def _short_vendor(v: str) -> str:
         v2 = v2[:30] + "..."
     return v2
 
+from datetime import datetime, date
+
+def filter_by_date_range(transactions: List[Transaction], start_date: date, end_date: date) -> List[Transaction]:
+    """
+    Filters transactions between start_date and end_date (inclusive).
+    """
+    filtered = []
+    for tx in transactions:
+        try:
+            tx_date = datetime.strptime(tx.date, "%Y-%m-%d").date()
+            if start_date <= tx_date <= end_date:
+                filtered.append(tx)
+        except Exception:
+            continue
+    return filtered
 
 def _clean_description(desc: str, vendor: str = "", transaction_type: str = "") -> str:
     """
@@ -1177,6 +1193,49 @@ class UniversalParser:
             ))
 
         return txs
+class CreditCardParser:
+    DATE_RE = re.compile(r'\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b')
+    AMOUNT_RE = re.compile(r'\(?\$?\d{1,3}(?:,\d{3})*\.\d{2}\)?')
+
+    def parse(self, lines: List[str]) -> List[Transaction]:
+        txs = []
+
+        for ln in lines:
+            if not self.DATE_RE.search(ln):
+                continue
+
+            amts = self.AMOUNT_RE.findall(ln)
+            if not amts:
+                continue
+
+            date_raw = self.DATE_RE.search(ln).group()
+            date_norm = _normalize_date_token(date_raw)
+
+            amt = _clean_amount_token(amts[-1])
+            if amt is None:
+                continue
+
+            # 💳 credit card charges are ALWAYS withdrawals
+            amt = -abs(amt)
+
+            vendor = _short_vendor(
+                re.sub(self.DATE_RE, '', ln)
+                .replace(amts[-1], '')
+                .strip()
+            )
+
+            txs.append(Transaction(
+                date=date_norm,
+                transaction_type="withdrawal",
+                vendor=vendor,
+                amount=amt,
+                description=_clean_description(ln, vendor, "withdrawal"),
+                raw_line=ln,
+                section="CREDIT_CARD",
+                source="CREDIT_CARD"
+            ))
+
+        return txs
 
 # ----------------------------
 # LLM enhancer (unchanged)
@@ -1432,6 +1491,11 @@ with st.sidebar:
     sort_by = st.selectbox("Sort vendor summaries by", ["Subtotal (desc)", "Transaction Count (desc)"])
 
 uploaded = st.file_uploader("Upload statement (PDF, CSV, DOCX)", type=["pdf", "csv", "doc", "docx"])
+credit_card_file = st.file_uploader(
+    "Upload Credit Card Statement (PDF)",
+    type=["pdf"],
+    key="credit_card"
+)
 
 if uploaded:
     st.info(f"File: {uploaded.name} — {uploaded.size/1024:.1f} KB")
@@ -1455,10 +1519,29 @@ if uploaded:
 
             # First try Chase-optimized fallback
             fallback = FallbackStatementParser(include_opening_balance=include_opening_balance)
-            transactions, meta = fallback.parse_statement(lines)
+            bank_txs, meta = FallbackStatementParser().parse_statement(lines)
+
+            all_txs = bank_txs.copy()
+
+            # ---- CREDIT CARD SUPPORT ----
+            if credit_card_file is not None:
+                cc_lines, ok, _ = DocumentParser().parse_document(
+                    credit_card_file.read(),
+                    credit_card_file.name
+                )
+
+                cc_txs = CreditCardParser().parse(cc_lines)
+
+                # FORCE credit card as withdrawals
+                for tx in cc_txs:
+                    tx.transaction_type = "withdrawal"
+                    tx.amount = -abs(tx.amount)
+
+                all_txs.extend(cc_txs)
+
 
             # If nothing extracted or too few rows, try UniversalParser conservative fallback
-            if not transactions or len(transactions) < 3:
+            if not all_txs or len(all_txs) < 3:
                 up = UniversalParser()
                 u_txs = up.parse(lines)
                 if u_txs:
@@ -1468,23 +1551,23 @@ if uploaded:
 
             parsed_from = meta.get("parsed_from", "fallback")
 
-            if not transactions:
+            if not all_txs:
                 st.error("No transactions extracted.")
                 st.stop()
             # categorize & dedupe
             categorizer = RuleEngineCategorizer()
-            transactions = categorizer.apply(transactions)
+            transactions = categorizer.apply(all_txs)
 
             # stats & reports
             rg = ReportGenerator()
-            stats = rg.generate_summary_statistics(transactions)
-            deposits_df = rg.generate_deposits_summary(transactions)
-            withdrawals_df = rg.generate_withdrawals_summary(transactions)
-            pl_df = rg.generate_pl_report(transactions)
+            stats = rg.generate_summary_statistics(all_txs)
+            deposits_df = rg.generate_deposits_summary(all_txs)
+            withdrawals_df = rg.generate_withdrawals_summary(all_txs)
+            pl_df = rg.generate_pl_report(all_txs)
             # Use the comprehensive Schedule C categorizer
             from schedule_c_categorizer import ScheduleCCategorizer
             sc_categorizer = ScheduleCCategorizer()
-            categorized_transactions = sc_categorizer.categorize_transactions(transactions)
+            categorized_transactions = sc_categorizer.categorize_transactions(all_txs)
             schedule_c_df = sc_categorizer.generate_schedule_c_dataframe(categorized_transactions)
             st.session_state.schedule_c_df = schedule_c_df
             st.session_state.categorized_transactions = categorized_transactions  # Store for detail view
@@ -1503,19 +1586,92 @@ if uploaded:
                     withdrawals_df = withdrawals_df.sort_values("Transaction Count", ascending=False).reset_index(drop=True)
 
             # store in session
-            st.session_state.transactions = transactions
+            st.session_state.transactions = all_txs
             st.session_state.stats = stats
             st.session_state.deposit_df = deposits_df
             st.session_state.withdrawal_df = withdrawals_df
             st.session_state.pl_df = pl_df
             st.session_state.currency = currency
             st.session_state.parsed_from = parsed_from
+            
 
-            st.success(f"Processed {len(transactions)} transactions ({parsed_from}).")
+            st.success(f"Processed {len(all_txs)} transactions ({parsed_from}).")
+            st.session_state.all_transactions = transactions
+            st.session_state.filtered_transactions = transactions 
 
+from datetime import datetime, date
+
+all_transactions = st.session_state.get("all_transactions", [])
+
+if all_transactions:
+    st.subheader("📅 Filter by Date (Optional)")
+
+    parsed_dates = []
+    for tx in all_transactions:
+        if tx.date:
+            try:
+                parsed_dates.append(datetime.strptime(tx.date, "%Y-%m-%d").date())
+            except:
+                pass
+
+    if parsed_dates:
+        min_date = min(parsed_dates)
+        max_date = max(parsed_dates)
+    else:
+        min_date = date.today()
+        max_date = date.today()
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        start_date = st.date_input(
+            "Start Date",
+            value=min_date,
+            min_value=min_date,
+            max_value=max_date,
+            key="filter_start_date"
+        )
+
+    with col2:
+        end_date = st.date_input(
+            "End Date",
+            value=max_date,
+            min_value=min_date,
+            max_value=max_date,
+            key="filter_end_date"
+        )
+
+    if st.button("Apply Date Filter"):
+        filtered = []
+
+        for tx in all_transactions:
+            if not tx.date:
+                continue
+            try:
+                tx_date = datetime.strptime(tx.date, "%Y-%m-%d").date()
+            except:
+                continue
+
+            if start_date <= tx_date <= end_date:
+                filtered.append(tx)
+
+        st.session_state.filtered_transactions = filtered
+
+        st.success(
+            f"Showing {len(filtered)} transactions "
+            f"from {start_date} to {end_date}"
+        )
+
+    # Reset option
+    if st.button("Reset Date Filter"):
+        st.session_state.filtered_transactions = all_transactions
+        st.info("Date filter cleared. Showing all transactions.")
+        
 # Dashboard (same UI as before)
 if "transactions" in st.session_state and st.session_state.transactions:
-    transactions: List[Transaction] = st.session_state.transactions
+    transactions: List[Transaction] = st.session_state.get(
+        'filtered_transactions', st.session_state.transactions
+    )
     stats = st.session_state.stats
     cur = st.session_state.currency
 
@@ -1560,7 +1716,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
     rg = ReportGenerator()
 
     with tab1:
-        st.subheader("Deposits Summary (by Source/Vendor)")
+        st.subheader("All Deposits Summary (by Source/Vendor)")
         df = st.session_state.deposit_df
         if df is None or df.empty:
             st.info("No deposits found.")
@@ -1584,7 +1740,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
                     st.dataframe(details, use_container_width=True, hide_index=True)
 
     with tab2:
-        st.subheader("Withdrawals Summary (by Vendor)")
+        st.subheader("All Withdrawals Summary (by Vendor)")
         df = st.session_state.withdrawal_df
         if df is None or df.empty:
             st.info("No withdrawals found.")
@@ -1691,8 +1847,14 @@ if "transactions" in st.session_state and st.session_state.transactions:
     with tab6:
         st.subheader("📊 Profit & Loss (Account Codes)")
 
-        categorized_transactions = st.session_state.get("categorized_transactions", [])
-        transactions = st.session_state.get("transactions", [])
+        categorized_transactions = st.session_state.get(
+            "filtered_categorized_transactions",
+            st.session_state.categorized_transactions
+        )
+        transactions = st.session_state.get(
+            "filtered_transactions",
+            st.session_state.transactions
+        )
 
         if not categorized_transactions or not transactions:
             st.info("No transaction data available for P&L report.")
