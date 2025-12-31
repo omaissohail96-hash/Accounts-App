@@ -1534,7 +1534,29 @@ if "transactions" in st.session_state and st.session_state.transactions:
         stats['Total Withdrawal Amount'] = float(computed_withdrawals)
         stats['Net Income'] = float(computed_deposits - computed_withdrawals)
 
-    tab1, tab2, tab3, tab4 , tab5 , tab6 = st.tabs(["💰 Deposits","💸 Withdrawals","📈 P&L","📋 All Transactions" , "📄 Schedule C", "📊 P&L (Account Codes)"])
+    # Toggle to hide the Schedule C tab from the frontend while keeping
+    # all Schedule C backend logic intact.
+    SHOW_SCHEDULE_C = False
+
+    base_labels = ["💰 Deposits", "💸 Withdrawals", "📈 P&L", "📋 All Transactions"]
+    # Insert Schedule C tab before the final P&L (Account Codes) tab when enabled
+    if SHOW_SCHEDULE_C:
+        labels = base_labels + ["📄 Schedule C", "📊 P&L (Account Codes)"]
+    else:
+        labels = base_labels + ["📊 P&L (Account Codes)"]
+
+    tabs = st.tabs(labels)
+    # map tabs to variables used below; tab5 may be None when Schedule C is hidden
+    tab1 = tabs[0]
+    tab2 = tabs[1]
+    tab3 = tabs[2]
+    tab4 = tabs[3]
+    if SHOW_SCHEDULE_C:
+        tab5 = tabs[4]
+        tab6 = tabs[5]
+    else:
+        tab5 = None
+        tab6 = tabs[4]
     rg = ReportGenerator()
 
     with tab1:
@@ -1599,71 +1621,72 @@ if "transactions" in st.session_state and st.session_state.transactions:
             "Description": t.description
         } for t in transactions])
         st.dataframe(all_df, use_container_width=True, hide_index=True)
-    with tab5:
-        st.subheader("📄 Schedule C")
+    if tab5:
+        with tab5:
+            st.subheader("📄 Schedule C")
 
-        schedule_c_df = st.session_state.get("schedule_c_df")
+            schedule_c_df = st.session_state.get("schedule_c_df")
 
-        if schedule_c_df is None or schedule_c_df.empty:
-            st.info("No Schedule C data available.")
-        else:
-            categorized_transactions = st.session_state.get("categorized_transactions", [])
-            transactions = st.session_state.get("transactions", [])
+            if schedule_c_df is None or schedule_c_df.empty:
+                st.info("No Schedule C data available.")
+            else:
+                categorized_transactions = st.session_state.get("categorized_transactions", [])
+                transactions = st.session_state.get("transactions", [])
 
-            from datetime import datetime
-            import pandas as pd
-            import re
+                from datetime import datetime
+                import pandas as pd
+                import re
 
-            cur = "USD"
+                cur = "USD"
 
-            # ===============================
-            # IRS SCHEDULE C VIEW
-            # ===============================
-            from schedule_c_categorizer import ScheduleCCategorizer
-            sc_categorizer = ScheduleCCategorizer()
+                # ===============================
+                # IRS SCHEDULE C VIEW
+                # ===============================
+                from schedule_c_categorizer import ScheduleCCategorizer
+                sc_categorizer = ScheduleCCategorizer()
 
-            # ---- Generate Schedule C report
-            schedule_c_text = sc_categorizer.generate_schedule_c_report(categorized_transactions)
-            st.subheader("📄 IRS Schedule C Report")
-            st.code(schedule_c_text)
+                # ---- Generate Schedule C report
+                schedule_c_text = sc_categorizer.generate_schedule_c_report(categorized_transactions)
+                st.subheader("📄 IRS Schedule C Report")
+                st.code(schedule_c_text)
 
-            st.subheader("🧾 IRS Schedule C Summary")
-            st.dataframe(schedule_c_df, use_container_width=True, hide_index=True)
+                st.subheader("🧾 IRS Schedule C Summary")
+                st.dataframe(schedule_c_df, use_container_width=True, hide_index=True)
 
-            if not categorized_transactions:
-                st.stop()
+                if not categorized_transactions:
+                    st.stop()
 
-            category_groups = {}
+                category_groups = {}
 
-            for tx, cat in categorized_transactions:
-                if cat.is_excluded or not cat.line_number:
-                    continue
-                key = (cat.line_number, cat.tax_code, cat.category_name)
-                category_groups.setdefault(key, []).append((tx, cat))
+                for tx, cat in categorized_transactions:
+                    if cat.is_excluded or not cat.line_number:
+                        continue
+                    key = (cat.line_number, cat.tax_code, cat.category_name)
+                    category_groups.setdefault(key, []).append((tx, cat))
 
-            for (line, code, name), items in sorted(
-                category_groups.items(),
-                key=lambda x: (
-                    float(re.search(r'(\d+)', x[0][0]).group(1))
-                    if re.search(r'(\d+)', x[0][0]) else 999
-                )
-            ):
-                subtotal = sum(abs(tx.amount) for tx, _ in items)
-                count = len(items)
+                for (line, code, name), items in sorted(
+                    category_groups.items(),
+                    key=lambda x: (
+                        float(re.search(r'(\d+)', x[0][0]).group(1))
+                        if re.search(r'(\d+)', x[0][0]) else 999
+                    )
+                ):
+                    subtotal = sum(abs(tx.amount) for tx, _ in items)
+                    count = len(items)
 
-                label = f"{line} · {name} — {cur} {subtotal:,.2f} ({count} tx)"
+                    label = f"{line} · {name} — {cur} {subtotal:,.2f} ({count} tx)"
 
-                with st.expander(label):
-                    df = pd.DataFrame([{
-                        "Date": tx.date or "",
-                        "Vendor": tx.vendor or "",
-                        "Amount": f"{cur} {abs(tx.amount):,.2f}",
-                        "Description": tx.description,
-                        "Tax Code": cat.tax_code,
-                        "Needs Review": "⚠ Yes" if tx.needs_review else "✅ No"
-                    } for tx, cat in items])
+                    with st.expander(label):
+                        df = pd.DataFrame([{
+                            "Date": tx.date or "",
+                            "Vendor": tx.vendor or "",
+                            "Amount": f"{cur} {abs(tx.amount):,.2f}",
+                            "Description": tx.description,
+                            "Tax Code": cat.tax_code,
+                            "Needs Review": "⚠ Yes" if tx.needs_review else "✅ No"
+                        } for tx, cat in items])
 
-                    st.dataframe(df, use_container_width=True, hide_index=True)
+                        st.dataframe(df, use_container_width=True, hide_index=True)
 
     with tab6:
         st.subheader("📊 Profit & Loss (Account Codes)")
