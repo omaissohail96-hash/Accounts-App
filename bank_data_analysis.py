@@ -132,6 +132,10 @@ OPENING_BALANCE_RE = re.compile(
     r'(opening balance|beginning balance)[^\d\-]*([\$]?\(?\d{1,3}(?:,\d{3})*(?:\.\d{2})\)?)',
     re.IGNORECASE
 )
+
+# Global variable to store the inferred statement year
+_STATEMENT_YEAR = None
+
 def _normalize_date_token(token: str) -> str:
     if not token:
         return ""
@@ -148,7 +152,17 @@ def _normalize_date_token(token: str) -> str:
         try:
             dt = datetime.strptime(t, fmt)
             if "%Y" not in fmt and "%y" not in fmt:
-                dt = dt.replace(year=datetime.now().year)
+                # Use statement year if available, otherwise infer from most recent past year
+                global _STATEMENT_YEAR
+                if _STATEMENT_YEAR:
+                    year = _STATEMENT_YEAR
+                else:
+                    # Infer year: if month is in the future, use last year
+                    now = datetime.now()
+                    year = now.year
+                    if dt.month > now.month:
+                        year -= 1
+                dt = dt.replace(year=year)
             return dt.strftime("%Y-%m-%d")
         except Exception:
             continue
@@ -485,6 +499,7 @@ class FallbackStatementParser:
         self.include_opening_balance = include_opening_balance
         self.opening_balance: Optional[float] = None
         self.statement_start_date: Optional[str] = None
+        self.statement_year: Optional[int] = None
 
     SECTION_PATTERNS = {
         "DEPOSITS": re.compile(r'\bdeposits\s+and\s+additions\b', re.I),
@@ -507,6 +522,33 @@ class FallbackStatementParser:
         raw = m.group(2)
         amt = float(raw.replace('$', '').replace(',', '').replace('(', '').replace(')', ''))
         self.opening_balance = amt
+    
+    def _extract_statement_year(self, lines: List[str]):
+        """Extract year from statement period or date patterns in the document"""
+        # Look for patterns like "Statement Period: 11/01/2025 - 11/30/2025" or dates with year
+        for line in lines[:50]:  # Check first 50 lines
+            # Pattern 1: Statement period with year
+            m = re.search(r'(statement period|period|dates?).*?(\d{1,2}[/-]\d{1,2}[/-](\d{4}))', line, re.I)
+            if m:
+                year = int(m.group(3))
+                if 2000 <= year <= datetime.now().year + 1:
+                    return year
+            
+            # Pattern 2: Any full date with 4-digit year
+            m = re.search(r'\b\d{1,2}[/-]\d{1,2}[/-](\d{4})\b', line)
+            if m:
+                year = int(m.group(1))
+                if 2000 <= year <= datetime.now().year + 1:
+                    return year
+            
+            # Pattern 3: YYYY-MM-DD format
+            m = re.search(r'\b(\d{4})-\d{1,2}-\d{1,2}\b', line)
+            if m:
+                year = int(m.group(1))
+                if 2000 <= year <= datetime.now().year + 1:
+                    return year
+        
+        return None
     def _is_summary_line(self, ln: str) -> bool:
         low = ln.lower()
         if any(k in low for k in ["fee", "service fee", "monthly fee", "bank fee"]):
@@ -688,6 +730,12 @@ class FallbackStatementParser:
         return "UNKNOWN"
     def parse_statement(self, lines: List[str]) -> Tuple[List[Transaction], Dict[str, Any]]:
         txs: List[Transaction] = []
+        
+        # Extract statement year first
+        self.statement_year = self._extract_statement_year(lines)
+        global _STATEMENT_YEAR
+        _STATEMENT_YEAR = self.statement_year
+        
         # 1. Pre-clean
         for ln in lines:
             self._extract_opening_balance(ln)
@@ -1638,31 +1686,35 @@ def _md_key(d):
 if all_transactions:
     st.subheader("📅 Filter by Date (Month / Day only)")
 
-    md_values = []
+    # Extract all valid dates with full date information
+    parsed_dates = []
     for tx in all_transactions:
-        md = _md_key(tx.date)
-        if md:
-            md_values.append(md)
+        if tx.date:
+            try:
+                parsed_dates.append(datetime.strptime(tx.date, "%Y-%m-%d").date())
+            except:
+                pass
 
-    if not md_values:
+    if not parsed_dates:
         st.warning("No valid dates found in transactions.")
     else:
-        auto_start_md = min(md_values)
-        auto_end_md = max(md_values)
+        # Get actual min and max dates from the statement
+        min_date = min(parsed_dates)
+        max_date = max(parsed_dates)
 
         col1, col2 = st.columns(2)
 
         with col1:
             start_md = st.date_input(
                 "Start (Month / Day)",
-                value=date(2000, auto_start_md[0], auto_start_md[1]),
+                value=min_date,
                 key="filter_start_md"
             )
 
         with col2:
             end_md = st.date_input(
                 "End (Month / Day)",
-                value=date(2000, auto_end_md[0], auto_end_md[1]),
+                value=max_date,
                 key="filter_end_md"
             )
 
