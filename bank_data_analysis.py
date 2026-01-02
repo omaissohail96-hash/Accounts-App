@@ -154,6 +154,14 @@ def _normalize_date_token(token: str) -> str:
             continue
     return t  # fallback: return raw token
 
+def _md_key(d: str):
+    """Return (month, day) tuple from YYYY-MM-DD or similar"""
+    try:
+        dt = datetime.strptime(d, "%Y-%m-%d")
+        return (dt.month, dt.day)
+    except Exception:
+        return None
+
 def _clean_amount_token(token: str) -> Optional[float]:
     if not token:
         return None
@@ -203,19 +211,28 @@ def _short_vendor(v: str) -> str:
 
 from datetime import datetime, date
 
-def filter_by_date_range(transactions: List[Transaction], start_date: date, end_date: date) -> List[Transaction]:
-    """
-    Filters transactions between start_date and end_date (inclusive).
-    """
-    filtered = []
+def filter_by_month_day_range(
+    transactions: List[Transaction],
+    start_md: Tuple[int, int],
+    end_md: Tuple[int, int]
+) -> List[Transaction]:
+
+    out = []
     for tx in transactions:
-        try:
-            tx_date = datetime.strptime(tx.date, "%Y-%m-%d").date()
-            if start_date <= tx_date <= end_date:
-                filtered.append(tx)
-        except Exception:
+        md = _md_key(tx.date)
+        if not md:
             continue
-    return filtered
+
+        # handle wrap-around (e.g. Dec → Jan)
+        if start_md <= end_md:
+            if start_md <= md <= end_md:
+                out.append(tx)
+        else:
+            if md >= start_md or md <= end_md:
+                out.append(tx)
+
+    return out
+
 
 def _clean_description(desc: str, vendor: str = "", transaction_type: str = "") -> str:
     """
@@ -1306,6 +1323,10 @@ class LLMEnhancer:
         except Exception as e:
             logger.exception("LLM enhancement error: %s", e)
             return transactions
+
+
+
+
 class RuleEngineCategorizer:
     def __init__(self, rules_path="rules.json"):
         with open(rules_path, "r") as f:
@@ -1522,7 +1543,11 @@ if uploaded:
             bank_txs, meta = fallback.parse_statement(lines)
 
             all_txs = list(bank_txs.copy())
-
+            valid_dates = [
+                _md_key(tx.date)
+                for tx in all_txs
+                if _md_key(tx.date) is not None
+            ]
             # ---- CREDIT CARD SUPPORT ----
             if credit_card_file is not None:
                 cc_lines, ok, _ = DocumentParser().parse_document(
@@ -1603,69 +1628,75 @@ from datetime import datetime, date
 
 all_transactions = st.session_state.get("all_transactions", [])
 
+def _md_key(d):
+    try:
+        dt = datetime.strptime(d, "%Y-%m-%d")
+        return (dt.month, dt.day)
+    except:
+        return None
+
 if all_transactions:
-    st.subheader("📅 Filter by Date (Optional)")
+    st.subheader("📅 Filter by Date (Month / Day only)")
 
-    parsed_dates = []
+    md_values = []
     for tx in all_transactions:
-        if tx.date:
-            try:
-                parsed_dates.append(datetime.strptime(tx.date, "%Y-%m-%d").date())
-            except:
-                pass
+        md = _md_key(tx.date)
+        if md:
+            md_values.append(md)
 
-    if parsed_dates:
-        min_date = min(parsed_dates)
-        max_date = max(parsed_dates)
+    if not md_values:
+        st.warning("No valid dates found in transactions.")
     else:
-        min_date = date.today()
-        max_date = date.today()
+        auto_start_md = min(md_values)
+        auto_end_md = max(md_values)
 
-    col1, col2 = st.columns(2)
+        col1, col2 = st.columns(2)
 
-    with col1:
-        start_date = st.date_input(
-            "Start Date",
-            value=min_date,
-            min_value=min_date,
-            max_value=max_date,
-            key="filter_start_date"
-        )
+        with col1:
+            start_md = st.date_input(
+                "Start (Month / Day)",
+                value=date(2000, auto_start_md[0], auto_start_md[1]),
+                key="filter_start_md"
+            )
 
-    with col2:
-        end_date = st.date_input(
-            "End Date",
-            value=max_date,
-            min_value=min_date,
-            max_value=max_date,
-            key="filter_end_date"
-        )
+        with col2:
+            end_md = st.date_input(
+                "End (Month / Day)",
+                value=date(2000, auto_end_md[0], auto_end_md[1]),
+                key="filter_end_md"
+            )
 
-    if st.button("Apply Date Filter"):
-        filtered = []
+        if st.button("Apply Date Filter"):
+            filtered = []
 
-        for tx in all_transactions:
-            if not tx.date:
-                continue
-            try:
-                tx_date = datetime.strptime(tx.date, "%Y-%m-%d").date()
-            except:
-                continue
+            start_key = (start_md.month, start_md.day)
+            end_key = (end_md.month, end_md.day)
 
-            if start_date <= tx_date <= end_date:
-                filtered.append(tx)
+            for tx in all_transactions:
+                md = _md_key(tx.date)
+                if not md:
+                    continue
 
-        st.session_state.filtered_transactions = filtered
+                # handle year wrap (Dec → Jan)
+                if start_key <= end_key:
+                    if start_key <= md <= end_key:
+                        filtered.append(tx)
+                else:
+                    if md >= start_key or md <= end_key:
+                        filtered.append(tx)
 
-        st.success(
-            f"Showing {len(filtered)} transactions "
-            f"from {start_date} to {end_date}"
-        )
+            st.session_state.filtered_transactions = filtered
 
-    # Reset option
-    if st.button("Reset Date Filter"):
-        st.session_state.filtered_transactions = all_transactions
-        st.info("Date filter cleared. Showing all transactions.")
+            st.success(
+                f"Showing {len(filtered)} transactions "
+                f"from {start_md.month}/{start_md.day} "
+                f"to {end_md.month}/{end_md.day}"
+            )
+
+        if st.button("Reset Date Filter"):
+            st.session_state.filtered_transactions = all_transactions
+            st.info("Date filter cleared. Showing all transactions.")
+
         
 # Dashboard (same UI as before)
 if "transactions" in st.session_state and st.session_state.transactions:
