@@ -1541,11 +1541,10 @@ class ReportGenerator:
 # Streamlit UI
 # ----------------------------
 st.set_page_config(page_title="Bank Statement Analyzer (Hybrid)", layout="wide")
-st.title("💼 Bank Statement Analyzer — Improved Parser (Chase-first, Universal fallback)")
+st.title("💼 Bank Statement Analyzer")
 
 st.markdown(
-    "Upload a bank statement (PDF / CSV / DOCX). The app uses a robust deterministic parser optimized for Chase-style "
-    "statements (including ATM & Daily Ending Balance protections). If that fails, a conservative universal parser attempts extraction."
+    "Upload a bank statement (PDF / CSV / DOCX)"
 )
 def filter_atm_withdrawals(transactions: List[Transaction]) -> List[Transaction]:
     return [
@@ -1684,7 +1683,7 @@ def _md_key(d):
         return None
 
 if all_transactions:
-    st.subheader("📅 Filter by Date (Month / Day only)")
+    st.subheader("📅 Filter by Date")
 
     # Extract all valid dates with full date information
     parsed_dates = []
@@ -1706,14 +1705,14 @@ if all_transactions:
 
         with col1:
             start_md = st.date_input(
-                "Start (Month / Day)",
+                "Start Date",
                 value=min_date,
                 key="filter_start_md"
             )
 
         with col2:
             end_md = st.date_input(
-                "End (Month / Day)",
+                "End Date",
                 value=max_date,
                 key="filter_end_md"
             )
