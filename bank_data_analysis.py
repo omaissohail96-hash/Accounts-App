@@ -1954,14 +1954,24 @@ if "transactions" in st.session_state and st.session_state.transactions:
     elif selected_tab == (5 if SHOW_SCHEDULE_C else 4):  # P&L Account Codes tab
         st.subheader("📊 Profit & Loss (Account Codes)")
 
-        categorized_transactions = st.session_state.get(
-            "filtered_categorized_transactions",
-            st.session_state.categorized_transactions
-        )
-        transactions = st.session_state.get(
+        # Build categorized list that matches filtered transactions
+        all_categorized = st.session_state.categorized_transactions
+        filtered_transactions = st.session_state.get(
             "filtered_transactions",
             st.session_state.transactions
         )
+
+        filtered_tx_keys = {
+            (t.date, t.description, t.amount)
+            for t in filtered_transactions
+        }
+
+        categorized_transactions = [
+            (tx, cat)
+            for tx, cat in all_categorized
+            if (tx.date, tx.description, tx.amount) in filtered_tx_keys
+        ]
+
 
         if not categorized_transactions or not transactions:
             st.info("No transaction data available for P&L report.")
