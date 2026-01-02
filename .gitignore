@@ -1,0 +1,42 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Test files
+test_*.py
+*_test.py
+
+# Debug and example files
+debug_*.py
+example_*.py
+check_*.py
+
+# Sample data
+sample_*.csv
+sample_*.json
+
+# Documentation (except README)
+*_SUMMARY.md
+*_FIX.md
+*_SCHEMA.md
+*_FIX_*.md
+*CLASSIFICATION*.md
+CHECK_*.md
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

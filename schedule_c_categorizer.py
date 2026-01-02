@@ -56,7 +56,7 @@ class ScheduleCCategorizer:
         # PART I - INCOME
         self.income_gross_receipts = [
             # Payment processors
-            "shopify", "ebay", "stripe", "paypal", "square", "venmo", "zelle",
+            "shopify", "shopify id", "ebay", "stripe", "paypal", "square", "venmo", "zelle",
             "tiktok", "tiktok shop", "meta pay", "google pay", "apple pay",
             # E-commerce platforms
             "amazon pay", "etsy", "woocommerce", "bigcommerce", "squarespace",
@@ -111,7 +111,7 @@ class ScheduleCCategorizer:
         
         self.expense_bank_fees = [
             "bank fee", "service charge", "monthly fee", "maintenance fee",
-            "transaction fee", "processing fee", "nsf", "overdraft",
+            "transaction fee", "processing fee", "nsf fee", "nsf charge", "overdraft",
             "atm fee", "wire transfer fee", "international fee",
             "platform fee", "payment processing fee"
         ]
@@ -248,6 +248,10 @@ class ScheduleCCategorizer:
         """
         Categorize a single transaction into Schedule C structure.
         
+        DATA-DRIVEN CLASSIFICATION RULES:
+        - Deposits (transaction_type == "deposit") → ALWAYS Income
+        - Withdrawals (transaction_type == "withdrawal") → ALWAYS Expenses (never Income)
+        
         Args:
             transaction: Transaction object with vendor, description, amount, transaction_type
             
@@ -263,61 +267,98 @@ class ScheduleCCategorizer:
         if exclusion_result:
             return exclusion_result
         
-        # STEP 2: Handle deposits (Income)
-        if transaction.amount > 0 or transaction.transaction_type == "deposit":
+        # STEP 2: PRIMARY CLASSIFICATION - Use transaction_type as source of truth
+        # Deposits → Income (always)
+        if transaction.transaction_type == "deposit":
             return self._categorize_income(transaction, combined_text)
         
-        # STEP 3: Handle withdrawals (Expenses or COGS)
-        # Check COGS first (inventory-related costs)
-        cogs_result = self._categorize_cogs(transaction, combined_text)
-        if cogs_result:
-            return cogs_result
+        # STEP 3: Withdrawals → Expenses (always, never income)
+        # This ensures withdrawals are NEVER classified as income
+        if transaction.transaction_type == "withdrawal":
+            # Check COGS first (inventory-related costs)
+            cogs_result = self._categorize_cogs(transaction, combined_text)
+            if cogs_result:
+                return cogs_result
+            
+            # Then check regular expenses
+            expense_result = self._categorize_expenses(transaction, combined_text)
+            if expense_result:
+                return expense_result
+            
+            # Check vehicle expenses
+            vehicle_result = self._categorize_vehicle(transaction, combined_text)
+            if vehicle_result:
+                return vehicle_result
+            
+            # Default: Other expenses (Part V)
+            return ScheduleCCategory(
+                part="Part V",
+                line_number="Line 27a",
+                category_name="Other expenses",
+                tax_code="OTHER_EXPENSES",
+                is_excluded=False
+            )
         
-        # Then check regular expenses
-        expense_result = self._categorize_expenses(transaction, combined_text)
-        if expense_result:
-            return expense_result
-        
-        # Check vehicle expenses
-        vehicle_result = self._categorize_vehicle(transaction, combined_text)
-        if vehicle_result:
-            return vehicle_result
-        
-        # Default: Other expenses (Part V)
-        return ScheduleCCategory(
-            part="Part V",
-            line_number="Line 27a",
-            category_name="Other expenses",
-            tax_code="OTHER_EXPENSES",
-            is_excluded=False
-        )
+        # STEP 4: Fallback for transactions without explicit type (use amount sign)
+        # This should rarely happen if transaction_type is properly set
+        if transaction.amount > 0:
+            return self._categorize_income(transaction, combined_text)
+        else:
+            # Default to expense
+            return ScheduleCCategory(
+                part="Part V",
+                line_number="Line 27a",
+                category_name="Other expenses",
+                tax_code="OTHER_EXPENSES",
+                is_excluded=False
+            )
     
     def _check_exclusions(self, transaction: Transaction, combined_text: str) -> Optional[ScheduleCCategory]:
         """Check if transaction should be excluded or marked as owner draw"""
         
         # Check transfers FIRST (before personal, as transfers are more specific)
+        # BUT: Exempt payment processors and check payments from transfer exclusion
+        # (Shopify, eBay, check payments, etc. use "Transfer" in descriptions but are legitimate expenses)
         # Transfers between own accounts → Exclude
-        if any(keyword in combined_text for keyword in self.exclude_transfers):
-            return ScheduleCCategory(
-                part="Excluded",
-                line_number=None,
-                category_name="Account transfer",
-                tax_code="TRANSFER",
-                is_excluded=True,
-                exclusion_reason="Transfer between own accounts - Not income or expense"
-            )
+        is_payment_processor = any(keyword in combined_text for keyword in [
+            "shopify", "ebay", "amazon", "etsy", "tiktok", "stripe", "paypal",
+            "square", "venmo", "mercari", "poshmark", "walmart marketplace"
+        ])
         
-        # ATM withdrawals → Owner draw (NOT expense)
-        if any(keyword in combined_text for keyword in self.atm_keywords):
-            if transaction.transaction_type == "withdrawal" or transaction.amount < 0:
+        is_check_payment = any(keyword in combined_text for keyword in [
+            "check payment", "chk", "check #", "check number"
+        ])
+        
+        if not is_payment_processor and not is_check_payment and any(keyword in combined_text for keyword in self.exclude_transfers):
+            # If the transaction explicitly indicates a withdrawal, treat it as an expense
+            # instead of excluding it as a transfer. This ensures withdrawals show up
+            # in the P&L rather than being silently excluded.
+            if getattr(transaction, 'transaction_type', None) == 'withdrawal':
+                # do not exclude; allow downstream expense categorization
+                pass
+            else:
                 return ScheduleCCategory(
                     part="Excluded",
                     line_number=None,
-                    category_name="Owner draw",
-                    tax_code="OWNER_DRAW",
-                    is_excluded=False,  # Not excluded, but not an expense
-                    is_owner_draw=True,
-                    exclusion_reason="ATM withdrawal - Owner draw, not business expense"
+                    category_name="Account transfer",
+                    tax_code="TRANSFER",
+                    is_excluded=True,
+                    exclusion_reason="Transfer between own accounts - Not income or expense"
+                )
+        
+        # ATM withdrawals → Mark as Other Expenses (will be mapped to 999 in P&L)
+        # Note: For Schedule C tax purposes, these would be owner draws,
+        # but for P&L accounting, we show them as OTHER EXPENSES
+        if any(keyword in combined_text for keyword in self.atm_keywords):
+            if transaction.transaction_type == "withdrawal" or transaction.amount < 0:
+                return ScheduleCCategory(
+                    part="Part V",
+                    line_number="Line 27a",
+                    category_name="Other expenses",
+                    tax_code="OTHER_EXPENSES",
+                    is_excluded=False,
+                    is_owner_draw=False,  # Changed: Show in P&L as expense, not owner draw
+                    exclusion_reason=None
                 )
         
         # Personal spending → Exclude (check last, after more specific exclusions)
@@ -407,6 +448,17 @@ class ScheduleCCategorizer:
     
     def _categorize_expenses(self, transaction: Transaction, combined_text: str) -> Optional[ScheduleCCategory]:
         """Categorize business expenses"""
+        
+        # Check payments - handle these as OTHER EXPENSES (before bank fees check)
+        # This catches check payments that might otherwise be misclassified
+        check_keywords = ["check payment", "chk ", " chk", "check #", "check number", "check transaction"]
+        if any(keyword in combined_text for keyword in check_keywords):
+            return ScheduleCCategory(
+                part="Part V",
+                line_number="Line 27a",
+                category_name="Other expenses",
+                tax_code="OTHER_EXPENSES"
+            )
         
         # Advertising
         if any(keyword in combined_text for keyword in self.expense_advertising):
@@ -555,6 +607,112 @@ class ScheduleCCategorizer:
             category = self.categorize_transaction(transaction)
             results.append((transaction, category))
         return results
+    
+    def validate_classifications(self, categorized_transactions: List[Tuple[Transaction, ScheduleCCategory]]) -> Dict:
+        """
+        Validate transaction classifications and flag any mismatches.
+        
+        Validation Rules:
+        - Flag any transaction where type='withdrawal' AND category is Income
+        - Flag any withdrawal missing from P&L (excluded or owner draw)
+        
+        Args:
+            categorized_transactions: List of (Transaction, ScheduleCCategory) tuples
+            
+        Returns:
+            Dictionary with validation results and warnings
+        """
+        warnings = []
+        errors = []
+        
+        for transaction, category in categorized_transactions:
+            # Check: Withdrawals should NEVER be classified as Income
+            if transaction.transaction_type == "withdrawal":
+                is_income = category.part == "Part I" or category.tax_code in ["GROSS", "RETURNS", "OTHER_INCOME"]
+                if is_income:
+                    errors.append({
+                        "transaction": transaction,
+                        "category": category,
+                        "issue": "Withdrawal classified as Income",
+                        "message": f"Transaction {transaction.date} {transaction.vendor} (${abs(transaction.amount):,.2f}) is a withdrawal but classified as {category.category_name} ({category.part})"
+                    })
+                
+                # Check: Withdrawals should appear in P&L (not excluded unless owner draw)
+                if category.is_excluded and not category.is_owner_draw:
+                    warnings.append({
+                        "transaction": transaction,
+                        "category": category,
+                        "issue": "Withdrawal excluded from P&L",
+                        "message": f"Transaction {transaction.date} {transaction.vendor} (${abs(transaction.amount):,.2f}) is excluded: {category.exclusion_reason}"
+                    })
+        
+        return {
+            "is_valid": len(errors) == 0,
+            "errors": errors,
+            "warnings": warnings,
+            "error_count": len(errors),
+            "warning_count": len(warnings)
+        }
+    
+    def reconcile_totals(self, transactions: List[Transaction], 
+                        categorized_transactions: List[Tuple[Transaction, ScheduleCCategory]]) -> Dict:
+        """
+        Reconcile totals between raw transactions and categorized P&L.
+        
+        Reconciliation Checks:
+        - Sum of income = sum of deposits classified as income
+        - Sum of expenses = sum of withdrawals classified as expense
+        
+        Args:
+            transactions: List of raw Transaction objects
+            categorized_transactions: List of (Transaction, ScheduleCCategory) tuples
+            
+        Returns:
+            Dictionary with reconciliation results
+        """
+        # Calculate raw totals from transaction types
+        raw_deposits_total = sum(t.amount for t in transactions if t.transaction_type == "deposit" and t.amount > 0)
+        raw_withdrawals_total = sum(abs(t.amount) for t in transactions if t.transaction_type == "withdrawal" and t.amount < 0)
+        
+        # Calculate categorized totals
+        categorized_income_total = 0.0
+        categorized_expenses_total = 0.0
+        
+        for transaction, category in categorized_transactions:
+            if category.is_excluded:
+                continue
+            
+            amount = abs(transaction.amount)
+            
+            # Income (Part I)
+            if category.part == "Part I":
+                categorized_income_total += amount
+            
+            # Expenses (Part II, III, IV, V)
+            elif category.part in ["Part II", "Part III", "Part IV", "Part V"]:
+                categorized_expenses_total += amount
+        
+        # Calculate differences
+        income_diff = abs(raw_deposits_total - categorized_income_total)
+        expenses_diff = abs(raw_withdrawals_total - categorized_expenses_total)
+        
+        # Tolerance for floating point differences
+        tolerance = 0.01
+        
+        income_reconciled = income_diff <= tolerance
+        expenses_reconciled = expenses_diff <= tolerance
+        
+        return {
+            "raw_deposits_total": raw_deposits_total,
+            "categorized_income_total": categorized_income_total,
+            "income_difference": income_diff,
+            "income_reconciled": income_reconciled,
+            "raw_withdrawals_total": raw_withdrawals_total,
+            "categorized_expenses_total": categorized_expenses_total,
+            "expenses_difference": expenses_diff,
+            "expenses_reconciled": expenses_reconciled,
+            "fully_reconciled": income_reconciled and expenses_reconciled
+        }
     
     def generate_schedule_c_summary(self, categorized_transactions: List[Tuple[Transaction, ScheduleCCategory]]) -> Dict:
         """
@@ -896,6 +1054,21 @@ class ScheduleCCategorizer:
         report_lines.append("")
         report_lines.append("=" * 80)
         
+        # Transaction Details Summary: show sums for each Schedule C category separately
+        report_lines.append("TRANSACTION DETAILS SUMMARY (By Category)")
+        report_lines.append("-" * 80)
+        # Collect categories across Parts I, II, III, IV, V and sum their totals
+        all_cats = {}
+        for section_key in ["Part I - Income", "Part III - COGS", "Part II - Expenses", "Part IV - Vehicle", "Part V - Other Expenses"]:
+            for cat_key, data in summary.get(section_key, {}).items():
+                label = f"{data['line_number']} - {data['category_name']}"
+                all_cats[label] = all_cats.get(label, 0.0) + data.get('total_amount', 0.0)
+
+        # Sort by amount desc and append
+        for label, amt in sorted(all_cats.items(), key=lambda x: x[1], reverse=True):
+            report_lines.append(f"  {label:<50} ${amt:>12,.2f}")
+        report_lines.append("")
+
         return "\n".join(report_lines)
     
     def generate_income_statement_dict(self, categorized_transactions: List[Tuple[Transaction, ScheduleCCategory]]) -> Dict:
@@ -1179,126 +1352,87 @@ class ScheduleCCategorizer:
         report_lines.append("Ordinary Income/Expense")
         report_lines.append("")
         
-        # INCOME
-        report_lines.append("Income")
-        income_items = []
-        for category_key, data in summary.get("Part I - Income", {}).items():
-            # Get transactions for this category to determine account code
-            transactions_for_category = [
-                tx for tx, cat in categorized_transactions
-                if cat.line_number == data["line_number"] and cat.tax_code == data["tax_code"]
-            ]
-            vendor = transactions_for_category[0].vendor if transactions_for_category else None
-            description = transactions_for_category[0].description if transactions_for_category else None
-            
-            # Create a temporary category object for mapping
-            temp_category = ScheduleCCategory(
-                part=data.get("part", "Part I"),
-                line_number=data["line_number"],
-                category_name=data["category_name"],
-                tax_code=data["tax_code"]
-            )
-            
-            account_code, account_name = mapper.get_account_code(temp_category, vendor, description)
-            amount = data["total_amount"]
-            pct = (amount / income_total * 100) if income_total > 0 else 0
-            income_items.append((account_code, account_name, amount, pct))
+        # ===== ALWAYS SHOW ALL ACCOUNT CODES (with $0.00 defaults) =====
+        # Load ALL account codes from account_keywords.json
+        import json
+        from pathlib import Path
         
-        # Sort income items by account code
-        income_items.sort(key=lambda x: x[0])
-        for account_code, account_name, amount, pct in income_items:
-            display_name = mapper.get_account_name_display(account_code, account_name)
-            report_lines.append(f"{display_name:<40} {amount:>12,.2f} {pct:>6.1f}%")
+        account_file = Path(__file__).parent / 'account_keywords.json'
+        all_accounts = {}
+        try:
+            with open(account_file, 'r') as f:
+                data = json.load(f)
+                for code, details in data.items():
+                    all_accounts[code] = {
+                        'code': code,
+                        'name': details['name'],
+                        'rank': details['rank'],
+                        'amount': 0.0
+                    }
+        except Exception as e:
+            logger.warning(f"Could not load account codes: {e}")
         
-        report_lines.append(f"{'Total Income':<40} {income_total:>12,.2f} {100.0:>6.1f}%")
-        report_lines.append("")
-        
-        # COGS
-        if cogs_total > 0:
-            report_lines.append("Cost of Goods Sold")
-            cogs_items = []
-            for category_key, data in summary.get("Part III - COGS", {}).items():
-                transactions_for_category = [
-                    tx for tx, cat in categorized_transactions
-                    if cat.line_number == data["line_number"] and cat.tax_code == data["tax_code"]
-                ]
-                vendor = transactions_for_category[0].vendor if transactions_for_category else None
-                description = transactions_for_category[0].description if transactions_for_category else None
-                
-                temp_category = ScheduleCCategory(
-                    part="Part III",
-                    line_number=data["line_number"],
-                    category_name=data["category_name"],
-                    tax_code=data["tax_code"]
+        # Aggregate transaction amounts into account codes
+        for tx, cat in categorized_transactions:
+            # Skip excluded transactions
+            if cat.is_excluded:
+                continue
+
+            # Check if account_code is already set on transaction (from manual reassignment)
+            if hasattr(tx, 'account_code') and tx.account_code:
+                acct_code = tx.account_code
+            else:
+                is_income_tx = tx.amount > 0
+                acct_code, acct_name = mapper.get_account_code(
+                    tx.vendor,
+                    tx.description,
+                    is_income=is_income_tx,
+                    transaction_type=getattr(tx, 'transaction_type', None)
                 )
-                
-                account_code, account_name = mapper.get_account_code(temp_category, vendor, description)
-                amount = data["total_amount"]
-                pct = (amount / income_total * 100) if income_total > 0 else 0
-                cogs_items.append((account_code, account_name, amount, pct))
-            
-            cogs_items.sort(key=lambda x: x[0])
-            for account_code, account_name, amount, pct in cogs_items:
-                display_name = mapper.get_account_name_display(account_code, account_name)
-                report_lines.append(f"{display_name:<40} {amount:>12,.2f} {pct:>6.1f}%")
-            
-            cogs_pct = (cogs_total / income_total * 100) if income_total > 0 else 0
-            report_lines.append(f"{'Total COGS':<40} {cogs_total:>12,.2f} {cogs_pct:>6.1f}%")
-            report_lines.append("")
-            
-            # Gross Profit
-            gross_profit_pct = (gross_profit / income_total * 100) if income_total > 0 else 0
-            report_lines.append(f"{'Gross Profit':<40} {gross_profit:>12,.2f} {gross_profit_pct:>6.1f}%")
-            report_lines.append("")
+
+            # Add amount to the account if it exists in our loaded accounts
+            if acct_code in all_accounts:
+                amt = tx.amount if is_income_tx else abs(tx.amount)
+                all_accounts[acct_code]['amount'] += amt
+
+        # Sort all accounts by rank
+        sorted_accounts = sorted(all_accounts.values(), key=lambda x: x['rank'])
         
-        # EXPENSES
-        report_lines.append("Expense")
-        expense_items = []
-        
-        # Combine all expenses
-        all_expense_data = []
-        for category_key, data in summary.get("Part II - Expenses", {}).items():
-            all_expense_data.append(data)
-        for category_key, data in summary.get("Part IV - Vehicle", {}).items():
-            all_expense_data.append(data)
-        for category_key, data in summary.get("Part V - Other Expenses", {}).items():
-            all_expense_data.append(data)
-        
-        for data in all_expense_data:
-            transactions_for_category = [
-                tx for tx, cat in categorized_transactions
-                if cat.line_number == data["line_number"] and cat.tax_code == data["tax_code"]
-            ]
-            vendor = transactions_for_category[0].vendor if transactions_for_category else None
-            description = transactions_for_category[0].description if transactions_for_category else None
-            
-            temp_category = ScheduleCCategory(
-                part=data.get("part", "Part II"),
-                line_number=data["line_number"],
-                category_name=data["category_name"],
-                tax_code=data["tax_code"]
-            )
-            
-            account_code, account_name = mapper.get_account_code(temp_category, vendor, description)
-            amount = data["total_amount"]
-            pct = (amount / income_total * 100) if income_total > 0 else 0
-            expense_items.append((account_code, account_name, amount, pct))
-        
-        # Sort expenses by account code
-        expense_items.sort(key=lambda x: x[0])
-        for account_code, account_name, amount, pct in expense_items:
+        # Separate income (600s) and expense (700-999) accounts
+        income_accounts = [(acc['code'], acc['name'], acc['amount']) 
+                          for acc in sorted_accounts if acc['code'].startswith('6')]
+        expense_accounts = [(acc['code'], acc['name'], acc['amount']) 
+                           for acc in sorted_accounts if not acc['code'].startswith('6')]
+
+        # Totals
+        total_income_accts = sum(a[2] for a in income_accounts)
+        total_expense_accts = sum(a[2] for a in expense_accounts)
+        net_ord_income = total_income_accts - total_expense_accts
+
+        # Income section - SHOW ALL ACCOUNTS (even $0.00)
+        report_lines.append("Income")
+        for account_code, account_name, amount in income_accounts:
+            pct = (amount / total_income_accts * 100) if total_income_accts > 0 else 0
             display_name = mapper.get_account_name_display(account_code, account_name)
             report_lines.append(f"{display_name:<40} {amount:>12,.2f} {pct:>6.1f}%")
-        
-        total_exp_pct = (total_expenses / income_total * 100) if income_total > 0 else 0
-        report_lines.append(f"{'Total Expense':<40} {total_expenses:>12,.2f} {total_exp_pct:>6.1f}%")
+
+        report_lines.append(f"{'Total Income':<40} {total_income_accts:>12,.2f} {100.0 if total_income_accts>0 else 0.0:>6.1f}%")
         report_lines.append("")
-        
-        # Net Income
-        net_income_pct = (net_income / income_total * 100) if income_total > 0 else 0
-        report_lines.append(f"{'Net Ordinary Income':<40} {net_income:>12,.2f} {net_income_pct:>6.1f}%")
+
+        # Expense section - SHOW ALL ACCOUNTS (even $0.00)
+        report_lines.append("Expense")
+        for account_code, account_name, amount in expense_accounts:
+            pct = (amount / total_income_accts * 100) if total_income_accts > 0 else 0
+            display_name = mapper.get_account_name_display(account_code, account_name)
+            report_lines.append(f"{display_name:<40} {amount:>12,.2f} {pct:>6.1f}%")
+
+        report_lines.append(f"{'Total Expense':<40} {total_expense_accts:>12,.2f} {(total_expense_accts/total_income_accts*100) if total_income_accts>0 else 0.0:>6.1f}%")
         report_lines.append("")
-        report_lines.append(f"{'Net Income':<40} {net_income:>12,.2f} {net_income_pct:>6.1f}%")
+
+        # Net lines
+        report_lines.append(f"{'Net Ordinary Income':<40} {net_ord_income:>12,.2f} {(net_ord_income/total_income_accts*100) if total_income_accts>0 else 0.0:>6.1f}%")
+        report_lines.append("")
+        report_lines.append(f"{'Net Income':<40} {net_ord_income:>12,.2f} {(net_ord_income/total_income_accts*100) if total_income_accts>0 else 0.0:>6.1f}%")
         report_lines.append("")
         report_lines.append("Page 1")
         

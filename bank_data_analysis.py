@@ -111,6 +111,7 @@ class Transaction:
     section: Optional[str] = None
     category: Optional[str] = None
     needs_review: bool = False
+    source: Optional[str] = "BANK"
 
 # ----------------------------
 # Utilities
@@ -200,6 +201,21 @@ def _short_vendor(v: str) -> str:
         v2 = v2[:30] + "..."
     return v2
 
+from datetime import datetime, date
+
+def filter_by_date_range(transactions: List[Transaction], start_date: date, end_date: date) -> List[Transaction]:
+    """
+    Filters transactions between start_date and end_date (inclusive).
+    """
+    filtered = []
+    for tx in transactions:
+        try:
+            tx_date = datetime.strptime(tx.date, "%Y-%m-%d").date()
+            if start_date <= tx_date <= end_date:
+                filtered.append(tx)
+        except Exception:
+            continue
+    return filtered
 
 def _clean_description(desc: str, vendor: str = "", transaction_type: str = "") -> str:
     """
@@ -1177,6 +1193,49 @@ class UniversalParser:
             ))
 
         return txs
+class CreditCardParser:
+    DATE_RE = re.compile(r'\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b')
+    AMOUNT_RE = re.compile(r'\(?\$?\d{1,3}(?:,\d{3})*\.\d{2}\)?')
+
+    def parse(self, lines: List[str]) -> List[Transaction]:
+        txs = []
+
+        for ln in lines:
+            if not self.DATE_RE.search(ln):
+                continue
+
+            amts = self.AMOUNT_RE.findall(ln)
+            if not amts:
+                continue
+
+            date_raw = self.DATE_RE.search(ln).group()
+            date_norm = _normalize_date_token(date_raw)
+
+            amt = _clean_amount_token(amts[-1])
+            if amt is None:
+                continue
+
+            # 💳 credit card charges are ALWAYS withdrawals
+            amt = -abs(amt)
+
+            vendor = _short_vendor(
+                re.sub(self.DATE_RE, '', ln)
+                .replace(amts[-1], '')
+                .strip()
+            )
+
+            txs.append(Transaction(
+                date=date_norm,
+                transaction_type="withdrawal",
+                vendor=vendor,
+                amount=amt,
+                description=_clean_description(ln, vendor, "withdrawal"),
+                raw_line=ln,
+                section="CREDIT_CARD",
+                source="CREDIT_CARD"
+            ))
+
+        return txs
 
 # ----------------------------
 # LLM enhancer (unchanged)
@@ -1432,6 +1491,11 @@ with st.sidebar:
     sort_by = st.selectbox("Sort vendor summaries by", ["Subtotal (desc)", "Transaction Count (desc)"])
 
 uploaded = st.file_uploader("Upload statement (PDF, CSV, DOCX)", type=["pdf", "csv", "doc", "docx"])
+credit_card_file = st.file_uploader(
+    "Upload Credit Card Statement (PDF)",
+    type=["pdf"],
+    key="credit_card"
+)
 
 if uploaded:
     st.info(f"File: {uploaded.name} — {uploaded.size/1024:.1f} KB")
@@ -1455,10 +1519,29 @@ if uploaded:
 
             # First try Chase-optimized fallback
             fallback = FallbackStatementParser(include_opening_balance=include_opening_balance)
-            transactions, meta = fallback.parse_statement(lines)
+            bank_txs, meta = fallback.parse_statement(lines)
+
+            all_txs = list(bank_txs.copy())
+
+            # ---- CREDIT CARD SUPPORT ----
+            if credit_card_file is not None:
+                cc_lines, ok, _ = DocumentParser().parse_document(
+                    credit_card_file.read(),
+                    credit_card_file.name
+                )
+
+                cc_txs = CreditCardParser().parse(cc_lines)
+
+                # FORCE credit card as withdrawals
+                for tx in cc_txs:
+                    tx.transaction_type = "withdrawal"
+                    tx.amount = -abs(tx.amount)
+
+                all_txs.extend(cc_txs)
+
 
             # If nothing extracted or too few rows, try UniversalParser conservative fallback
-            if not transactions or len(transactions) < 3:
+            if not all_txs or len(all_txs) < 3:
                 up = UniversalParser()
                 u_txs = up.parse(lines)
                 if u_txs:
@@ -1468,23 +1551,23 @@ if uploaded:
 
             parsed_from = meta.get("parsed_from", "fallback")
 
-            if not transactions:
+            if not all_txs:
                 st.error("No transactions extracted.")
                 st.stop()
             # categorize & dedupe
             categorizer = RuleEngineCategorizer()
-            transactions = categorizer.apply(transactions)
+            transactions = categorizer.apply(all_txs)
 
             # stats & reports
             rg = ReportGenerator()
-            stats = rg.generate_summary_statistics(transactions)
-            deposits_df = rg.generate_deposits_summary(transactions)
-            withdrawals_df = rg.generate_withdrawals_summary(transactions)
-            pl_df = rg.generate_pl_report(transactions)
+            stats = rg.generate_summary_statistics(all_txs)
+            deposits_df = rg.generate_deposits_summary(all_txs)
+            withdrawals_df = rg.generate_withdrawals_summary(all_txs)
+            pl_df = rg.generate_pl_report(all_txs)
             # Use the comprehensive Schedule C categorizer
             from schedule_c_categorizer import ScheduleCCategorizer
             sc_categorizer = ScheduleCCategorizer()
-            categorized_transactions = sc_categorizer.categorize_transactions(transactions)
+            categorized_transactions = sc_categorizer.categorize_transactions(all_txs)
             schedule_c_df = sc_categorizer.generate_schedule_c_dataframe(categorized_transactions)
             st.session_state.schedule_c_df = schedule_c_df
             st.session_state.categorized_transactions = categorized_transactions  # Store for detail view
@@ -1503,19 +1586,92 @@ if uploaded:
                     withdrawals_df = withdrawals_df.sort_values("Transaction Count", ascending=False).reset_index(drop=True)
 
             # store in session
-            st.session_state.transactions = transactions
+            st.session_state.transactions = all_txs
             st.session_state.stats = stats
             st.session_state.deposit_df = deposits_df
             st.session_state.withdrawal_df = withdrawals_df
             st.session_state.pl_df = pl_df
             st.session_state.currency = currency
             st.session_state.parsed_from = parsed_from
+            
 
-            st.success(f"Processed {len(transactions)} transactions ({parsed_from}).")
+            st.success(f"Processed {len(all_txs)} transactions ({parsed_from}).")
+            st.session_state.all_transactions = transactions
+            st.session_state.filtered_transactions = transactions 
 
+from datetime import datetime, date
+
+all_transactions = st.session_state.get("all_transactions", [])
+
+if all_transactions:
+    st.subheader("📅 Filter by Date (Optional)")
+
+    parsed_dates = []
+    for tx in all_transactions:
+        if tx.date:
+            try:
+                parsed_dates.append(datetime.strptime(tx.date, "%Y-%m-%d").date())
+            except:
+                pass
+
+    if parsed_dates:
+        min_date = min(parsed_dates)
+        max_date = max(parsed_dates)
+    else:
+        min_date = date.today()
+        max_date = date.today()
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        start_date = st.date_input(
+            "Start Date",
+            value=min_date,
+            min_value=min_date,
+            max_value=max_date,
+            key="filter_start_date"
+        )
+
+    with col2:
+        end_date = st.date_input(
+            "End Date",
+            value=max_date,
+            min_value=min_date,
+            max_value=max_date,
+            key="filter_end_date"
+        )
+
+    if st.button("Apply Date Filter"):
+        filtered = []
+
+        for tx in all_transactions:
+            if not tx.date:
+                continue
+            try:
+                tx_date = datetime.strptime(tx.date, "%Y-%m-%d").date()
+            except:
+                continue
+
+            if start_date <= tx_date <= end_date:
+                filtered.append(tx)
+
+        st.session_state.filtered_transactions = filtered
+
+        st.success(
+            f"Showing {len(filtered)} transactions "
+            f"from {start_date} to {end_date}"
+        )
+
+    # Reset option
+    if st.button("Reset Date Filter"):
+        st.session_state.filtered_transactions = all_transactions
+        st.info("Date filter cleared. Showing all transactions.")
+        
 # Dashboard (same UI as before)
 if "transactions" in st.session_state and st.session_state.transactions:
-    transactions: List[Transaction] = st.session_state.transactions
+    transactions: List[Transaction] = st.session_state.get(
+        'filtered_transactions', st.session_state.transactions
+    )
     stats = st.session_state.stats
     cur = st.session_state.currency
 
@@ -1534,11 +1690,40 @@ if "transactions" in st.session_state and st.session_state.transactions:
         stats['Total Withdrawal Amount'] = float(computed_withdrawals)
         stats['Net Income'] = float(computed_deposits - computed_withdrawals)
 
-    tab1, tab2, tab3, tab4 , tab5 , tab6 = st.tabs(["💰 Deposits","💸 Withdrawals","📈 P&L","📋 All Transactions" , "📄 Schedule C" , "🏧 ATM Withdrawals"])
+    # Toggle to hide the Schedule C tab from the frontend while keeping
+    # all Schedule C backend logic intact.
+    SHOW_SCHEDULE_C = False
+
+    base_labels = ["💰 Deposits", "💸 Withdrawals", "📈 P&L", "📋 All Transactions"]
+    # Insert Schedule C tab before the final P&L (Account Codes) tab when enabled
+    if SHOW_SCHEDULE_C:
+        labels = base_labels + ["📄 Schedule C", "📊 P&L (Account Codes)"]
+    else:
+        labels = base_labels + ["📊 P&L (Account Codes)"]
+
+    # Use query params to preserve active tab across reruns
+    try:
+        query_params = st.query_params
+        default_tab = int(query_params.get("tab", 0))
+    except:
+        default_tab = 0
+    
+    # Use selectbox instead of tabs for better state control
+    selected_tab = st.selectbox(
+        "Select View:",
+        range(len(labels)),
+        format_func=lambda x: labels[x],
+        index=default_tab,
+        key="active_tab_selector"
+    )
+    
+    # Update query param when tab changes
+    st.query_params["tab"] = str(selected_tab)
+    
     rg = ReportGenerator()
 
-    with tab1:
-        st.subheader("Deposits Summary (by Source/Vendor)")
+    if selected_tab == 0:  # Deposits tab
+        st.subheader("All Deposits Summary (by Source/Vendor)")
         df = st.session_state.deposit_df
         if df is None or df.empty:
             st.info("No deposits found.")
@@ -1561,8 +1746,8 @@ if "transactions" in st.session_state and st.session_state.transactions:
                     } for it in items])
                     st.dataframe(details, use_container_width=True, hide_index=True)
 
-    with tab2:
-        st.subheader("Withdrawals Summary (by Vendor)")
+    elif selected_tab == 1:  # Withdrawals tab
+        st.subheader("All Withdrawals Summary (by Vendor)")
         df = st.session_state.withdrawal_df
         if df is None or df.empty:
             st.info("No withdrawals found.")
@@ -1585,11 +1770,11 @@ if "transactions" in st.session_state and st.session_state.transactions:
                     } for it in items])
                     st.dataframe(details, use_container_width=True, hide_index=True)
 
-    with tab3:
+    elif selected_tab == 2:  # P&L tab
         st.subheader("Profit & Loss")
         st.dataframe(st.session_state.pl_df, use_container_width=True, hide_index=True)
 
-    with tab4:
+    elif selected_tab == 3:  # All Transactions tab
         st.subheader("All Transactions")
         all_df = pd.DataFrame([{
             "Date": t.date or "",
@@ -1599,46 +1784,101 @@ if "transactions" in st.session_state and st.session_state.transactions:
             "Description": t.description
         } for t in transactions])
         st.dataframe(all_df, use_container_width=True, hide_index=True)
-    with tab5:
-        st.subheader("📄 Schedule C / Profit & Loss")
+    
+    elif SHOW_SCHEDULE_C and selected_tab == 4:  # Schedule C tab
+            st.subheader("📄 Schedule C")
 
-        schedule_c_df = st.session_state.get("schedule_c_df")
+            schedule_c_df = st.session_state.get("schedule_c_df")
 
-        if schedule_c_df is None or schedule_c_df.empty:
-            st.info("No Schedule C data available.")
-            st.stop()
+            if schedule_c_df is None or schedule_c_df.empty:
+                st.info("No Schedule C data available.")
+            else:
+                categorized_transactions = st.session_state.get("categorized_transactions", [])
+                transactions = st.session_state.get("transactions", [])
 
-        view_format = st.radio(
-            "View Format:",
-            ["IRS Schedule C (Line Numbers)", "Profit & Loss (Account Codes)"],
-            horizontal=True
+                from datetime import datetime
+                import pandas as pd
+                import re
+
+                cur = "USD"
+
+                # ===============================
+                # IRS SCHEDULE C VIEW
+                # ===============================
+                from schedule_c_categorizer import ScheduleCCategorizer
+                sc_categorizer = ScheduleCCategorizer()
+
+                # ---- Generate Schedule C report
+                schedule_c_text = sc_categorizer.generate_schedule_c_report(categorized_transactions)
+                st.subheader("📄 IRS Schedule C Report")
+                st.code(schedule_c_text)
+
+                st.subheader("🧾 IRS Schedule C Summary")
+                st.dataframe(schedule_c_df, use_container_width=True, hide_index=True)
+
+                if not categorized_transactions:
+                    st.stop()
+
+                category_groups = {}
+
+                for tx, cat in categorized_transactions:
+                    if cat.is_excluded or not cat.line_number:
+                        continue
+                    key = (cat.line_number, cat.tax_code, cat.category_name)
+                    category_groups.setdefault(key, []).append((tx, cat))
+
+                for (line, code, name), items in sorted(
+                    category_groups.items(),
+                    key=lambda x: (
+                        float(re.search(r'(\d+)', x[0][0]).group(1))
+                        if re.search(r'(\d+)', x[0][0]) else 999
+                    )
+                ):
+                    subtotal = sum(abs(tx.amount) for tx, _ in items)
+                    count = len(items)
+
+                    label = f"{line} · {name} — {cur} {subtotal:,.2f} ({count} tx)"
+
+                    with st.expander(label):
+                        df = pd.DataFrame([{
+                            "Date": tx.date or "",
+                            "Vendor": tx.vendor or "",
+                            "Amount": f"{cur} {abs(tx.amount):,.2f}",
+                            "Description": tx.description,
+                            "Tax Code": cat.tax_code,
+                            "Needs Review": "⚠ Yes" if tx.needs_review else "✅ No"
+                        } for tx, cat in items])
+
+                        st.dataframe(df, use_container_width=True, hide_index=True)
+
+    elif selected_tab == (5 if SHOW_SCHEDULE_C else 4):  # P&L Account Codes tab
+        st.subheader("📊 Profit & Loss (Account Codes)")
+
+        categorized_transactions = st.session_state.get(
+            "filtered_categorized_transactions",
+            st.session_state.categorized_transactions
+        )
+        transactions = st.session_state.get(
+            "filtered_transactions",
+            st.session_state.transactions
         )
 
-        categorized_transactions = st.session_state.get("categorized_transactions", [])
-        transactions = st.session_state.get("transactions", [])
-
-        from datetime import datetime
-        import pandas as pd
-        import re
-
-        cur = "USD"
-
-        # ===============================
-        # PROFIT & LOSS VIEW
-        # ===============================
-        if view_format == "Profit & Loss (Account Codes)":
-
+        if not categorized_transactions or not transactions:
+            st.info("No transaction data available for P&L report.")
+        else:
+            from datetime import datetime
+            import pandas as pd
             from schedule_c_categorizer import ScheduleCCategorizer
+
             sc_categorizer = ScheduleCCategorizer()
+            cur = "USD"
 
             # ---- Robust period detection (min → max date)
             date_objs = []
             for tx in transactions:
                 if tx.date:
                     try:
-                        date_objs.append(
-                            datetime.strptime(tx.date, "%Y-%m-%d")
-                        )
+                        date_objs.append(datetime.strptime(tx.date, "%Y-%m-%d"))
                     except:
                         pass
 
@@ -1651,11 +1891,11 @@ if "transactions" in st.session_state and st.session_state.transactions:
 
             col1, col2 = st.columns(2)
             with col1:
-                business_name = st.text_input("Business Name (optional):", key="pl_business")
+                business_name = st.text_input("Business Name (optional):", key="pl_account_business")
             with col2:
-                period_input = st.text_input("Period:", value=default_period, key="pl_period")
+                period_input = st.text_input("Period:", value=default_period, key="pl_account_period")
 
-            # ---- Generate P&L text
+            # ---- Generate P&L text with account codes
             pl_text = sc_categorizer.generate_pl_report_with_account_codes(
                 categorized_transactions,
                 business_name=business_name or "",
@@ -1665,175 +1905,237 @@ if "transactions" in st.session_state and st.session_state.transactions:
             st.subheader("📊 Profit & Loss Statement")
             st.code(pl_text)
 
+            # ---- Validation and Reconciliation Checks
+            validation_result = sc_categorizer.validate_classifications(categorized_transactions)
+            reconciliation_result = sc_categorizer.reconcile_totals(transactions, categorized_transactions)
+            
+            # Display validation warnings
+            if validation_result["error_count"] > 0 or validation_result["warning_count"] > 0:
+                st.subheader("⚠️ Validation & Reconciliation")
+                
+                if validation_result["error_count"] > 0:
+                    st.error(f"❌ Found {validation_result['error_count']} classification error(s):")
+                    for error in validation_result["errors"]:
+                        st.error(error["message"])
+                
+                if validation_result["warning_count"] > 0:
+                    st.warning(f"⚠️ Found {validation_result['warning_count']} warning(s):")
+                    for warning in validation_result["warnings"]:
+                        st.warning(warning["message"])
+            
+            # Display reconciliation status
+            if not reconciliation_result["fully_reconciled"]:
+                st.warning("⚠️ Reconciliation Mismatch Detected:")
+                if not reconciliation_result["income_reconciled"]:
+                    st.warning(f"  Income: Raw deposits ${reconciliation_result['raw_deposits_total']:,.2f} vs Categorized ${reconciliation_result['categorized_income_total']:,.2f} (Diff: ${reconciliation_result['income_difference']:,.2f})")
+                if not reconciliation_result["expenses_reconciled"]:
+                    st.warning(f"  Expenses: Raw withdrawals ${reconciliation_result['raw_withdrawals_total']:,.2f} vs Categorized ${reconciliation_result['categorized_expenses_total']:,.2f} (Diff: ${reconciliation_result['expenses_difference']:,.2f})")
+            else:
+                st.success("✅ Reconciliation: All totals match!")
+            
             # ---- Build structured P&L dataframe
+            from account_code_mapper import AccountCodeMapper
+            mapper = AccountCodeMapper()
+            
             rows = []
-            review_total = 0
-            review_count = 0
-
             for tx, cat in categorized_transactions:
-                if cat.is_excluded or cat.is_owner_draw:
+                if cat.is_excluded:
                     continue
 
-                amt = abs(tx.amount)
+                # DATA-DRIVEN CLASSIFICATION: Use transaction_type as source of truth
+                # Deposits → Income, Withdrawals → Expenses
+                is_income = tx.transaction_type == "deposit"
+                
+                # Check if account_code is already set on transaction (from manual reassignment)
+                if hasattr(tx, 'account_code') and tx.account_code:
+                    account_code = tx.account_code
+                    # Get the account name from JSON
+                    import json
+                    from pathlib import Path
+                    account_file = Path(__file__).parent / 'account_keywords.json'
+                    try:
+                        with open(account_file, 'r') as f:
+                            data = json.load(f)
+                            account_name = data.get(account_code, {}).get('name', 'UNKNOWN')
+                    except:
+                        account_name = 'UNKNOWN'
+                else:
+                    # Get account code based on transaction type
+                    account_code, account_name = mapper.get_account_code(
+                        tx.vendor, 
+                        tx.description, 
+                        is_income=is_income,
+                        transaction_type=tx.transaction_type
+                    )
+                    
+                    # Ensure account code matches transaction type
+                    # If withdrawal but got income code (600s), force to expense code
+                    if tx.transaction_type == "withdrawal" and account_code.startswith('6'):
+                        # Force to expense code (999 OTHER EXPENSES as fallback)
+                        account_code, account_name = mapper.get_account_code(
+                            tx.vendor,
+                            tx.description,
+                            is_income=False,
+                            transaction_type="withdrawal"
+                        )
+                    
+                    # If deposit but got expense code, force to income code
+                    if tx.transaction_type == "deposit" and not account_code.startswith('6'):
+                        # Force to income code (601 SALES as default)
+                        account_code, account_name = ("601", "SALES")
 
                 rows.append({
-                    "Account Code": cat.tax_code,
-                    "Account Name": cat.category_name,
-                    "Type": "Income" if tx.amount > 0 else "Expense",
-                    "Amount": amt,
-                    "Needs Review": tx.needs_review
+                    "Account Code": account_code,
+                    "Account Name": account_name,
+                    "Date": tx.date or "",
+                    "Vendor": tx.vendor or "",
+                    "Amount": abs(tx.amount),
+                    "Type": "Income" if is_income else "Expense",
+                    "Transaction Type": tx.transaction_type.title(),
+                    "Needs Review": "⚠ Yes" if tx.needs_review else "✅ No"
                 })
 
-                if tx.needs_review:
-                    review_total += amt
-                    review_count += 1
-
-            pl_df = pd.DataFrame(rows)
-
-            if not pl_df.empty:
-                summary_df = (
-                    pl_df
-                    .groupby(["Account Code", "Account Name", "Type"])
-                    .agg(
-                        Amount=("Amount", "sum"),
-                        Transactions=("Amount", "count")
-                    )
-                    .reset_index()
-                    .sort_values(by=["Type", "Account Code"])
-                )
-
-                st.subheader("📑 P&L Summary Table")
+            if rows:
+                summary_df = pd.DataFrame(rows)
+                
+                st.subheader("📋 Transaction Details")
                 st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
-            if review_count:
-                st.warning(
-                    f"⚠ {review_count} transactions need review "
-                    f"({cur} {review_total:,.2f})"
+                # Group by account code
+                st.subheader("💼 By Account Code")
+                grouped = {}
+                for tx, cat in categorized_transactions:
+                    if cat.is_excluded:
+                        continue
+                    
+                    # Check if account_code is already set on transaction (from manual reassignment)
+                    if hasattr(tx, 'account_code') and tx.account_code:
+                        account_code = tx.account_code
+                        # Get the account name from JSON
+                        import json
+                        from pathlib import Path
+                        account_file = Path(__file__).parent / 'account_keywords.json'
+                        try:
+                            with open(account_file, 'r') as f:
+                                data = json.load(f)
+                                account_name = data.get(account_code, {}).get('name', 'UNKNOWN')
+                        except:
+                            account_name = 'UNKNOWN'
+                    else:
+                        # DATA-DRIVEN: Use transaction_type as source of truth
+                        is_income = tx.transaction_type == "deposit"
+                        account_code, account_name = mapper.get_account_code(
+                            tx.vendor, 
+                            tx.description, 
+                            is_income=is_income,
+                            transaction_type=tx.transaction_type
+                        )
+                        
+                        # Ensure account code matches transaction type
+                        if tx.transaction_type == "withdrawal" and account_code.startswith('6'):
+                            account_code, account_name = mapper.get_account_code(
+                                tx.vendor,
+                                tx.description,
+                                is_income=False,
+                                transaction_type="withdrawal"
+                            )
+                        if tx.transaction_type == "deposit" and not account_code.startswith('6'):
+                            account_code, account_name = ("601", "SALES")
+                    
+                    key = (account_code, account_name)
+                    grouped.setdefault(key, []).append(tx)
+
+                for (code, name), txs in sorted(grouped.items()):
+                    subtotal = sum(abs(t.amount) for t in txs)
+                    label = f"{code} · {name} — {cur} {subtotal:,.2f} ({len(txs)} tx)"
+
+                    with st.expander(label):
+                        # Special handling for OTHER EXPENSES (999) - allow reassignment
+                        if code == "999":
+                            st.info("💡 Click 'Change Account Code' to reassign transactions from OTHER EXPENSES to specific accounts")
+                            
+                            # Load all account codes for dropdown
+                            import json
+                            from pathlib import Path
+                            all_account_options = {}
+                            account_file = Path(__file__).parent / 'account_keywords.json'
+                            try:
+                                with open(account_file, 'r') as f:
+                                    data = json.load(f)
+                                    for acc_code, acc_details in data.items():
+                                        # Skip 999 (OTHER EXPENSES) - don't allow reassigning to itself
+                                        if acc_code != "999":
+                                            all_account_options[f"{acc_code} · {acc_details['name']}"] = acc_code
+                            except Exception as e:
+                                st.error(f"Error loading account codes: {e}")
+                            
+                            for idx, t in enumerate(txs):
+                                col1, col2, col3 = st.columns([2, 2, 1])
+                                with col1:
+                                    st.text(f"{t.date or 'N/A'} | {t.vendor or 'Unknown'}")
+                                with col2:
+                                    st.text(f"{cur} {abs(t.amount):,.2f} | {t.description[:40] if t.description else 'N/A'}")
+                                with col3:
+                                    # Unique key for each transaction
+                                    tx_key = f"change_999_{idx}_{t.date}_{abs(t.amount)}"
+                                    if st.button("Change", key=tx_key):
+                                        st.session_state[f"editing_{tx_key}"] = True
+                                
+                                # Show dropdown if editing this transaction
+                                if st.session_state.get(f"editing_{tx_key}", False):
+                                    selected_display = st.selectbox(
+                                        "Select new account code:",
+                                        options=list(all_account_options.keys()),
+                                        key=f"select_{tx_key}"
+                                    )
+                                    
+                                    col_save, col_cancel = st.columns(2)
+                                    with col_save:
+                                        if st.button("✅ Save", key=f"save_{tx_key}"):
+                                            new_code = all_account_options[selected_display]
+                                            
+                                            # Update in session state transactions
+                                            for session_tx in st.session_state.transactions:
+                                                if (session_tx.date == t.date and 
+                                                    session_tx.description == t.description and 
+                                                    session_tx.amount == t.amount):
+                                                    session_tx.account_code = new_code
+                                            
+                                            # Update in filtered transactions if they exist
+                                            if "filtered_transactions" in st.session_state:
+                                                for session_tx in st.session_state.filtered_transactions:
+                                                    if (session_tx.date == t.date and 
+                                                        session_tx.description == t.description and 
+                                                        session_tx.amount == t.amount):
+                                                        session_tx.account_code = new_code
+                                            
+                                            st.session_state[f"editing_{tx_key}"] = False
+                                            st.success(f"✅ Updated to {selected_display}")
+                                            st.rerun()
+                                    with col_cancel:
+                                        if st.button("❌ Cancel", key=f"cancel_{tx_key}"):
+                                            st.session_state[f"editing_{tx_key}"] = False
+                                            st.rerun()
+                        else:
+                            # Regular display for other account codes
+                            detail_df = pd.DataFrame([{
+                                "Date": t.date or "",
+                                "Vendor": t.vendor or "",
+                                "Amount": f"{cur} {abs(t.amount):,.2f}",
+                                "Description": t.description,
+                                "Needs Review": "⚠ Yes" if t.needs_review else "✅ No"
+                            } for t in txs])
+
+                            st.dataframe(detail_df, use_container_width=True, hide_index=True)
+
+                # ---- CSV Export
+                csv_data = summary_df.to_csv(index=False)
+                st.download_button(
+                    "⬇️ Download P&L Account Codes (CSV)",
+                    csv_data,
+                    file_name=f"PL_Account_Codes_{period_input.replace(' ', '_')}.csv",
+                    mime="text/csv"
                 )
-
-            # ---- Drill-down expanders
-            st.subheader("🔍 Transaction Drill-Down")
-
-            grouped = {}
-            for tx, cat in categorized_transactions:
-                if cat.is_excluded or cat.is_owner_draw:
-                    continue
-                key = (cat.tax_code, cat.category_name)
-                grouped.setdefault(key, []).append(tx)
-
-            for (code, name), txs in sorted(grouped.items()):
-                subtotal = sum(abs(t.amount) for t in txs)
-                label = f"{code} · {name} — {cur} {subtotal:,.2f} ({len(txs)} tx)"
-
-                with st.expander(label):
-                    detail_df = pd.DataFrame([{
-                        "Date": t.date or "",
-                        "Vendor": t.vendor or "",
-                        "Amount": f"{cur} {abs(t.amount):,.2f}",
-                        "Description": t.description,
-                        "Needs Review": "⚠ Yes" if t.needs_review else "✅ No"
-                    } for t in txs])
-
-                    st.dataframe(detail_df, use_container_width=True, hide_index=True)
-
-            # ---- CSV Export
-            csv_data = summary_df.to_csv(index=False)
-            st.download_button(
-                "⬇️ Download P&L (CSV)",
-                csv_data,
-                file_name=f"P&L_{period_input.replace(' ', '_')}.csv",
-                mime="text/csv"
-            )
-
-        # ===============================
-        # IRS SCHEDULE C VIEW
-        # ===============================
-        else:
-            st.subheader("🧾 IRS Schedule C Summary")
-            st.dataframe(schedule_c_df, use_container_width=True, hide_index=True)
-
-            if not categorized_transactions:
-                st.stop()
-
-            category_groups = {}
-
-            for tx, cat in categorized_transactions:
-                if cat.is_excluded or cat.is_owner_draw or not cat.line_number:
-                    continue
-                key = (cat.line_number, cat.tax_code, cat.category_name)
-                category_groups.setdefault(key, []).append((tx, cat))
-
-            for (line, code, name), items in sorted(
-                category_groups.items(),
-                key=lambda x: (
-                    float(re.search(r'(\d+)', x[0][0]).group(1))
-                    if re.search(r'(\d+)', x[0][0]) else 999
-                )
-            ):
-                subtotal = sum(abs(tx.amount) for tx, _ in items)
-                count = len(items)
-
-                label = f"{line} · {name} — {cur} {subtotal:,.2f} ({count} tx)"
-
-                with st.expander(label):
-                    df = pd.DataFrame([{
-                        "Date": tx.date or "",
-                        "Vendor": tx.vendor or "",
-                        "Amount": f"{cur} {abs(tx.amount):,.2f}",
-                        "Description": tx.description,
-                        "Tax Code": cat.tax_code,
-                        "Needs Review": "⚠ Yes" if tx.needs_review else "✅ No"
-                    } for tx, cat in items])
-
-                    st.dataframe(df, use_container_width=True, hide_index=True)
-
-    with tab6:
-        st.subheader("ATM Withdrawals")
-
-        atm_txs = filter_atm_withdrawals(transactions)
-        
-
-        if not atm_txs:
-            st.info("No ATM withdrawals found.")
-        else:
-            # Summary table
-            atm_df = pd.DataFrame([{
-                "Date": t.date or "",
-                "Vendor": t.vendor,
-                "Amount": abs(t.amount),
-                "Description": t.description,
-                "Needs Review": t.needs_review
-            } for t in atm_txs])
-
-            total_atm = sum(abs(t.amount) for t in atm_txs)
-
-            st.metric("Total ATM Withdrawals", f"{cur} {total_atm:,.2f}", f"{len(atm_txs)} tx")
-
-            st.dataframe(
-                atm_df.assign(
-                    Amount=lambda x: x["Amount"].map(lambda v: f"{cur} {v:,.2f}"),
-                    **{"Needs Review": atm_df["Needs Review"].map(lambda x: "⚠ Yes" if x else "✅ No")}
-                ),
-                use_container_width=True,
-                hide_index=True
-            )
-
-            # Group by ATM vendor (optional, nice touch)
-            grouped = {}
-            for t in atm_txs:
-                key = t.vendor or "UNKNOWN ATM"
-                grouped.setdefault(key, []).append(t)
-
-            for vendor, items in sorted(grouped.items(), key=lambda x: -len(x[1])):
-                subtotal = sum(abs(i.amount) for i in items)
-                cnt = len(items)
-                with st.expander(f"{vendor} — {cnt} tx — {cur} {subtotal:,.2f}"):
-                    details = pd.DataFrame([{
-                        "Date": it.date,
-                        "Amount": f"{cur} {abs(it.amount):,.2f}",
-                        "Description": it.description
-                    } for it in items])
-                    st.dataframe(details, use_container_width=True, hide_index=True)
     
     # Downloads
     st.header("📥 Download")

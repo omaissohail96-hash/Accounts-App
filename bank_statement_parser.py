@@ -23,6 +23,7 @@ class Transaction:
     needs_review: bool = False
     raw_line: str = ""
     line_number: Optional[int] = None
+    account_code: Optional[str] = None
 
 
 class BankStatementParser:
