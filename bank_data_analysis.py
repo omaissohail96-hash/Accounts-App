@@ -1632,7 +1632,7 @@ if uploaded:
 
             # stats & reports
             rg = ReportGenerator()
-            stats = rg.generate_summary_statistics(all_txs)
+            stats = rg.generate_summary_statistics(transactions)
             deposits_df = rg.generate_deposits_summary(all_txs)
             withdrawals_df = rg.generate_withdrawals_summary(all_txs)
             pl_df = rg.generate_pl_report(all_txs)
@@ -1674,7 +1674,7 @@ if uploaded:
 from datetime import datetime, date
 
 all_transactions = st.session_state.get("all_transactions", [])
-
+filtered = []
 def _md_key(d):
     try:
         dt = datetime.strptime(d, "%Y-%m-%d")
@@ -1718,7 +1718,7 @@ if all_transactions:
             )
 
         if st.button("Apply Date Filter"):
-            filtered = []
+            
 
             start_key = (start_md.month, start_md.day)
             end_key = (end_md.month, end_md.day)
@@ -1754,15 +1754,33 @@ if "transactions" in st.session_state and st.session_state.transactions:
     transactions: List[Transaction] = st.session_state.get(
         'filtered_transactions', st.session_state.transactions
     )
-    stats = st.session_state.stats
+
+    rg = ReportGenerator()
+    stats = rg.generate_summary_statistics(transactions)
     cur = st.session_state.currency
 
     st.header("📊 Summary")
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Deposits", f"{cur} {stats['Total Deposit Amount']:,.2f}", f"{stats['Total Deposits']} tx")
-    c2.metric("Total Withdrawals", f"{cur} {stats['Total Withdrawal Amount']:,.2f}", f"{stats['Total Withdrawals']} tx")
-    c3.metric("Net Income", f"{cur} {stats['Net Income']:,.2f}")
-    c4.metric("Transactions", stats['Total Transactions'])
+
+    c1.metric(
+        "Total Deposits",
+        f"{cur} {stats['Total Deposit Amount']:,.2f}",
+        f"{stats['Total Deposits']} tx"
+    )
+    c2.metric(
+        "Total Withdrawals",
+        f"{cur} {stats['Total Withdrawal Amount']:,.2f}",
+        f"{stats['Total Withdrawals']} tx"
+    )
+    c3.metric(
+        "Net Income",
+        f"{cur} {stats['Net Income']:,.2f}"
+    )
+    c4.metric(
+        "Transactions",
+        stats['Total Transactions']
+    )
+
 
     computed_deposits = sum(t.amount for t in transactions if t.amount > 0)
     computed_withdrawals = sum(-t.amount for t in transactions if t.amount < 0)
