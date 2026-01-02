@@ -3,6 +3,8 @@ Report Generator Module
 Creates professional P&L reports with deposits and withdrawals summaries
 """
 import pandas as pd
+import json
+from pathlib import Path
 from typing import List, Dict
 from bank_statement_parser import Transaction
 import logging
@@ -14,7 +16,25 @@ class ReportGenerator:
     """Generates professional financial reports"""
     
     def __init__(self):
-        pass
+        self.account_codes = self._load_account_codes()
+    
+    def _load_account_codes(self) -> Dict:
+        """Load all account codes from account_keywords.json"""
+        account_file = Path(__file__).parent / 'account_keywords.json'
+        try:
+            with open(account_file, 'r') as f:
+                data = json.load(f)
+                # Extract code, name, and rank for each account
+                accounts = {}
+                for code, details in data.items():
+                    accounts[code] = {
+                        'name': details['name'],
+                        'rank': details['rank']
+                    }
+                return accounts
+        except Exception as e:
+            logger.warning(f"Could not load account codes: {e}")
+            return {}
     
     def generate_deposits_summary(self, transactions: List[Transaction]) -> pd.DataFrame:
         """Generate deposits summary grouped by source/vendor"""
@@ -203,6 +223,45 @@ class ReportGenerator:
         
         df = pd.DataFrame(rows)
         return df
+    
+    def generate_complete_pl_report(self, transactions: List[Transaction]) -> Dict:
+        """Generate complete P&L report with ALL account codes, showing $0.00 for unused accounts"""
+        # Initialize all accounts with zero amounts
+        all_accounts = {}
+        for code, details in self.account_codes.items():
+            all_accounts[code] = {
+                'code': code,
+                'name': details['name'],
+                'rank': details['rank'],
+                'amount': 0.00
+            }
+        
+        # Aggregate transaction amounts by account_code
+        for trans in transactions:
+            if trans.account_code and trans.account_code in all_accounts:
+                all_accounts[trans.account_code]['amount'] += trans.amount
+        
+        # Sort accounts by rank
+        sorted_accounts = sorted(all_accounts.values(), key=lambda x: x['rank'])
+        
+        # Separate income (600s) and expenses (700-999)
+        income_accounts = [acc for acc in sorted_accounts if acc['code'].startswith('6')]
+        expense_accounts = [acc for acc in sorted_accounts if not acc['code'].startswith('6')]
+        
+        # Calculate totals
+        total_income = sum(acc['amount'] for acc in income_accounts)
+        total_expenses = sum(acc['amount'] for acc in expense_accounts)
+        net_income = total_income + total_expenses  # expenses are already negative
+        
+        return {
+            'income': income_accounts,
+            'expenses': expense_accounts,
+            'totals': {
+                'total_income': round(total_income, 2),
+                'total_expenses': round(total_expenses, 2),
+                'net_income': round(net_income, 2)
+            }
+        }
     
     def generate_summary_statistics(self, transactions: List[Transaction]) -> Dict:
         """Generate summary statistics"""

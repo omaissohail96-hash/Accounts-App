@@ -1352,42 +1352,66 @@ class ScheduleCCategorizer:
         report_lines.append("Ordinary Income/Expense")
         report_lines.append("")
         
-        # Build totals per Account Code + Account Name directly from transactions
-        account_totals: Dict[tuple, float] = {}
-        account_is_income: Dict[tuple, bool] = {}
-
+        # ===== ALWAYS SHOW ALL ACCOUNT CODES (with $0.00 defaults) =====
+        # Load ALL account codes from account_keywords.json
+        import json
+        from pathlib import Path
+        
+        account_file = Path(__file__).parent / 'account_keywords.json'
+        all_accounts = {}
+        try:
+            with open(account_file, 'r') as f:
+                data = json.load(f)
+                for code, details in data.items():
+                    all_accounts[code] = {
+                        'code': code,
+                        'name': details['name'],
+                        'rank': details['rank'],
+                        'amount': 0.0
+                    }
+        except Exception as e:
+            logger.warning(f"Could not load account codes: {e}")
+        
+        # Aggregate transaction amounts into account codes
         for tx, cat in categorized_transactions:
-            # Skip excluded transactions (they are not in Transaction Details)
+            # Skip excluded transactions
             if cat.is_excluded:
                 continue
 
-            is_income_tx = tx.amount > 0
-            acct_code, acct_name = mapper.get_account_code(
-                tx.vendor,
-                tx.description,
-                is_income=is_income_tx,
-                transaction_type=getattr(tx, 'transaction_type', None)
-            )
+            # Check if account_code is already set on transaction (from manual reassignment)
+            if hasattr(tx, 'account_code') and tx.account_code:
+                acct_code = tx.account_code
+            else:
+                is_income_tx = tx.amount > 0
+                acct_code, acct_name = mapper.get_account_code(
+                    tx.vendor,
+                    tx.description,
+                    is_income=is_income_tx,
+                    transaction_type=getattr(tx, 'transaction_type', None)
+                )
 
-            key = (acct_code, acct_name)
-            amt = tx.amount if is_income_tx else abs(tx.amount)
-            account_totals[key] = account_totals.get(key, 0.0) + amt
-            # mark whether this account is income (starts with '6')
-            account_is_income[key] = account_is_income.get(key, acct_code.strip().startswith('6'))
+            # Add amount to the account if it exists in our loaded accounts
+            if acct_code in all_accounts:
+                amt = tx.amount if is_income_tx else abs(tx.amount)
+                all_accounts[acct_code]['amount'] += amt
 
-        # Split into income and expense accounts
-        income_accounts = [(k[0], k[1], v) for k, v in account_totals.items() if account_is_income.get(k, False)]
-        expense_accounts = [(k[0], k[1], v) for k, v in account_totals.items() if not account_is_income.get(k, False)]
+        # Sort all accounts by rank
+        sorted_accounts = sorted(all_accounts.values(), key=lambda x: x['rank'])
+        
+        # Separate income (600s) and expense (700-999) accounts
+        income_accounts = [(acc['code'], acc['name'], acc['amount']) 
+                          for acc in sorted_accounts if acc['code'].startswith('6')]
+        expense_accounts = [(acc['code'], acc['name'], acc['amount']) 
+                           for acc in sorted_accounts if not acc['code'].startswith('6')]
 
         # Totals
         total_income_accts = sum(a[2] for a in income_accounts)
         total_expense_accts = sum(a[2] for a in expense_accounts)
         net_ord_income = total_income_accts - total_expense_accts
 
-        # Income section
+        # Income section - SHOW ALL ACCOUNTS (even $0.00)
         report_lines.append("Income")
-        # sort by account code
-        for account_code, account_name, amount in sorted(income_accounts, key=lambda x: x[0]):
+        for account_code, account_name, amount in income_accounts:
             pct = (amount / total_income_accts * 100) if total_income_accts > 0 else 0
             display_name = mapper.get_account_name_display(account_code, account_name)
             report_lines.append(f"{display_name:<40} {amount:>12,.2f} {pct:>6.1f}%")
@@ -1395,9 +1419,9 @@ class ScheduleCCategorizer:
         report_lines.append(f"{'Total Income':<40} {total_income_accts:>12,.2f} {100.0 if total_income_accts>0 else 0.0:>6.1f}%")
         report_lines.append("")
 
-        # Expense section
+        # Expense section - SHOW ALL ACCOUNTS (even $0.00)
         report_lines.append("Expense")
-        for account_code, account_name, amount in sorted(expense_accounts, key=lambda x: x[0]):
+        for account_code, account_name, amount in expense_accounts:
             pct = (amount / total_income_accts * 100) if total_income_accts > 0 else 0
             display_name = mapper.get_account_name_display(account_code, account_name)
             report_lines.append(f"{display_name:<40} {amount:>12,.2f} {pct:>6.1f}%")

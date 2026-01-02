@@ -1701,21 +1701,28 @@ if "transactions" in st.session_state and st.session_state.transactions:
     else:
         labels = base_labels + ["📊 P&L (Account Codes)"]
 
-    tabs = st.tabs(labels)
-    # map tabs to variables used below; tab5 may be None when Schedule C is hidden
-    tab1 = tabs[0]
-    tab2 = tabs[1]
-    tab3 = tabs[2]
-    tab4 = tabs[3]
-    if SHOW_SCHEDULE_C:
-        tab5 = tabs[4]
-        tab6 = tabs[5]
-    else:
-        tab5 = None
-        tab6 = tabs[4]
+    # Use query params to preserve active tab across reruns
+    try:
+        query_params = st.query_params
+        default_tab = int(query_params.get("tab", 0))
+    except:
+        default_tab = 0
+    
+    # Use selectbox instead of tabs for better state control
+    selected_tab = st.selectbox(
+        "Select View:",
+        range(len(labels)),
+        format_func=lambda x: labels[x],
+        index=default_tab,
+        key="active_tab_selector"
+    )
+    
+    # Update query param when tab changes
+    st.query_params["tab"] = str(selected_tab)
+    
     rg = ReportGenerator()
 
-    with tab1:
+    if selected_tab == 0:  # Deposits tab
         st.subheader("All Deposits Summary (by Source/Vendor)")
         df = st.session_state.deposit_df
         if df is None or df.empty:
@@ -1739,7 +1746,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
                     } for it in items])
                     st.dataframe(details, use_container_width=True, hide_index=True)
 
-    with tab2:
+    elif selected_tab == 1:  # Withdrawals tab
         st.subheader("All Withdrawals Summary (by Vendor)")
         df = st.session_state.withdrawal_df
         if df is None or df.empty:
@@ -1763,11 +1770,11 @@ if "transactions" in st.session_state and st.session_state.transactions:
                     } for it in items])
                     st.dataframe(details, use_container_width=True, hide_index=True)
 
-    with tab3:
+    elif selected_tab == 2:  # P&L tab
         st.subheader("Profit & Loss")
         st.dataframe(st.session_state.pl_df, use_container_width=True, hide_index=True)
 
-    with tab4:
+    elif selected_tab == 3:  # All Transactions tab
         st.subheader("All Transactions")
         all_df = pd.DataFrame([{
             "Date": t.date or "",
@@ -1777,8 +1784,8 @@ if "transactions" in st.session_state and st.session_state.transactions:
             "Description": t.description
         } for t in transactions])
         st.dataframe(all_df, use_container_width=True, hide_index=True)
-    if tab5:
-        with tab5:
+    
+    elif SHOW_SCHEDULE_C and selected_tab == 4:  # Schedule C tab
             st.subheader("📄 Schedule C")
 
             schedule_c_df = st.session_state.get("schedule_c_df")
@@ -1844,7 +1851,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
 
                         st.dataframe(df, use_container_width=True, hide_index=True)
 
-    with tab6:
+    elif selected_tab == (5 if SHOW_SCHEDULE_C else 4):  # P&L Account Codes tab
         st.subheader("📊 Profit & Loss (Account Codes)")
 
         categorized_transactions = st.session_state.get(
@@ -1939,29 +1946,43 @@ if "transactions" in st.session_state and st.session_state.transactions:
                 # Deposits → Income, Withdrawals → Expenses
                 is_income = tx.transaction_type == "deposit"
                 
-                # Get account code based on transaction type
-                account_code, account_name = mapper.get_account_code(
-                    tx.vendor, 
-                    tx.description, 
-                    is_income=is_income,
-                    transaction_type=tx.transaction_type
-                )
-                
-                # Ensure account code matches transaction type
-                # If withdrawal but got income code (600s), force to expense code
-                if tx.transaction_type == "withdrawal" and account_code.startswith('6'):
-                    # Force to expense code (999 OTHER EXPENSES as fallback)
+                # Check if account_code is already set on transaction (from manual reassignment)
+                if hasattr(tx, 'account_code') and tx.account_code:
+                    account_code = tx.account_code
+                    # Get the account name from JSON
+                    import json
+                    from pathlib import Path
+                    account_file = Path(__file__).parent / 'account_keywords.json'
+                    try:
+                        with open(account_file, 'r') as f:
+                            data = json.load(f)
+                            account_name = data.get(account_code, {}).get('name', 'UNKNOWN')
+                    except:
+                        account_name = 'UNKNOWN'
+                else:
+                    # Get account code based on transaction type
                     account_code, account_name = mapper.get_account_code(
-                        tx.vendor,
-                        tx.description,
-                        is_income=False,
-                        transaction_type="withdrawal"
+                        tx.vendor, 
+                        tx.description, 
+                        is_income=is_income,
+                        transaction_type=tx.transaction_type
                     )
-                
-                # If deposit but got expense code, force to income code
-                if tx.transaction_type == "deposit" and not account_code.startswith('6'):
-                    # Force to income code (601 SALES as default)
-                    account_code, account_name = ("601", "SALES")
+                    
+                    # Ensure account code matches transaction type
+                    # If withdrawal but got income code (600s), force to expense code
+                    if tx.transaction_type == "withdrawal" and account_code.startswith('6'):
+                        # Force to expense code (999 OTHER EXPENSES as fallback)
+                        account_code, account_name = mapper.get_account_code(
+                            tx.vendor,
+                            tx.description,
+                            is_income=False,
+                            transaction_type="withdrawal"
+                        )
+                    
+                    # If deposit but got expense code, force to income code
+                    if tx.transaction_type == "deposit" and not account_code.startswith('6'):
+                        # Force to income code (601 SALES as default)
+                        account_code, account_name = ("601", "SALES")
 
                 rows.append({
                     "Account Code": account_code,
@@ -1987,25 +2008,39 @@ if "transactions" in st.session_state and st.session_state.transactions:
                     if cat.is_excluded:
                         continue
                     
-                    # DATA-DRIVEN: Use transaction_type as source of truth
-                    is_income = tx.transaction_type == "deposit"
-                    account_code, account_name = mapper.get_account_code(
-                        tx.vendor, 
-                        tx.description, 
-                        is_income=is_income,
-                        transaction_type=tx.transaction_type
-                    )
-                    
-                    # Ensure account code matches transaction type
-                    if tx.transaction_type == "withdrawal" and account_code.startswith('6'):
+                    # Check if account_code is already set on transaction (from manual reassignment)
+                    if hasattr(tx, 'account_code') and tx.account_code:
+                        account_code = tx.account_code
+                        # Get the account name from JSON
+                        import json
+                        from pathlib import Path
+                        account_file = Path(__file__).parent / 'account_keywords.json'
+                        try:
+                            with open(account_file, 'r') as f:
+                                data = json.load(f)
+                                account_name = data.get(account_code, {}).get('name', 'UNKNOWN')
+                        except:
+                            account_name = 'UNKNOWN'
+                    else:
+                        # DATA-DRIVEN: Use transaction_type as source of truth
+                        is_income = tx.transaction_type == "deposit"
                         account_code, account_name = mapper.get_account_code(
-                            tx.vendor,
-                            tx.description,
-                            is_income=False,
-                            transaction_type="withdrawal"
+                            tx.vendor, 
+                            tx.description, 
+                            is_income=is_income,
+                            transaction_type=tx.transaction_type
                         )
-                    if tx.transaction_type == "deposit" and not account_code.startswith('6'):
-                        account_code, account_name = ("601", "SALES")
+                        
+                        # Ensure account code matches transaction type
+                        if tx.transaction_type == "withdrawal" and account_code.startswith('6'):
+                            account_code, account_name = mapper.get_account_code(
+                                tx.vendor,
+                                tx.description,
+                                is_income=False,
+                                transaction_type="withdrawal"
+                            )
+                        if tx.transaction_type == "deposit" and not account_code.startswith('6'):
+                            account_code, account_name = ("601", "SALES")
                     
                     key = (account_code, account_name)
                     grouped.setdefault(key, []).append(tx)
@@ -2015,15 +2050,83 @@ if "transactions" in st.session_state and st.session_state.transactions:
                     label = f"{code} · {name} — {cur} {subtotal:,.2f} ({len(txs)} tx)"
 
                     with st.expander(label):
-                        detail_df = pd.DataFrame([{
-                            "Date": t.date or "",
-                            "Vendor": t.vendor or "",
-                            "Amount": f"{cur} {abs(t.amount):,.2f}",
-                            "Description": t.description,
-                            "Needs Review": "⚠ Yes" if t.needs_review else "✅ No"
-                        } for t in txs])
+                        # Special handling for OTHER EXPENSES (999) - allow reassignment
+                        if code == "999":
+                            st.info("💡 Click 'Change Account Code' to reassign transactions from OTHER EXPENSES to specific accounts")
+                            
+                            # Load all account codes for dropdown
+                            import json
+                            from pathlib import Path
+                            all_account_options = {}
+                            account_file = Path(__file__).parent / 'account_keywords.json'
+                            try:
+                                with open(account_file, 'r') as f:
+                                    data = json.load(f)
+                                    for acc_code, acc_details in data.items():
+                                        # Skip 999 (OTHER EXPENSES) - don't allow reassigning to itself
+                                        if acc_code != "999":
+                                            all_account_options[f"{acc_code} · {acc_details['name']}"] = acc_code
+                            except Exception as e:
+                                st.error(f"Error loading account codes: {e}")
+                            
+                            for idx, t in enumerate(txs):
+                                col1, col2, col3 = st.columns([2, 2, 1])
+                                with col1:
+                                    st.text(f"{t.date or 'N/A'} | {t.vendor or 'Unknown'}")
+                                with col2:
+                                    st.text(f"{cur} {abs(t.amount):,.2f} | {t.description[:40] if t.description else 'N/A'}")
+                                with col3:
+                                    # Unique key for each transaction
+                                    tx_key = f"change_999_{idx}_{t.date}_{abs(t.amount)}"
+                                    if st.button("Change", key=tx_key):
+                                        st.session_state[f"editing_{tx_key}"] = True
+                                
+                                # Show dropdown if editing this transaction
+                                if st.session_state.get(f"editing_{tx_key}", False):
+                                    selected_display = st.selectbox(
+                                        "Select new account code:",
+                                        options=list(all_account_options.keys()),
+                                        key=f"select_{tx_key}"
+                                    )
+                                    
+                                    col_save, col_cancel = st.columns(2)
+                                    with col_save:
+                                        if st.button("✅ Save", key=f"save_{tx_key}"):
+                                            new_code = all_account_options[selected_display]
+                                            
+                                            # Update in session state transactions
+                                            for session_tx in st.session_state.transactions:
+                                                if (session_tx.date == t.date and 
+                                                    session_tx.description == t.description and 
+                                                    session_tx.amount == t.amount):
+                                                    session_tx.account_code = new_code
+                                            
+                                            # Update in filtered transactions if they exist
+                                            if "filtered_transactions" in st.session_state:
+                                                for session_tx in st.session_state.filtered_transactions:
+                                                    if (session_tx.date == t.date and 
+                                                        session_tx.description == t.description and 
+                                                        session_tx.amount == t.amount):
+                                                        session_tx.account_code = new_code
+                                            
+                                            st.session_state[f"editing_{tx_key}"] = False
+                                            st.success(f"✅ Updated to {selected_display}")
+                                            st.rerun()
+                                    with col_cancel:
+                                        if st.button("❌ Cancel", key=f"cancel_{tx_key}"):
+                                            st.session_state[f"editing_{tx_key}"] = False
+                                            st.rerun()
+                        else:
+                            # Regular display for other account codes
+                            detail_df = pd.DataFrame([{
+                                "Date": t.date or "",
+                                "Vendor": t.vendor or "",
+                                "Amount": f"{cur} {abs(t.amount):,.2f}",
+                                "Description": t.description,
+                                "Needs Review": "⚠ Yes" if t.needs_review else "✅ No"
+                            } for t in txs])
 
-                        st.dataframe(detail_df, use_container_width=True, hide_index=True)
+                            st.dataframe(detail_df, use_container_width=True, hide_index=True)
 
                 # ---- CSV Export
                 csv_data = summary_df.to_csv(index=False)
