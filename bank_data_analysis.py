@@ -88,9 +88,6 @@ LINE_25_UTILITIES = [
     "ELECTRIC", "WATER"
 ]
 
-# OpenAI import removed - not needed
-openai = None
-
 logger = logging.getLogger("bank_analyzer")
 logging.basicConfig(level=logging.ERROR)
 
@@ -1300,7 +1297,7 @@ class CreditCardParser:
         return txs
 
 # ----------------------------
-# LLM enhancer (unchanged)
+# LLM enhancer (disabled)
 # ----------------------------
 class LLMEnhancer:
     def __init__(self, model: str = "gpt-4o-mini", max_tokens: int = 1200):
@@ -1308,66 +1305,8 @@ class LLMEnhancer:
         self.max_tokens = max_tokens
 
     def enhance(self, transactions: List[Transaction], raw_text: str) -> List[Transaction]:
-        if openai is None:
-            logger.info("openai package not installed — skipping LLM enhancement.")
-            return transactions
-        key = None
-        try:
-            key = st.secrets.get("OPENAI_API_KEY") if "OPENAI_API_KEY" in st.secrets else None
-        except Exception:
-            key = None
-        if not key:
-            logger.info("No OPENAI_API_KEY found — skipping LLM enhancement.")
-            return transactions
-        openai.api_key = key
-        rows = []
-        for i, t in enumerate(transactions[:200]):
-            rows.append({
-                "idx": i,
-                "date": t.date,
-                "vendor": t.vendor,
-                "amount": t.amount,
-                "direction": "in" if t.amount > 0 else "out",
-                "description": t.description
-            })
-        prompt = (
-            "You are a precise financial data cleaner. You will receive a JSON array of parsed transactions.\n"
-            "Return a JSON array with exactly the same number of elements. Each element must contain:\n"
-            " idx (int), date (YYYY-MM-DD or original), vendor (short), amount (number positive), direction ('in'/'out'), description (string)\n"
-            "Return ONLY a JSON array (no explanation).\n\nINPUT:\n" + json.dumps(rows, ensure_ascii=False)
-        )
-        try:
-            resp = openai.ChatCompletion.create(model=self.model, temperature=0,
-                                                messages=[{"role": "user", "content": prompt}],
-                                                max_tokens=self.max_tokens)
-            content = resp.choices[0].message["content"]
-            parsed = json.loads(content)
-            enhanced = []
-            for obj in parsed:
-                idx = int(obj.get("idx"))
-                amt = float(obj.get("amount", 0.0))
-                direction = obj.get("direction", "in")
-                amt_signed = abs(amt) if direction == "in" else -abs(amt)
-                date_out = obj.get("date") or transactions[idx].date
-                vendor_out = obj.get("vendor") or transactions[idx].vendor
-                desc_out = obj.get("description") or transactions[idx].description
-                enhanced.append(Transaction(
-                    date=date_out,
-                    transaction_type='deposit' if amt_signed > 0 else 'withdrawal',
-                    vendor=str(vendor_out).title() if vendor_out else "UNKNOWN",
-                    amount=amt_signed,
-                    description=str(desc_out),
-                    raw_line=transactions[idx].raw_line,
-                    needs_review=False
-                ))
-            if len(enhanced) != len(rows):
-                logger.warning("LLM returned different count — skipping enhancement.")
-                return transactions
-            final = enhanced + transactions[200:]
-            return final
-        except Exception as e:
-            logger.exception("LLM enhancement error: %s", e)
-            return transactions
+        # LLM enhancement disabled - not needed
+        return transactions
 
 
 
