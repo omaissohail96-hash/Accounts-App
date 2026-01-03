@@ -1766,6 +1766,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
             st.info("No deposits found.")
         else:
             st.dataframe(df, use_container_width=True, hide_index=True)
+            st.subheader("👉 Vendor Transaction Details")
             deps = [t for t in transactions if t.amount > 0]
             grouped = {}
             for t in deps:
@@ -1791,6 +1792,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
             st.info("No withdrawals found.")
         else:
             st.dataframe(df, use_container_width=True, hide_index=True)
+            st.subheader("👉 Vendor Transaction Details")
             wds = [t for t in transactions if t.amount < 0]
             grouped = {}
             for t in wds:
