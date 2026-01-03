@@ -1872,7 +1872,9 @@ if "transactions" in st.session_state and st.session_state.transactions:
 
     elif selected_tab == 2:  # P&L tab
         st.subheader("Profit & Loss")
-        st.dataframe(st.session_state.pl_df, use_container_width=True, hide_index=True)
+        # Regenerate P&L with filtered transactions
+        filtered_pl_df = rg.generate_pl_report(transactions)
+        st.dataframe(filtered_pl_df, use_container_width=True, hide_index=True)
 
     elif selected_tab == 3:  # All Transactions tab
         st.subheader("All Transactions")
@@ -2011,6 +2013,9 @@ if "transactions" in st.session_state and st.session_state.transactions:
                 business_name=business_name or "",
                 period=period_input
             )
+            
+            # Store P&L statement text in session state for download
+            st.session_state.pl_statement_text = pl_text
 
             st.subheader("📊 Profit & Loss Statement")
             st.code(pl_text)
@@ -2249,7 +2254,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
     
     # Downloads
     st.header("📥 Download")
-    c1,c2,c3 ,c4 = st.columns(4)
+    c1,c2,c3,c4 = st.columns(4)
     with c1:
         dep_csv = st.session_state.deposit_df.to_csv(index=False) if (st.session_state.deposit_df is not None and not st.session_state.deposit_df.empty) else ""
         st.download_button("⬇ Deposits CSV", dep_csv, "deposits.csv", mime="text/csv")
@@ -2260,12 +2265,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
         pnl_csv = st.session_state.pl_df.to_csv(index=False) if (st.session_state.pl_df is not None and not st.session_state.pl_df.empty) else ""
         st.download_button("⬇ P&L CSV", pnl_csv, "pnl.csv", mime="text/csv")
     with c4:
-        sc_csv = st.session_state.schedule_c_df.to_csv(index=False)
-        st.download_button(
-            "⬇ Schedule C CSV",
-            sc_csv,
-            "schedule_c.csv",
-            mime="text/csv"
-        )
+        pl_statement_text = st.session_state.get("pl_statement_text", "")
+        st.download_button("⬇ P&L Statement", pl_statement_text, "pl_statement.txt", mime="text/plain")
 
     st.success("✅ Report generated. Verify totals against your bank statement.")
