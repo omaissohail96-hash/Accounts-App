@@ -1824,7 +1824,8 @@ if "transactions" in st.session_state and st.session_state.transactions:
 
     if selected_tab == 0:  # Deposits tab
         st.subheader("All Deposits Summary (by Source/Vendor)")
-        df = st.session_state.deposit_df
+        # Regenerate deposits summary with filtered transactions
+        df = rg.generate_deposits_summary(transactions)
         if df is None or df.empty:
             st.info("No deposits found.")
         else:
@@ -1848,7 +1849,8 @@ if "transactions" in st.session_state and st.session_state.transactions:
 
     elif selected_tab == 1:  # Withdrawals tab
         st.subheader("All Withdrawals Summary (by Vendor)")
-        df = st.session_state.withdrawal_df
+        # Regenerate withdrawals summary with filtered transactions
+        df = rg.generate_withdrawals_summary(transactions)
         if df is None or df.empty:
             st.info("No withdrawals found.")
         else:
