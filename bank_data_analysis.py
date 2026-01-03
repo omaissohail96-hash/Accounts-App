@@ -88,11 +88,8 @@ LINE_25_UTILITIES = [
     "ELECTRIC", "WATER"
 ]
 
-
-try:
-    import openai
-except Exception:
-    openai = None
+# OpenAI import removed - not needed
+openai = None
 
 logger = logging.getLogger("bank_analyzer")
 logging.basicConfig(level=logging.ERROR)
