@@ -823,13 +823,19 @@ class FallbackStatementParser:
         check_lines = []
         in_checks = False
         for ln in cleaned:
+            # Check if this is a checks section header
             if self.SECTION_PATTERNS["CHECKS"].search(ln):
                 in_checks = True
-                continue
+                continue  # Skip the header line itself
+            # Check if we're exiting the checks section
             if in_checks and any(self.SECTION_PATTERNS[s].search(ln) for s in ["ATM", "FEES", "ELECTRONIC_WITHDRAWALS"]):
                 in_checks = False
+                continue
+            # If we're in checks section, add the line
             if in_checks:
-                check_lines.append(ln)
+                # Only add lines that look like check transactions (start with check number)
+                if re.match(r'^\d{3,6}\s', ln):
+                    check_lines.append(ln)
 
         check_txs = self._parse_checks_section(check_lines)
         txs.extend(check_txs)
@@ -1994,9 +2000,16 @@ if "transactions" in st.session_state and st.session_state.transactions:
             with col2:
                 period_input = st.text_input("Period:", value=default_period, key="pl_account_period")
 
-            # ---- Generate P&L text with account codes
+            # ---- Filter out excluded transactions for P&L statement generation
+            active_categorized_transactions = [
+                (tx, cat)
+                for tx, cat in categorized_transactions
+                if not (cat.is_excluded or is_tx_excluded(tx))
+            ]
+
+            # ---- Generate P&L text with account codes (only active transactions)
             pl_text = sc_categorizer.generate_pl_report_with_account_codes(
-                categorized_transactions,
+                active_categorized_transactions,
                 business_name=business_name or "",
                 period=period_input
             )
@@ -2008,10 +2021,10 @@ if "transactions" in st.session_state and st.session_state.transactions:
             st.code(pl_text)
 
             # ---- Validation and Reconciliation Checks
-            validation_result = sc_categorizer.validate_classifications(categorized_transactions)
+            validation_result = sc_categorizer.validate_classifications(active_categorized_transactions)
             reconciliation_result = sc_categorizer.reconcile_totals(
                 get_active_transactions(),
-                categorized_transactions
+                active_categorized_transactions
             )
 
             
