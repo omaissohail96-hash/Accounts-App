@@ -2120,88 +2120,76 @@ if "transactions" in st.session_state and st.session_state.transactions:
                     key = (account_code, account_name)
                     grouped.setdefault(key, []).append(tx)
 
+                # Load all account codes for dropdown (do this once outside the loop)
+                import json
+                from pathlib import Path
+                all_account_options = {}
+                account_file = Path(__file__).parent / 'account_keywords.json'
+                try:
+                    with open(account_file, 'r') as f:
+                        data = json.load(f)
+                        for acc_code, acc_details in data.items():
+                            all_account_options[f"{acc_code} · {acc_details['name']}"] = acc_code
+                except Exception as e:
+                    st.error(f"Error loading account codes: {e}")
+                
                 for (code, name), txs in sorted(grouped.items()):
                     subtotal = sum(abs(t.amount) for t in txs)
                     label = f"{code} · {name} — {cur} {subtotal:,.2f} ({len(txs)} tx)"
 
                     with st.expander(label):
-                        # Special handling for OTHER EXPENSES (999) - allow reassignment
-                        if code == "999":
-                            st.info("💡 Click 'Change Account Code' to reassign transactions from OTHER EXPENSES to specific accounts")
+                        st.info("💡 Click 'Change Account Code' to reassign any transaction to a different account")
+                        
+                        for idx, t in enumerate(txs):
+                            col1, col2, col3 = st.columns([2, 2, 1])
+                            with col1:
+                                st.text(f"{t.date or 'N/A'} | {t.vendor or 'Unknown'}")
+                            with col2:
+                                st.text(f"{cur} {abs(t.amount):,.2f} | {t.description[:40] if t.description else 'N/A'}")
+                            with col3:
+                                # Unique key for each transaction
+                                tx_key = f"change_{code}_{idx}_{t.date}_{abs(t.amount)}"
+                                if st.button("Change", key=tx_key):
+                                    st.session_state[f"editing_{tx_key}"] = True
                             
-                            # Load all account codes for dropdown
-                            import json
-                            from pathlib import Path
-                            all_account_options = {}
-                            account_file = Path(__file__).parent / 'account_keywords.json'
-                            try:
-                                with open(account_file, 'r') as f:
-                                    data = json.load(f)
-                                    for acc_code, acc_details in data.items():
-                                        # Skip 999 (OTHER EXPENSES) - don't allow reassigning to itself
-                                        if acc_code != "999":
-                                            all_account_options[f"{acc_code} · {acc_details['name']}"] = acc_code
-                            except Exception as e:
-                                st.error(f"Error loading account codes: {e}")
-                            
-                            for idx, t in enumerate(txs):
-                                col1, col2, col3 = st.columns([2, 2, 1])
-                                with col1:
-                                    st.text(f"{t.date or 'N/A'} | {t.vendor or 'Unknown'}")
-                                with col2:
-                                    st.text(f"{cur} {abs(t.amount):,.2f} | {t.description[:40] if t.description else 'N/A'}")
-                                with col3:
-                                    # Unique key for each transaction
-                                    tx_key = f"change_999_{idx}_{t.date}_{abs(t.amount)}"
-                                    if st.button("Change", key=tx_key):
-                                        st.session_state[f"editing_{tx_key}"] = True
+                            # Show dropdown if editing this transaction
+                            if st.session_state.get(f"editing_{tx_key}", False):
+                                # Filter out current account code from options
+                                available_options = {k: v for k, v in all_account_options.items() if v != code}
                                 
-                                # Show dropdown if editing this transaction
-                                if st.session_state.get(f"editing_{tx_key}", False):
-                                    selected_display = st.selectbox(
-                                        "Select new account code:",
-                                        options=list(all_account_options.keys()),
-                                        key=f"select_{tx_key}"
-                                    )
-                                    
-                                    col_save, col_cancel = st.columns(2)
-                                    with col_save:
-                                        if st.button("✅ Save", key=f"save_{tx_key}"):
-                                            new_code = all_account_options[selected_display]
-                                            
-                                            # Update in session state transactions
-                                            for session_tx in st.session_state.transactions:
+                                selected_display = st.selectbox(
+                                    "Select new account code:",
+                                    options=list(available_options.keys()),
+                                    key=f"select_{tx_key}"
+                                )
+                                
+                                col_save, col_cancel = st.columns(2)
+                                with col_save:
+                                    if st.button("✅ Save", key=f"save_{tx_key}"):
+                                        new_code = available_options[selected_display]
+                                        
+                                        # Update in session state transactions
+                                        for session_tx in st.session_state.transactions:
+                                            if (session_tx.date == t.date and 
+                                                session_tx.description == t.description and 
+                                                session_tx.amount == t.amount):
+                                                session_tx.account_code = new_code
+                                        
+                                        # Update in filtered transactions if they exist
+                                        if "filtered_transactions" in st.session_state:
+                                            for session_tx in st.session_state.filtered_transactions:
                                                 if (session_tx.date == t.date and 
                                                     session_tx.description == t.description and 
                                                     session_tx.amount == t.amount):
                                                     session_tx.account_code = new_code
-                                            
-                                            # Update in filtered transactions if they exist
-                                            if "filtered_transactions" in st.session_state:
-                                                for session_tx in st.session_state.filtered_transactions:
-                                                    if (session_tx.date == t.date and 
-                                                        session_tx.description == t.description and 
-                                                        session_tx.amount == t.amount):
-                                                        session_tx.account_code = new_code
-                                            
-                                            st.session_state[f"editing_{tx_key}"] = False
-                                            st.success(f"✅ Updated to {selected_display}")
-                                            st.rerun()
-                                    with col_cancel:
-                                        if st.button("❌ Cancel", key=f"cancel_{tx_key}"):
-                                            st.session_state[f"editing_{tx_key}"] = False
-                                            st.rerun()
-                        else:
-                            # Regular display for other account codes
-                            detail_df = pd.DataFrame([{
-                                "Date": t.date or "",
-                                "Vendor": t.vendor or "",
-                                "Amount": f"{cur} {abs(t.amount):,.2f}",
-                                "Description": t.description,
-                                "Needs Review": "⚠ Yes" if t.needs_review else "✅ No"
-                            } for t in txs])
-
-                            st.dataframe(detail_df, use_container_width=True, hide_index=True)
+                                        
+                                        st.session_state[f"editing_{tx_key}"] = False
+                                        st.success(f"✅ Updated to {selected_display}")
+                                        st.rerun()
+                                with col_cancel:
+                                    if st.button("❌ Cancel", key=f"cancel_{tx_key}"):
+                                        st.session_state[f"editing_{tx_key}"] = False
+                                        st.rerun()
 
                 # ---- CSV Export
                 csv_data = summary_df.to_csv(index=False)
