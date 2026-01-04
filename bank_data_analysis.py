@@ -1473,6 +1473,7 @@ class ReportGenerator:
             {'Category': 'NET INCOME', 'Amount ($)': net}
         ])
 
+
 # ----------------------------
 # Streamlit UI
 # ----------------------------
@@ -1492,7 +1493,19 @@ def filter_atm_withdrawals(transactions: List[Transaction]) -> List[Transaction]
     ]
 
 
+def get_active_transactions():
+    """
+    Date filter + Exclude dono apply karta hai
+    """
+    txs = st.session_state.get(
+        "filtered_transactions",
+        st.session_state.transactions
+    )
+    return [t for t in txs if not getattr(t, "is_excluded", False)]
 
+    return [t for t in txs if not getattr(t, "is_excluded", False)]
+def is_tx_excluded(tx):
+    return getattr(tx, "is_excluded", False)
 with st.sidebar:
     st.header("Settings")
     sort_by = st.selectbox("Sort vendor summaries by", ["Subtotal (desc)", "Transaction Count (desc)"])
@@ -1707,9 +1720,8 @@ if all_transactions:
         
 # Dashboard (same UI as before)
 if "transactions" in st.session_state and st.session_state.transactions:
-    transactions: List[Transaction] = st.session_state.get(
-        'filtered_transactions', st.session_state.transactions
-    )
+    transactions: List[Transaction] = get_active_transactions()
+
 
     rg = ReportGenerator()
     stats = rg.generate_summary_statistics(transactions)
@@ -1738,8 +1750,8 @@ if "transactions" in st.session_state and st.session_state.transactions:
     )
 
 
-    computed_deposits = sum(t.amount for t in transactions if t.amount > 0)
-    computed_withdrawals = sum(-t.amount for t in transactions if t.amount < 0)
+    computed_deposits = sum(t.amount for t in transactions if t.amount > 0 and not is_tx_excluded(t))
+    computed_withdrawals = sum(-t.amount for t in transactions if t.amount < 0 and not is_tx_excluded(t))
     if abs(computed_deposits - stats['Total Deposit Amount']) > 0.001 or abs(computed_withdrawals - stats['Total Withdrawal Amount']) > 0.001:
         st.warning("Reconciliation mismatch: using computed sums as source of truth.")
         stats['Total Deposit Amount'] = float(computed_deposits)
@@ -1787,7 +1799,9 @@ if "transactions" in st.session_state and st.session_state.transactions:
         else:
             st.dataframe(df, use_container_width=True, hide_index=True)
             st.subheader("👉 Vendor Transaction Details")
-            deps = [t for t in transactions if t.amount > 0]
+            deps = [t for t in st.session_state.get(
+                "filtered_transactions", st.session_state.transactions
+            ) if t.amount > 0]
             grouped = {}
             for t in deps:
                 key = t.vendor or "UNKNOWN"
@@ -1797,11 +1811,11 @@ if "transactions" in st.session_state and st.session_state.transactions:
                 cnt = len(items)
                 with st.expander(f"{vendor}"):
                     details = pd.DataFrame([{
-                        "Date": it.date or "",
+                        "Date": f"~~{it.date}~~" if is_tx_excluded(it) else it.date,
                         "Amount": f"{cur} {it.amount:,.2f}",
-                        "Description": it.description,
+                        "Description": f"~~{it.description}~~" if is_tx_excluded(it) else it.description,
                         "Needs Review": "⚠ Yes" if it.needs_review else "✅ No"
-                    } for it in items])
+                    } for it in items if not is_tx_excluded(it)])
                     st.dataframe(details, use_container_width=True, hide_index=True)
 
     elif selected_tab == 1:  # Withdrawals tab
@@ -1813,7 +1827,9 @@ if "transactions" in st.session_state and st.session_state.transactions:
         else:
             st.dataframe(df, use_container_width=True, hide_index=True)
             st.subheader("👉 Vendor Transaction Details")
-            wds = [t for t in transactions if t.amount < 0]
+            wds = [t for t in st.session_state.get(
+                "filtered_transactions", st.session_state.transactions
+            ) if t.amount < 0]
             grouped = {}
             for t in wds:
                 key = t.vendor or "UNKNOWN"
@@ -1823,17 +1839,17 @@ if "transactions" in st.session_state and st.session_state.transactions:
                 cnt = len(items)
                 with st.expander(f"{vendor}"):
                     details = pd.DataFrame([{
-                        "Date": it.date or "",
-                        "Amount": f"{cur} {abs(it.amount):,.2f}",
-                        "Description": it.description,
-                        "Needs Review": "⚠ Yes" if it.needs_review else "✅ No"
-                    } for it in items])
+                    "Date": f"~~{it.date}~~" if is_tx_excluded(it) else it.date,
+                    "Amount": f"{cur} {abs(it.amount):,.2f}",
+                    "Description": f"~~{it.description}~~" if is_tx_excluded(it) else it.description,
+                    "Needs Review": "⚠ Yes" if it.needs_review else "✅ No"
+                } for it in items if not is_tx_excluded(it)])
                     st.dataframe(details, use_container_width=True, hide_index=True)
 
     elif selected_tab == 2:  # P&L tab
         st.subheader("Profit & Loss")
         # Regenerate P&L with filtered transactions
-        filtered_pl_df = rg.generate_pl_report(transactions)
+        filtered_pl_df = rg.generate_pl_report(get_active_transactions())
         st.dataframe(filtered_pl_df, use_container_width=True, hide_index=True)
 
     elif selected_tab == 3:  # All Transactions tab
@@ -1982,7 +1998,11 @@ if "transactions" in st.session_state and st.session_state.transactions:
 
             # ---- Validation and Reconciliation Checks
             validation_result = sc_categorizer.validate_classifications(categorized_transactions)
-            reconciliation_result = sc_categorizer.reconcile_totals(transactions, categorized_transactions)
+            reconciliation_result = sc_categorizer.reconcile_totals(
+                get_active_transactions(),
+                categorized_transactions
+            )
+
             
             # Display validation warnings
             if validation_result["error_count"] > 0 or validation_result["warning_count"] > 0:
@@ -2141,7 +2161,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
                         st.info("💡 Click 'Change Account Code' to reassign any transaction to a different account")
                         
                         for idx, t in enumerate(txs):
-                            col1, col2, col3 = st.columns([2, 2, 1])
+                            col1, col2, col3, col4 = st.columns([2, 2, 1 , 1])
                             with col1:
                                 st.text(f"{t.date or 'N/A'} | {t.vendor or 'Unknown'}")
                             with col2:
@@ -2189,6 +2209,27 @@ if "transactions" in st.session_state and st.session_state.transactions:
                                 with col_cancel:
                                     if st.button("❌ Cancel", key=f"cancel_{tx_key}"):
                                         st.session_state[f"editing_{tx_key}"] = False
+                                        st.rerun()
+                            with col4:
+                                if not is_tx_excluded(t):
+                                    if st.button("🚫 Exclude", key=f"exclude_{code}_{idx}_{t.date}_{t.amount}"):
+                                        for master_tx in st.session_state.transactions:
+                                            if (
+                                                master_tx.date == t.date and
+                                                master_tx.description == t.description and
+                                                master_tx.amount == t.amount
+                                            ):
+                                                master_tx.is_excluded = True
+                                        st.rerun()
+                                else:
+                                    if st.button("↩ Include", key=f"include_{code}_{idx}_{t.date}_{t.amount}"):
+                                        for master_tx in st.session_state.transactions:
+                                            if (
+                                                master_tx.date == t.date and
+                                                master_tx.description == t.description and
+                                                master_tx.amount == t.amount
+                                            ):
+                                                master_tx.is_excluded = False
                                         st.rerun()
 
                 # ---- CSV Export
