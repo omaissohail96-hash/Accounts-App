@@ -950,31 +950,25 @@ class FallbackStatementParser:
         txs = []
 
         for ln in lines:
-            # Expected Chase format:
-            # CHECKNO [blank] DATE AMOUNT
-            m = re.match(
-                r'^(\d{3,6})\s+.*?(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\s+(\d{1,3}(?:,\d{3})*\.\d{2})$',
-                ln
-            )
+            # Chase checks start with check number, any text, then amount
+            # Pattern: CHECKNO [anything] AMOUNT
+            m = re.match(r'^(\d{3,6})\s+.*?(\d{1,3}(?:,\d{3})*\.\d{2})$', ln)
             if not m:
                 continue
-
+            
             check_no = m.group(1)
-            date_raw = m.group(2)
-            amt_raw = m.group(3)
-
-            date_norm = self._parse_date(date_raw)
+            amt_raw = m.group(2)
+            
             amt = self._parse_amount(amt_raw)
-
             if amt is None:
                 continue
 
             txs.append(Transaction(
-                date=date_norm,                           # ✅ FIXED
+                date="",  # Chase check dates are separate column
                 transaction_type="withdrawal",
                 vendor=f"Check #{check_no}",
                 amount=-abs(amt),
-                description=f"Check #{check_no}",          # ✅ CLEAN DESCRIPTION
+                description=ln,  # Full line as description
                 raw_line=ln,
                 section="CHECKS",
                 needs_review=False
