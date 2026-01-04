@@ -248,6 +248,9 @@ def _clean_description(desc: str, vendor: str = "", transaction_type: str = "") 
     Removes technical codes, IDs, timestamps, and trace numbers.
     Returns a clean, natural language description that anyone can understand.
     """
+    if transaction_type == "withdrawal" and vendor.startswith("Check #"):
+        return vendor
+
     if not desc:
         if transaction_type == "deposit":
             return f"Money received from {vendor}" if vendor else "Money received"
@@ -940,27 +943,39 @@ class FallbackStatementParser:
     def _parse_checks_section(self, lines: List[str]) -> List[Transaction]:
         txs = []
 
-        # --- HARD CHECKS PASS (page-break safe) ---
         for ln in lines:
-            # Chase checks start with check number
-            m = re.match(r'^(\d{3,6})\s+.*?(\d{1,3}(?:,\d{3})*\.\d{2})$', ln)
-            if m:
-                amt = self._parse_amount(m.group(2))
-                if amt is None:
-                    continue
+            # Expected Chase format:
+            # CHECKNO [blank] DATE AMOUNT
+            m = re.match(
+                r'^(\d{3,6})\s+.*?(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\s+(\d{1,3}(?:,\d{3})*\.\d{2})$',
+                ln
+            )
+            if not m:
+                continue
 
-                txs.append(Transaction(
-                    date="",  # Chase check dates are separate column
-                    transaction_type="withdrawal",
-                    vendor=f"Check #{m.group(1)}",
-                    amount=-abs(amt),
-                    description=ln,
-                    raw_line=ln,
-                    section="CHECKS",
-                    needs_review=False
-                ))
+            check_no = m.group(1)
+            date_raw = m.group(2)
+            amt_raw = m.group(3)
+
+            date_norm = self._parse_date(date_raw)
+            amt = self._parse_amount(amt_raw)
+
+            if amt is None:
+                continue
+
+            txs.append(Transaction(
+                date=date_norm,                           # ✅ FIXED
+                transaction_type="withdrawal",
+                vendor=f"Check #{check_no}",
+                amount=-abs(amt),
+                description=f"Check #{check_no}",          # ✅ CLEAN DESCRIPTION
+                raw_line=ln,
+                section="CHECKS",
+                needs_review=False
+            ))
 
         return txs
+
 
 
 # ----------------------------
