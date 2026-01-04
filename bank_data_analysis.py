@@ -1954,15 +1954,19 @@ if "transactions" in st.session_state and st.session_state.transactions:
             st.session_state.transactions
         )
 
-        filtered_tx_keys = {
+        # Get only non-excluded transactions
+        active_transactions = get_active_transactions()
+
+        active_tx_keys = {
             (t.date, t.description, t.amount)
-            for t in filtered_transactions
+            for t in active_transactions
         }
 
+        # Rebuild categorized transactions using active tx
         categorized_transactions = [
             (tx, cat)
             for tx, cat in all_categorized
-            if (tx.date, tx.description, tx.amount) in filtered_tx_keys
+            if (tx.date, tx.description, tx.amount) in active_tx_keys
         ]
 
 
