@@ -1477,6 +1477,9 @@ class ReportGenerator:
 # Streamlit UI
 # ----------------------------
 st.set_page_config(page_title="Bank Statement Analyzer (Hybrid)", layout="wide")
+
+st.markdown("<h3 style='text-align: center;'>Prototype v1.0</h3>", unsafe_allow_html=True)
+
 st.title("💼 Bank Statement Analyzer")
 
 st.markdown(
@@ -1501,61 +1504,78 @@ credit_card_file = st.file_uploader(
     key="credit_card"
 )
 
-if uploaded:
-    st.info(f"File: {uploaded.name} — {uploaded.size/1024:.1f} KB")
+if uploaded or credit_card_file:
+    if uploaded:
+        st.info(f"Bank Statement: {uploaded.name} — {uploaded.size/1024:.1f} KB")
+    if credit_card_file:
+        st.info(f"Credit Card Statement: {credit_card_file.name} — {credit_card_file.size/1024:.1f} KB")
+    
     currency = st.selectbox("Currency", ["PKR", "USD", "EUR", "GBP", "AED", "CAD", "AUD"], index=1)
-    include_opening_balance = st.checkbox(
-    "Include Opening Balance",
-    value=False,
-    help="Adds opening balance as a deposit before transactions"
-)
+    
+    # Only show opening balance checkbox if bank statement is uploaded
+    include_opening_balance = False
+    if uploaded:
+        include_opening_balance = st.checkbox(
+            "Include Opening Balance",
+            value=False,
+            help="Adds opening balance as a deposit before transactions"
+        )
 
     if st.button("Process Statement"):
         with st.spinner("Parsing & processing..."):
-            file_bytes = uploaded.read()
-            dp = DocumentParser()
-            lines, ok, unreadable = dp.parse_document(file_bytes, uploaded.name)
-            if not ok or len(lines) < 1:
-                st.error("Could not read text from file.")
-                if unreadable:
-                    st.warning(f"Unreadable pages: {unreadable}")
-                st.stop()
+            all_txs = []
+            meta = {}
+            
+            # Process main bank statement if uploaded
+            if uploaded:
+                file_bytes = uploaded.read()
+                dp = DocumentParser()
+                lines, ok, unreadable = dp.parse_document(file_bytes, uploaded.name)
+                if not ok or len(lines) < 1:
+                    st.error("Could not read text from bank statement file.")
+                    if unreadable:
+                        st.warning(f"Unreadable pages: {unreadable}")
+                else:
+                    # First try Chase-optimized fallback
+                    fallback = FallbackStatementParser(include_opening_balance=include_opening_balance)
+                    bank_txs, meta = fallback.parse_statement(lines)
+                    all_txs.extend(bank_txs)
 
-            # First try Chase-optimized fallback
-            fallback = FallbackStatementParser(include_opening_balance=include_opening_balance)
-            bank_txs, meta = fallback.parse_statement(lines)
+            # Process credit card statement if uploaded
+            if credit_card_file is not None:
+                cc_file_bytes = credit_card_file.read()
+                dp_cc = DocumentParser()
+                cc_lines, ok, unreadable = dp_cc.parse_document(cc_file_bytes, credit_card_file.name)
+                
+                if not ok or len(cc_lines) < 1:
+                    st.error("Could not read text from credit card statement file.")
+                    if unreadable:
+                        st.warning(f"Unreadable pages: {unreadable}")
+                else:
+                    cc_txs = CreditCardParser().parse(cc_lines)
 
-            all_txs = list(bank_txs.copy())
+                    # FORCE credit card as withdrawals
+                    for tx in cc_txs:
+                        tx.transaction_type = "withdrawal"
+                        tx.amount = -abs(tx.amount)
+
+                    all_txs.extend(cc_txs)
+
             valid_dates = [
                 _md_key(tx.date)
                 for tx in all_txs
                 if _md_key(tx.date) is not None
             ]
-            # ---- CREDIT CARD SUPPORT ----
-            if credit_card_file is not None:
-                cc_lines, ok, _ = DocumentParser().parse_document(
-                    credit_card_file.read(),
-                    credit_card_file.name
-                )
-
-                cc_txs = CreditCardParser().parse(cc_lines)
-
-                # FORCE credit card as withdrawals
-                for tx in cc_txs:
-                    tx.transaction_type = "withdrawal"
-                    tx.amount = -abs(tx.amount)
-
-                all_txs.extend(cc_txs)
-
 
             # If nothing extracted or too few rows, try UniversalParser conservative fallback
             if not all_txs or len(all_txs) < 3:
-                up = UniversalParser()
-                u_txs = up.parse(lines)
-                if u_txs:
-                    # prefer universal only if it returns something meaningful
-                    transactions = u_txs
-                    meta = {"parsed_from": "universal_fallback", "transactions_extracted": len(transactions)}
+                if uploaded:  # Only try universal parser if we have a bank statement
+                    up = UniversalParser()
+                    u_txs = up.parse(lines)
+                    if u_txs:
+                        # prefer universal only if it returns something meaningful
+                        all_txs = u_txs
+                        meta = {"parsed_from": "universal_fallback", "transactions_extracted": len(all_txs)}
 
             parsed_from = meta.get("parsed_from", "fallback")
 
