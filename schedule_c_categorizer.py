@@ -1378,11 +1378,13 @@ class ScheduleCCategorizer:
             if cat.is_excluded:
                 continue
 
+            # Determine if transaction is income (always needed for amount calculation)
+            is_income_tx = tx.amount > 0
+            
             # Check if account_code is already set on transaction (from manual reassignment)
             if hasattr(tx, 'account_code') and tx.account_code:
                 acct_code = tx.account_code
             else:
-                is_income_tx = tx.amount > 0
                 acct_code, acct_name = mapper.get_account_code(
                     tx.vendor,
                     tx.description,

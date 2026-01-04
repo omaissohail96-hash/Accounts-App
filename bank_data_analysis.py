@@ -12,6 +12,7 @@ import tempfile
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from typing import List, Tuple, Dict, Any, Optional
+from pathlib import Path
 
 import pdfplumber
 import pandas as pd
@@ -1490,6 +1491,109 @@ class ReportGenerator:
 
 
 # ----------------------------
+# Custom Rules Management
+# ----------------------------
+def save_custom_rules(rules: list):
+    """Save custom rules to JSON file"""
+    rules_file = Path(__file__).parent / 'custom_rules.json'
+    try:
+        with open(rules_file, 'w') as f:
+            json.dump(rules, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving custom rules: {e}")
+
+def load_custom_rules() -> list:
+    """Load custom rules from JSON file"""
+    rules_file = Path(__file__).parent / 'custom_rules.json'
+    try:
+        if rules_file.exists():
+            with open(rules_file, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Error loading custom rules: {e}")
+    return []
+
+def reapply_custom_rules():
+    """Reapply custom rules to all existing transactions in session state"""
+    if 'transactions' not in st.session_state or not st.session_state.transactions:
+        return
+    
+    from account_code_mapper import AccountCodeMapper
+    mapper = AccountCodeMapper()
+    custom_rules = st.session_state.get('custom_rules', [])
+    
+    # Clear all custom account codes first (reset to default mapping)
+    for tx in st.session_state.transactions:
+        if hasattr(tx, 'account_code'):
+            delattr(tx, 'account_code')
+    
+    if 'filtered_transactions' in st.session_state:
+        for tx in st.session_state.filtered_transactions:
+            if hasattr(tx, 'account_code'):
+                delattr(tx, 'account_code')
+    
+    # Now apply custom rules if any exist
+    if custom_rules:
+        # Reapply rules to all transactions
+        for tx in st.session_state.transactions:
+            text = f"{tx.vendor or ''} {tx.description or ''}".lower()
+            
+            # Check if any custom rule matches
+            for rule in custom_rules:
+                keyword = rule['keyword'].lower()
+                if keyword in text:
+                    # Update the transaction's account code
+                    tx.account_code = rule['account_code']
+                    break  # Stop at first match
+        
+        # Also update filtered transactions if they exist
+        if 'filtered_transactions' in st.session_state:
+            for tx in st.session_state.filtered_transactions:
+                text = f"{tx.vendor or ''} {tx.description or ''}".lower()
+                for rule in custom_rules:
+                    keyword = rule['keyword'].lower()
+                    if keyword in text:
+                        tx.account_code = rule['account_code']
+                        break
+    
+    # Regenerate categorized transactions if they exist
+    if 'categorized_transactions' in st.session_state:
+        from schedule_c_categorizer import ScheduleCCategorizer
+        sc_categorizer = ScheduleCCategorizer()
+        
+        # Get transactions to recategorize
+        transactions = st.session_state.get('filtered_transactions', st.session_state.transactions)
+        
+        # Recategorize with updated account codes
+        categorized_transactions = sc_categorizer.categorize_transactions(transactions)
+        st.session_state.categorized_transactions = categorized_transactions
+        
+        # Regenerate Schedule C dataframe
+        schedule_c_df = sc_categorizer.generate_schedule_c_dataframe(categorized_transactions)
+        st.session_state.schedule_c_df = schedule_c_df
+        
+        # Regenerate P&L statement text if it exists
+        if 'pl_statement_text' in st.session_state:
+            # Filter out excluded transactions
+            active_categorized = [
+                (tx, cat)
+                for tx, cat in categorized_transactions
+                if not (cat.is_excluded or getattr(tx, 'is_excluded', False))
+            ]
+            
+            # Regenerate P&L text
+            business_name = ""  # Will use default
+            from datetime import datetime
+            period = datetime.now().strftime("%B %Y")
+            
+            pl_text = sc_categorizer.generate_pl_report_with_account_codes(
+                active_categorized,
+                business_name=business_name,
+                period=period
+            )
+            st.session_state.pl_statement_text = pl_text
+
+# ----------------------------
 # Streamlit UI
 # ----------------------------
 st.set_page_config(page_title="Bank Statement Analyzer (Hybrid)", layout="wide")
@@ -1531,6 +1635,10 @@ credit_card_file = st.file_uploader(
     type=["pdf"],
     key="credit_card"
 )
+
+# Initialize custom rules in session state (load from file)
+if 'custom_rules' not in st.session_state:
+    st.session_state.custom_rules = load_custom_rules()
 
 if uploaded or credit_card_file:
     if uploaded:
@@ -1780,9 +1888,9 @@ if "transactions" in st.session_state and st.session_state.transactions:
     base_labels = ["💰 Deposits", "💸 Withdrawals", "📈 P&L", "📋 All Transactions"]
     # Insert Schedule C tab before the final P&L (Account Codes) tab when enabled
     if SHOW_SCHEDULE_C:
-        labels = base_labels + ["📄 Schedule C", "📊 P&L (Account Codes)"]
+        labels = base_labels + ["📄 Schedule C", "📊 P&L (Account Codes)", "⚙️ Custom Rules"]
     else:
-        labels = base_labels + ["📊 P&L (Account Codes)"]
+        labels = base_labels + ["📊 P&L (Account Codes)", "⚙️ Custom Rules"]
 
     # Use query params to preserve active tab across reruns
     try:
@@ -2078,7 +2186,8 @@ if "transactions" in st.session_state and st.session_state.transactions:
                         tx.vendor, 
                         tx.description, 
                         is_income=is_income,
-                        transaction_type=tx.transaction_type
+                        transaction_type=tx.transaction_type,
+                        custom_rules=st.session_state.get('custom_rules', [])
                     )
                     
                     # Ensure account code matches transaction type
@@ -2089,7 +2198,8 @@ if "transactions" in st.session_state and st.session_state.transactions:
                             tx.vendor,
                             tx.description,
                             is_income=False,
-                            transaction_type="withdrawal"
+                            transaction_type="withdrawal",
+                            custom_rules=st.session_state.get('custom_rules', [])
                         )
                     
                     # If deposit but got expense code, force to income code
@@ -2141,7 +2251,8 @@ if "transactions" in st.session_state and st.session_state.transactions:
                             tx.vendor, 
                             tx.description, 
                             is_income=is_income,
-                            transaction_type=tx.transaction_type
+                            transaction_type=tx.transaction_type,
+                            custom_rules=st.session_state.get('custom_rules', [])
                         )
                         
                         # Ensure account code matches transaction type
@@ -2150,7 +2261,8 @@ if "transactions" in st.session_state and st.session_state.transactions:
                                 tx.vendor,
                                 tx.description,
                                 is_income=False,
-                                transaction_type="withdrawal"
+                                transaction_type="withdrawal",
+                                custom_rules=st.session_state.get('custom_rules', [])
                             )
                         if tx.transaction_type == "deposit" and not account_code.startswith('6'):
                             account_code, account_name = ("601", "SALES")
@@ -2265,6 +2377,95 @@ if "transactions" in st.session_state and st.session_state.transactions:
                     file_name=f"PL_Account_Codes_{period_input.replace(' ', '_')}.csv",
                     mime="text/csv"
                 )
+    
+    elif selected_tab == (6 if SHOW_SCHEDULE_C else 5):  # Custom Rules tab
+        st.subheader("⚙️ Custom Account Code Rules")
+        st.markdown("Define custom rules to automatically assign specific vendors or keywords to account codes.")
+        
+        # Load all account codes for dropdown
+        import json
+        from pathlib import Path
+        all_account_options = {}
+        account_file = Path(__file__).parent / 'account_keywords.json'
+        try:
+            with open(account_file, 'r') as f:
+                data = json.load(f)
+                for acc_code, acc_details in data.items():
+                    all_account_options[f"{acc_code} · {acc_details['name']}"] = acc_code
+        except Exception as e:
+            st.error(f"Error loading account codes: {e}")
+        
+        # Add new rule form
+        st.subheader("➕ Add New Rule")
+        col1, col2, col3 = st.columns([3, 3, 1])
+        
+        with col1:
+            rule_keyword = st.text_input(
+                "Keyword/Vendor Name",
+                placeholder="e.g., Amazon, Starbucks, Office Supplies",
+                key="new_rule_keyword"
+            )
+        
+        with col2:
+            rule_account = st.selectbox(
+                "Account Code",
+                options=list(all_account_options.keys()),
+                key="new_rule_account"
+            )
+        
+        with col3:
+            st.write("")  # Spacing
+            st.write("")  # Spacing
+            if st.button("➕ Add", key="add_rule_btn"):
+                if rule_keyword.strip():
+                    account_code = all_account_options[rule_account]
+                    # Check for duplicates
+                    existing = [r for r in st.session_state.custom_rules if r['keyword'].lower() == rule_keyword.lower()]
+                    if existing:
+                        st.warning(f"Rule for '{rule_keyword}' already exists!")
+                    else:
+                        st.session_state.custom_rules.append({
+                            'keyword': rule_keyword.strip(),
+                            'account_code': account_code,
+                            'account_display': rule_account
+                        })
+                        save_custom_rules(st.session_state.custom_rules)
+                        # Reapply rules to existing transactions
+                        reapply_custom_rules()
+                        st.success(f"✅ Rule added and applied to existing transactions: '{rule_keyword}' → {rule_account}")
+                        st.rerun()
+                else:
+                    st.error("Please enter a keyword/vendor name")
+        
+        # Display existing rules
+        st.subheader("📋 Active Rules")
+        if st.session_state.custom_rules:
+            st.info(f"Total rules: {len(st.session_state.custom_rules)}")
+            
+            for idx, rule in enumerate(st.session_state.custom_rules):
+                col1, col2, col3 = st.columns([3, 4, 1])
+                with col1:
+                    st.text(f"🔍 {rule['keyword']}")
+                with col2:
+                    st.text(f"→ {rule['account_display']}")
+                with col3:
+                    if st.button("🗑️", key=f"delete_rule_{idx}"):
+                        st.session_state.custom_rules.pop(idx)
+                        save_custom_rules(st.session_state.custom_rules)
+                        # Reapply remaining rules to existing transactions
+                        reapply_custom_rules()
+                        st.success("Rule deleted and transactions updated!")
+                        st.rerun()
+        else:
+            st.info("No custom rules defined yet. Add rules above to automatically categorize transactions.")
+        
+        st.markdown("---")
+        st.markdown("**💡 How it works:**")
+        st.markdown("- Custom rules are checked first during transaction categorization")
+        st.markdown("- Rules are applied immediately to all current transactions when added or deleted")
+        st.markdown("- If a transaction's vendor or description contains your keyword, it will be assigned to your chosen account code")
+        st.markdown("- Rules are case-insensitive and match partial text")
+        st.markdown("- Rules are saved automatically and persist across sessions")
     
     # Downloads
     st.header("📥 Download")

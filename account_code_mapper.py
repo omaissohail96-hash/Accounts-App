@@ -168,23 +168,36 @@ class AccountCodeMapper:
         vendor: Optional[str] = None,
         description: Optional[str] = None,
         is_income: bool = False,
-        transaction_type: Optional[str] = None
+        transaction_type: Optional[str] = None,
+        custom_rules: Optional[list] = None
     ) -> tuple:
         """
         Direction-first account mapping.
 
         Rules enforced here:
-        1) If transaction direction indicates withdrawal (is_income False) => ALWAYS return an expense
+        1) Check custom user-defined rules first (if provided)
+        2) If transaction direction indicates withdrawal (is_income False) => ALWAYS return an expense
            - Keyword matches that map to income are ignored
            - Default fallback: ("999", "OTHER EXPENSES")
-        2) If transaction direction indicates deposit (is_income True) => ALWAYS return an income
+        3) If transaction direction indicates deposit (is_income True) => ALWAYS return an income
            - Keyword matches that map to expenses are ignored
            - Default fallback: ("601", "SALES")
-        3) Defensive: if explicit words in the text strongly indicate deposit/withdrawal, they override a wrong is_income flag
-        4) Keyword JSON logic is preserved and used only to pick an account within the chosen direction
+        4) Defensive: if explicit words in the text strongly indicate deposit/withdrawal, they override a wrong is_income flag
+        5) Keyword JSON logic is preserved and used only to pick an account within the chosen direction
         """
 
         text = f"{vendor or ''} {description or ''}".lower()
+        
+        # PRIORITY 1: Check custom user-defined rules first
+        if custom_rules:
+            for rule in custom_rules:
+                keyword = rule['keyword'].lower()
+                if keyword in text:
+                    account_code = rule['account_code']
+                    # Get account name from loaded rules
+                    account_name = self.keyword_rules.get(account_code, {}).get('name', 'UNKNOWN')
+                    logger.info(f"✅ Custom rule matched: '{text[:50]}...' → {account_code} · {account_name} (rule: '{rule['keyword']}')")
+                    return (account_code, account_name)
 
         # Defensive detection of explicit direction words
         # include multi-word phrases that indicate money leaving the account
