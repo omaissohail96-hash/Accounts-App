@@ -1829,8 +1829,9 @@ if "transactions" in st.session_state and st.session_state.transactions:
                         "Date": f"~~{it.date}~~" if is_tx_excluded(it) else it.date,
                         "Amount": f"{cur} {it.amount:,.2f}",
                         "Description": f"~~{it.description}~~" if is_tx_excluded(it) else it.description,
-                        "Needs Review": "⚠ Yes" if it.needs_review else "✅ No"
-                    } for it in items if not is_tx_excluded(it)])
+                        "Needs Review": "⚠ Yes" if it.needs_review else "✅ No",
+                        "Status": "🚫 Excluded" if is_tx_excluded(it) else "✅ Active"
+                    } for it in items])
                     st.dataframe(details, use_container_width=True, hide_index=True)
 
     elif selected_tab == 1:  # Withdrawals tab
@@ -1857,8 +1858,9 @@ if "transactions" in st.session_state and st.session_state.transactions:
                     "Date": f"~~{it.date}~~" if is_tx_excluded(it) else it.date,
                     "Amount": f"{cur} {abs(it.amount):,.2f}",
                     "Description": f"~~{it.description}~~" if is_tx_excluded(it) else it.description,
-                    "Needs Review": "⚠ Yes" if it.needs_review else "✅ No"
-                } for it in items if not is_tx_excluded(it)])
+                    "Needs Review": "⚠ Yes" if it.needs_review else "✅ No",
+                    "Status": "🚫 Excluded" if is_tx_excluded(it) else "✅ Active"
+                } for it in items])
                     st.dataframe(details, use_container_width=True, hide_index=True)
 
     elif selected_tab == 2:  # P&L tab
@@ -1870,11 +1872,12 @@ if "transactions" in st.session_state and st.session_state.transactions:
     elif selected_tab == 3:  # All Transactions tab
         st.subheader("All Transactions")
         all_df = pd.DataFrame([{
-            "Date": t.date or "",
+            "Date": f"~~{t.date}~~" if is_tx_excluded(t) else (t.date or ""),
             "Type": t.transaction_type,
-            "Vendor": t.vendor,
+            "Vendor": f"~~{t.vendor}~~" if is_tx_excluded(t) else t.vendor,
             "Amount": f"{cur} {t.amount:,.2f}",
-            "Description": t.description
+            "Description": f"~~{t.description}~~" if is_tx_excluded(t) else t.description,
+            "Status": "🚫 Excluded" if is_tx_excluded(t) else "✅ Active"
         } for t in transactions])
         st.dataframe(all_df, use_container_width=True, hide_index=True)
     
@@ -1954,20 +1957,9 @@ if "transactions" in st.session_state and st.session_state.transactions:
             st.session_state.transactions
         )
 
-        # Get only non-excluded transactions
-        active_transactions = get_active_transactions()
-
-        active_tx_keys = {
-            (t.date, t.description, t.amount)
-            for t in active_transactions
-        }
-
-        # Rebuild categorized transactions using active tx
-        categorized_transactions = [
-            (tx, cat)
-            for tx, cat in all_categorized
-            if (tx.date, tx.description, tx.amount) in active_tx_keys
-        ]
+        # Use all transactions (including excluded ones)
+        # We'll handle excluded status in the display logic
+        categorized_transactions = all_categorized
 
 
         if not categorized_transactions or not transactions:
@@ -2053,8 +2045,8 @@ if "transactions" in st.session_state and st.session_state.transactions:
             
             rows = []
             for tx, cat in categorized_transactions:
-                if cat.is_excluded:
-                    continue
+                # Keep excluded transactions but mark them
+                is_excluded_tx = cat.is_excluded or is_tx_excluded(tx)
 
                 # DATA-DRIVEN CLASSIFICATION: Use transaction_type as source of truth
                 # Deposits → Income, Withdrawals → Expenses
@@ -2101,12 +2093,13 @@ if "transactions" in st.session_state and st.session_state.transactions:
                 rows.append({
                     "Account Code": account_code,
                     "Account Name": account_name,
-                    "Date": tx.date or "",
-                    "Vendor": tx.vendor or "",
+                    "Date": f"~~{tx.date}~~" if is_excluded_tx else (tx.date or ""),
+                    "Vendor": f"~~{tx.vendor}~~" if is_excluded_tx else (tx.vendor or ""),
                     "Amount": abs(tx.amount),
                     "Type": "Income" if is_income else "Expense",
                     "Transaction Type": tx.transaction_type.title(),
-                    "Needs Review": "⚠ Yes" if tx.needs_review else "✅ No"
+                    "Needs Review": "⚠ Yes" if tx.needs_review else "✅ No",
+                    "Status": "🚫 Excluded" if is_excluded_tx else "✅ Active"
                 })
 
             if rows:
@@ -2119,8 +2112,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
                 st.subheader("💼 By Account Code")
                 grouped = {}
                 for tx, cat in categorized_transactions:
-                    if cat.is_excluded:
-                        continue
+                    # Include all transactions in grouping
                     
                     # Check if account_code is already set on transaction (from manual reassignment)
                     if hasattr(tx, 'account_code') and tx.account_code:
@@ -2173,8 +2165,15 @@ if "transactions" in st.session_state and st.session_state.transactions:
                     st.error(f"Error loading account codes: {e}")
                 
                 for (code, name), txs in sorted(grouped.items()):
-                    subtotal = sum(abs(t.amount) for t in txs)
-                    label = f"{code} · {name} — {cur} {subtotal:,.2f} ({len(txs)} tx)"
+                    # Calculate subtotal only for active (non-excluded) transactions
+                    active_txs = [t for t in txs if not is_tx_excluded(t)]
+                    excluded_txs = [t for t in txs if is_tx_excluded(t)]
+                    subtotal = sum(abs(t.amount) for t in active_txs)
+                    total_count = len(txs)
+                    active_count = len(active_txs)
+                    label = f"{code} · {name} — {cur} {subtotal:,.2f} ({active_count}/{total_count} tx)"
+                    if excluded_txs:
+                        label += f" [{len(excluded_txs)} excluded]"
 
                     with st.expander(label):
                         st.info("💡 Click 'Change Account Code' to reassign any transaction to a different account")
