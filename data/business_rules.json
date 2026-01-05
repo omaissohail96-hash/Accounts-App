@@ -1,0 +1,23 @@
+{
+  "36307feb-19e4-43e1-9da8-b6e4cbb99028": {
+    "East and West": {
+      "rules": [
+        {
+          "keyword": "ATM Withdrawal",
+          "account_code": "807",
+          "account_display": "807 \u00b7 TEMPORARY HELP"
+        },
+        {
+          "keyword": "Aubreystallion",
+          "account_code": "928",
+          "account_display": "928 \u00b7 RENT"
+        },
+        {
+          "keyword": "Check",
+          "account_code": "801",
+          "account_display": "801 \u00b7 SALARIES-OFFICERS"
+        }
+      ]
+    }
+  }
+}
