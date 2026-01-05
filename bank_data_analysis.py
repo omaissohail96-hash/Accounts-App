@@ -1485,42 +1485,57 @@ class ReportGenerator:
         net = s['Net Income']
         return pd.DataFrame([
             {'Category': 'Total Income', 'Amount ($)': total_income},
-            {'Category': 'Total Expenses', 'Amount ($)': -total_expenses},
+            {'Category': 'Total Expenses', 'Amount (``$)': -total_expenses},
             {'Category': 'NET INCOME', 'Amount ($)': net}
         ])
 
+def generate_pl_report_with_account_codes(self, categorized_transactions: List[tuple]) -> pd.DataFrame:
+    # categorized_transactions = List of (Transaction, Category)
+    data = []
+
+    total_income = 0
+    total_expenses = 0
+
+    for tx, cat in categorized_transactions:
+        amount = tx.amount
+        if cat.name.lower() in ['income', 'sales', 'other income']:  # adjust per your categories
+            total_income += amount
+        else:
+            total_expenses += amount
+        
+        data.append({
+            'Account Code': getattr(cat, 'account_code', ''),
+            'Category': cat.name,
+            'Amount ($)': amount
+        })
+
+    # Add totals
+    net_income = total_income - total_expenses
+    data.append({'Account Code': '', 'Category': 'Total Income', 'Amount ($)': total_income})
+    data.append({'Account Code': '', 'Category': 'Total Expenses', 'Amount ($)': -total_expenses})
+    data.append({'Account Code': '', 'Category': 'NET INCOME', 'Amount ($)': net_income})
+
+    return pd.DataFrame(data)
 
 # ----------------------------
 # Custom Rules Management
 # ----------------------------
-def save_custom_rules(rules: list):
-    """Save custom rules to JSON file"""
-    rules_file = Path(__file__).parent / 'custom_rules.json'
-    try:
-        with open(rules_file, 'w') as f:
-            json.dump(rules, f, indent=2)
-    except Exception as e:
-        logger.error(f"Error saving custom rules: {e}")
 
-def load_custom_rules() -> list:
-    """Load custom rules from JSON file"""
-    rules_file = Path(__file__).parent / 'custom_rules.json'
-    try:
-        if rules_file.exists():
-            with open(rules_file, 'r') as f:
-                return json.load(f)
-    except Exception as e:
-        logger.error(f"Error loading custom rules: {e}")
-    return []
 
 def reapply_custom_rules():
     """Reapply custom rules to all existing transactions in session state"""
-    if 'transactions' not in st.session_state or not st.session_state.transactions:
-        return
+    if 'custom_rules' not in st.session_state:
+        st.session_state.custom_rules = load_user_rules(st.session_state.user["id"])
     
     from account_code_mapper import AccountCodeMapper
     mapper = AccountCodeMapper()
-    custom_rules = st.session_state.get('custom_rules', [])
+    user = st.session_state.get("user")
+    if not user:
+        return
+
+    custom_rules = load_user_rules(user["id"])
+    st.session_state.custom_rules = custom_rules
+
     
     # Clear all custom account codes first (reset to default mapping)
     for tx in st.session_state.transactions:
@@ -1592,6 +1607,68 @@ def reapply_custom_rules():
                 period=period
             )
             st.session_state.pl_statement_text = pl_text
+import uuid
+from pathlib import Path
+import os
+DATA_DIR = Path(__file__).parent / "data"
+RULES_DIR = DATA_DIR / "rules"
+USERS_FILE = DATA_DIR / "users.json"
+
+DATA_DIR.mkdir(exist_ok=True)
+RULES_DIR.mkdir(exist_ok=True)
+
+def load_users():
+    if not os.path.exists(USERS_FILE):
+        return []
+
+    try:
+        with open(USERS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data.get("users", [])
+    except json.JSONDecodeError:
+        # file exists but is empty or corrupted
+        return []
+
+
+def save_users(users):
+    with open(USERS_FILE, "w") as f:
+        json.dump({"users": users}, f, indent=2)
+def signup_user(name, email, password):
+    users = load_users()
+
+    if any(u["email"] == email for u in users):
+        return None, "Email already exists"
+
+    user_id = str(uuid.uuid4())
+
+    users.append({
+        "id": user_id,
+        "name": name,
+        "email": email,
+        "password": password
+    })
+
+    with open(USERS_FILE, "w", encoding="utf-8") as f:
+        json.dump({"users": users}, f, indent=2)
+
+    return user_id, None
+
+def login_user(email, password):
+    users = load_users()
+    for u in users:
+        if u["email"] == email and u["password"] == password:
+            return u
+    return None
+def load_user_rules(user_id):
+    file = RULES_DIR / f"user_{user_id}_rules.json"
+    if file.exists():
+        with open(file, "r") as f:
+            return json.load(f)
+    return []
+def save_user_rules(user_id, rules):
+    file = RULES_DIR / f"user_{user_id}_rules.json"
+    with open(file, "w") as f:
+        json.dump(rules, f, indent=2)
 
 # ----------------------------
 # Streamlit UI
@@ -1601,6 +1678,36 @@ st.set_page_config(page_title="Bank Statement Analyzer (Hybrid)", layout="wide")
 st.markdown("<h3 style='text-align: center;'>Prototype v1.0</h3>", unsafe_allow_html=True)
 
 st.title("💼 Bank Statement Analyzer")
+if "user" not in st.session_state:
+    st.title("🔐 Login")
+
+    tab1, tab2 = st.tabs(["Login", "Sign Up"])
+
+    with tab1:
+        email = st.text_input("Email")
+        password = st.text_input("Password", type="password")
+        if st.button("Login"):
+            user = login_user(email, password)
+            if user:
+                st.session_state.user = user
+                st.session_state.custom_rules = load_user_rules(user["id"])
+                st.success("Login successful")
+                st.rerun()
+            else:
+                st.error("Invalid credentials")
+
+    with tab2:
+        name = st.text_input("Full Name")
+        email = st.text_input("Email", key="signup_email")
+        password = st.text_input("Password", type="password", key="signup_pwd")
+        if st.button("Sign Up"):
+            user_id, err = signup_user(name, email, password)
+            if err:
+                st.error(err)
+            else:
+                st.success("Account created. Please login.")
+
+    st.stop()
 
 st.markdown(
     "Upload a bank statement (PDF / CSV / DOCX)"
@@ -1628,7 +1735,11 @@ def is_tx_excluded(tx):
 with st.sidebar:
     st.header("Settings")
     sort_by = st.selectbox("Sort vendor summaries by", ["Subtotal (desc)", "Transaction Count (desc)"])
-
+    st.write(f"👤 {st.session_state.user['name']}")
+    if st.button("Logout"):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        st.rerun()
 uploaded = st.file_uploader("Upload statement (PDF, CSV, DOCX)", type=["pdf", "csv", "doc", "docx"])
 credit_card_file = st.file_uploader(
     "Upload Credit Card Statement (PDF)",
@@ -1637,8 +1748,6 @@ credit_card_file = st.file_uploader(
 )
 
 # Initialize custom rules in session state (load from file)
-if 'custom_rules' not in st.session_state:
-    st.session_state.custom_rules = load_custom_rules()
 
 if uploaded or credit_card_file:
     if uploaded:
@@ -1757,7 +1866,7 @@ if uploaded or credit_card_file:
             st.session_state.pl_df = pl_df
             st.session_state.currency = currency
             st.session_state.parsed_from = parsed_from
-            
+            reapply_custom_rules()
 
             st.success(f"Processed {len(all_txs)} transactions ({parsed_from}).")
             st.session_state.all_transactions = transactions
@@ -2067,7 +2176,18 @@ if "transactions" in st.session_state and st.session_state.transactions:
 
         # Use all transactions (including excluded ones)
         # We'll handle excluded status in the display logic
-        categorized_transactions = all_categorized
+        # Build categorized list that matches date-filtered transactions
+        filtered_keys = {
+            (t.date, t.description, t.amount)
+            for t in filtered_transactions
+        }
+
+        categorized_transactions = [
+            (tx, cat)
+            for tx, cat in all_categorized
+            if (tx.date, tx.description, tx.amount) in filtered_keys
+        ]
+
 
 
         if not categorized_transactions or not transactions:
@@ -2103,32 +2223,61 @@ if "transactions" in st.session_state and st.session_state.transactions:
                 period_input = st.text_input("Period:", value=default_period, key="pl_account_period")
 
             # ---- Filter out excluded transactions for P&L statement generation
+            from account_code_mapper import AccountCodeMapper
+
+            # Ensure mapper exists
+            if "mapper" not in st.session_state:
+                st.session_state.mapper = AccountCodeMapper()
+            mapper = st.session_state.mapper
+
+            # Build active categorized transactions
             active_categorized_transactions = [
                 (tx, cat)
                 for tx, cat in categorized_transactions
                 if not (cat.is_excluded or is_tx_excluded(tx))
             ]
 
-            # ---- Generate P&L text with account codes (only active transactions)
+            synced_categorized = []
+
+            for tx, cat in active_categorized_transactions:
+                # ✅ Use existing account_code if present (manual changes)
+                if hasattr(tx, "account_code") and tx.account_code:
+                    code = tx.account_code
+                    # Get name from mapper if available
+                    name = dict(mapper.account_code_map).get(code, (code, "UNKNOWN"))[1]
+                else:
+                    # Auto map for new/unmapped transactions
+                    code, name = mapper.get_account_code(
+                        vendor=getattr(tx, "vendor", None),
+                        description=getattr(tx, "description", None),
+                        is_income=(tx.amount >= 0),
+                        transaction_type=getattr(tx, "type", None)
+                    )
+                    # Save mapped code to transaction for persistence
+                    tx.account_code = code
+
+                # Assign to category for PL
+                cat.account_code = code
+                synced_categorized.append((tx, cat))
+
+            # Persist for download and PL generation
+            st.session_state.synced_categorized = synced_categorized
+
+            # Generate PL report using persisted codes ONLY
             pl_text = sc_categorizer.generate_pl_report_with_account_codes(
-                active_categorized_transactions,
+                synced_categorized,
                 business_name=business_name or "",
                 period=period_input
             )
-            
-            # Store P&L statement text in session state for download
             st.session_state.pl_statement_text = pl_text
-
-            st.subheader("📊 Profit & Loss Statement")
             st.code(pl_text)
 
-            # ---- Validation and Reconciliation Checks
-            validation_result = sc_categorizer.validate_classifications(active_categorized_transactions)
+            # 🔹 Validation & reconciliation (optional)
+            validation_result = sc_categorizer.validate_classifications(synced_categorized)
             reconciliation_result = sc_categorizer.reconcile_totals(
                 get_active_transactions(),
-                active_categorized_transactions
+                synced_categorized
             )
-
             
             # Display validation warnings
             if validation_result["error_count"] > 0 or validation_result["warning_count"] > 0:
@@ -2154,9 +2303,9 @@ if "transactions" in st.session_state and st.session_state.transactions:
             else:
                 st.success("✅ Reconciliation: All totals match!")
             
+
             # ---- Build structured P&L dataframe
-            from account_code_mapper import AccountCodeMapper
-            mapper = AccountCodeMapper()
+            
             
             rows = []
             for tx, cat in categorized_transactions:
@@ -2429,7 +2578,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
                             'account_code': account_code,
                             'account_display': rule_account
                         })
-                        save_custom_rules(st.session_state.custom_rules)
+                        save_user_rules(st.session_state.user["id"], st.session_state.custom_rules)
                         # Reapply rules to existing transactions
                         reapply_custom_rules()
                         st.success(f"✅ Rule added and applied to existing transactions: '{rule_keyword}' → {rule_account}")
@@ -2451,11 +2600,18 @@ if "transactions" in st.session_state and st.session_state.transactions:
                 with col3:
                     if st.button("🗑️", key=f"delete_rule_{idx}"):
                         st.session_state.custom_rules.pop(idx)
-                        save_custom_rules(st.session_state.custom_rules)
+
+                        save_user_rules(
+                            st.session_state.user_id,
+                            st.session_state.custom_rules
+                        )
+
                         # Reapply remaining rules to existing transactions
                         reapply_custom_rules()
+
                         st.success("Rule deleted and transactions updated!")
                         st.rerun()
+
         else:
             st.info("No custom rules defined yet. Add rules above to automatically categorize transactions.")
         
