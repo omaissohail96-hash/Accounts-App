@@ -1520,93 +1520,108 @@ def generate_pl_report_with_account_codes(self, categorized_transactions: List[t
 # ----------------------------
 # Custom Rules Management
 # ----------------------------
-
-
 def reapply_custom_rules():
-    """Reapply custom rules to all existing transactions in session state"""
-    if 'custom_rules' not in st.session_state:
-        st.session_state.custom_rules = load_user_rules(st.session_state.user["id"])
-    
+    import json
+    from pathlib import Path
+    from datetime import datetime
+    from schedule_c_categorizer import ScheduleCCategorizer
     from account_code_mapper import AccountCodeMapper
-    mapper = AccountCodeMapper()
-    user = st.session_state.get("user")
-    if not user:
+    import streamlit as st
+
+    # Safety checks
+    if "user" not in st.session_state or "active_business" not in st.session_state:
+        # nothing to apply yet
         return
 
-    custom_rules = load_user_rules(user["id"])
-    st.session_state.custom_rules = custom_rules
+    user_id = st.session_state.user["id"]
+    business_name = st.session_state.active_business
 
-    
-    # Clear all custom account codes first (reset to default mapping)
-    for tx in st.session_state.transactions:
-        if hasattr(tx, 'account_code'):
-            delattr(tx, 'account_code')
-    
-    if 'filtered_transactions' in st.session_state:
-        for tx in st.session_state.filtered_transactions:
-            if hasattr(tx, 'account_code'):
-                delattr(tx, 'account_code')
-    
-    # Now apply custom rules if any exist
-    if custom_rules:
-        # Reapply rules to all transactions
-        for tx in st.session_state.transactions:
-            text = f"{tx.vendor or ''} {tx.description or ''}".lower()
-            
-            # Check if any custom rule matches
-            for rule in custom_rules:
-                keyword = rule['keyword'].lower()
-                if keyword in text:
-                    # Update the transaction's account code
-                    tx.account_code = rule['account_code']
-                    break  # Stop at first match
-        
-        # Also update filtered transactions if they exist
-        if 'filtered_transactions' in st.session_state:
-            for tx in st.session_state.filtered_transactions:
-                text = f"{tx.vendor or ''} {tx.description or ''}".lower()
-                for rule in custom_rules:
-                    keyword = rule['keyword'].lower()
-                    if keyword in text:
-                        tx.account_code = rule['account_code']
-                        break
-    
-    # Regenerate categorized transactions if they exist
-    if 'categorized_transactions' in st.session_state:
-        from schedule_c_categorizer import ScheduleCCategorizer
-        sc_categorizer = ScheduleCCategorizer()
-        
-        # Get transactions to recategorize
-        transactions = st.session_state.get('filtered_transactions', st.session_state.transactions)
-        
-        # Recategorize with updated account codes
-        categorized_transactions = sc_categorizer.categorize_transactions(transactions)
-        st.session_state.categorized_transactions = categorized_transactions
-        
-        # Regenerate Schedule C dataframe
-        schedule_c_df = sc_categorizer.generate_schedule_c_dataframe(categorized_transactions)
-        st.session_state.schedule_c_df = schedule_c_df
-        
-        # Regenerate P&L statement text if it exists
-        if 'pl_statement_text' in st.session_state:
-            # Filter out excluded transactions
-            active_categorized = [
-                (tx, cat)
-                for tx, cat in categorized_transactions
-                if not (cat.is_excluded or getattr(tx, 'is_excluded', False))
-            ]
-            
-            # Regenerate P&L text
-            business_name = ""  # Will use default
-            from datetime import datetime
-            period = datetime.now().strftime("%B %Y")
-            
-            pl_text = sc_categorizer.generate_pl_report_with_account_codes(
-                active_categorized,
-                business_name=business_name,
-                period=period
+    # Load business rules using your helper (falls back to empty list)
+    try:
+        business_rules = load_business_rules(user_id, business_name) or []
+    except Exception as e:
+        st.error(f"Error loading business rules: {e}")
+        business_rules = []
+
+    # normalize helper
+    def _norm(s: str) -> str:
+        return " ".join((s or "").lower().strip().split())
+
+    # store in session
+    st.session_state.custom_rules = business_rules
+
+    # Apply rules to both transactions and filtered_transactions (if present)
+    for key in ("transactions", "filtered_transactions"):
+        if key not in st.session_state:
+            continue
+        for tx in st.session_state[key]:
+            text = f"{tx.vendor or ''} {tx.description or ''}"
+            text = _norm(text)
+
+            matched = False
+            for rule in business_rules:
+                kw = _norm(rule.get("keyword", ""))
+                if kw and kw in text:
+                    # Apply the rule: always write account_code and mark mapped-by-rule
+                    tx.account_code = rule.get("account_code")
+                    tx._mapped_by_rule = True
+                    matched = True
+                    break
+
+            # if previously mapped by a rule but now no rule matches -> clear so mapper/fallback can remap
+            if not matched and getattr(tx, "_mapped_by_rule", False):
+                if hasattr(tx, "account_code"):
+                    try:
+                        delattr(tx, "account_code")
+                    except Exception:
+                        # fallback: set to None
+                        tx.account_code = None
+                tx._mapped_by_rule = False
+
+    # Ensure mapper exists
+    if "mapper" not in st.session_state:
+        st.session_state.mapper = AccountCodeMapper()
+    mapper = st.session_state.mapper
+
+    # Recategorize using ScheduleCCategorizer (so cats reflect up-to-date tx.account_code)
+    sc = ScheduleCCategorizer()
+    transactions_to_use = st.session_state.get("filtered_transactions", st.session_state.get("transactions", []))
+    categorized_transactions = sc.categorize_transactions(transactions_to_use)
+
+    # Assign account codes into category objects:
+    for tx, cat in categorized_transactions:
+        # If tx has an explicit code (custom rule or manual), preserve it
+        if getattr(tx, "account_code", None):
+            cat.account_code = tx.account_code
+        else:
+            # ask mapper (pass business rules as custom_rules to the mapper call)
+            code, _ = mapper.get_account_code(
+                vendor=getattr(tx, "vendor", None),
+                description=getattr(tx, "description", None),
+                is_income=(tx.amount >= 0),
+                transaction_type=getattr(tx, "transaction_type", None),
+                custom_rules=st.session_state.get("custom_rules", [])
             )
-            st.session_state.pl_statement_text = pl_text
+            tx.account_code = code
+            cat.account_code = code
+
+    # Save back to session
+    st.session_state.categorized_transactions = categorized_transactions
+    st.session_state.schedule_c_df = sc.generate_schedule_c_dataframe(categorized_transactions)
+
+    # Regenerate the P&L statement text for display/download
+    active_categorized = [
+        (tx, cat) for tx, cat in categorized_transactions
+        if not (getattr(cat, "is_excluded", False) or getattr(tx, "is_excluded", False))
+    ]
+
+    st.session_state.pl_statement_text = sc.generate_pl_report_with_account_codes(
+        active_categorized,
+        business_name=st.session_state.get("active_business", "") or "",
+        period=datetime.now().strftime("%B %Y")
+    )
+
+
 import uuid
 from pathlib import Path
 import os
@@ -1616,6 +1631,17 @@ USERS_FILE = DATA_DIR / "users.json"
 
 DATA_DIR.mkdir(exist_ok=True)
 RULES_DIR.mkdir(exist_ok=True)
+BUSINESS_RULES_FILE = DATA_DIR / "business_rules.json"
+
+def load_business_store():
+    if BUSINESS_RULES_FILE.exists():
+        with open(BUSINESS_RULES_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_business_store(data):
+    with open(BUSINESS_RULES_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
 def load_users():
     if not os.path.exists(USERS_FILE):
@@ -1628,7 +1654,6 @@ def load_users():
     except json.JSONDecodeError:
         # file exists but is empty or corrupted
         return []
-
 
 def save_users(users):
     with open(USERS_FILE, "w") as f:
@@ -1659,16 +1684,33 @@ def login_user(email, password):
         if u["email"] == email and u["password"] == password:
             return u
     return None
-def load_user_rules(user_id):
-    file = RULES_DIR / f"user_{user_id}_rules.json"
-    if file.exists():
-        with open(file, "r") as f:
-            return json.load(f)
-    return []
-def save_user_rules(user_id, rules):
-    file = RULES_DIR / f"user_{user_id}_rules.json"
-    with open(file, "w") as f:
-        json.dump(rules, f, indent=2)
+
+def load_business_rules(user_id, business_name):
+    store = load_business_store()
+    return store.get(str(user_id), {}).get(business_name, {}).get("rules", [])
+
+def save_business_rules(user_id, business_name, rules):
+    store = load_business_store()
+    store.setdefault(str(user_id), {})
+    store[str(user_id)].setdefault(business_name, {})
+    store[str(user_id)][business_name]["rules"] = rules
+    save_business_store(store)
+
+    store.setdefault(user_id, {})
+    store[user_id].setdefault(business_name, {})
+    store[user_id][business_name]["rules"] = rules
+
+    save_business_store(store)
+
+def load_user_businesses(user_id):
+    store = load_business_store()
+    return list(store.get(user_id, {}).keys())
+
+def create_business(user_id, business_name):
+    store = load_business_store()
+    store.setdefault(user_id, {})
+    store[user_id].setdefault(business_name, {"rules": []})
+    save_business_store(store)
 
 # ----------------------------
 # Streamlit UI
@@ -1690,7 +1732,8 @@ if "user" not in st.session_state:
             user = login_user(email, password)
             if user:
                 st.session_state.user = user
-                st.session_state.custom_rules = load_user_rules(user["id"])
+                st.session_state.user_id = user["id"]
+                st.session_state.custom_rules = []
                 st.success("Login successful")
                 st.rerun()
             else:
@@ -1708,8 +1751,43 @@ if "user" not in st.session_state:
                 st.success("Account created. Please login.")
 
     st.stop()
+st.subheader("🏢 Business Profile")
 
-st.markdown(
+user_id = st.session_state.user_id
+
+businesses = load_user_businesses(user_id)
+
+if "active_business" not in st.session_state:
+    st.session_state.active_business = None
+
+selected_business = st.selectbox(
+    "Select Business",
+    ["➕ Create New"] + businesses
+)
+
+if selected_business == "➕ Create New":
+    new_business = st.text_input("Business Name")
+    if st.button("Create Business") and new_business:
+        create_business(user_id, new_business)
+        st.session_state.active_business = new_business
+        st.rerun()
+else:
+    st.session_state.active_business = selected_business
+if "rules_loaded_for_business" not in st.session_state:
+    st.session_state.rules_loaded_for_business = None
+
+if st.session_state.active_business:
+    if st.session_state.rules_loaded_for_business != st.session_state.active_business:
+        st.session_state.custom_rules = load_business_rules(
+            st.session_state.user["id"],
+            st.session_state.active_business
+        )
+        st.session_state.rules_loaded_for_business = st.session_state.active_business
+        reapply_custom_rules()
+        
+        # after running reapply_custom_rules:
+        # show count
+        st.markdown(
     "Upload a bank statement (PDF / CSV / DOCX)"
 )
 def filter_atm_withdrawals(transactions: List[Transaction]) -> List[Transaction]:
@@ -2166,7 +2244,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
 
     elif selected_tab == (5 if SHOW_SCHEDULE_C else 4):  # P&L Account Codes tab
         st.subheader("📊 Profit & Loss (Account Codes)")
-
+        reapply_custom_rules()
         # Build categorized list that matches filtered transactions
         all_categorized = st.session_state.categorized_transactions
         filtered_transactions = st.session_state.get(
@@ -2238,6 +2316,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
             ]
 
             synced_categorized = []
+            mapper.custom_rules = st.session_state.custom_rules 
 
             for tx, cat in active_categorized_transactions:
                 # ✅ Use existing account_code if present (manual changes)
@@ -2259,7 +2338,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
                 # Assign to category for PL
                 cat.account_code = code
                 synced_categorized.append((tx, cat))
-
+            
             # Persist for download and PL generation
             st.session_state.synced_categorized = synced_categorized
 
@@ -2473,25 +2552,26 @@ if "transactions" in st.session_state and st.session_state.transactions:
                                 with col_save:
                                     if st.button("✅ Save", key=f"save_{tx_key}"):
                                         new_code = available_options[selected_display]
-                                        
-                                        # Update in session state transactions
                                         for session_tx in st.session_state.transactions:
                                             if (session_tx.date == t.date and 
                                                 session_tx.description == t.description and 
                                                 session_tx.amount == t.amount):
                                                 session_tx.account_code = new_code
-                                        
-                                        # Update in filtered transactions if they exist
+                                                # mark manual override so rules won't overwrite
+                                                session_tx._mapped_by_rule = False
+
                                         if "filtered_transactions" in st.session_state:
                                             for session_tx in st.session_state.filtered_transactions:
                                                 if (session_tx.date == t.date and 
                                                     session_tx.description == t.description and 
                                                     session_tx.amount == t.amount):
                                                     session_tx.account_code = new_code
-                                        
+                                                    session_tx._mapped_by_rule = False
+
                                         st.session_state[f"editing_{tx_key}"] = False
                                         st.success(f"✅ Updated to {selected_display}")
                                         st.rerun()
+
                                 with col_cancel:
                                     if st.button("❌ Cancel", key=f"cancel_{tx_key}"):
                                         st.session_state[f"editing_{tx_key}"] = False
@@ -2578,7 +2658,12 @@ if "transactions" in st.session_state and st.session_state.transactions:
                             'account_code': account_code,
                             'account_display': rule_account
                         })
-                        save_user_rules(st.session_state.user["id"], st.session_state.custom_rules)
+                        save_business_rules(
+                            st.session_state.user["id"],
+                            st.session_state.active_business,
+                            st.session_state.custom_rules
+                        )
+
                         # Reapply rules to existing transactions
                         reapply_custom_rules()
                         st.success(f"✅ Rule added and applied to existing transactions: '{rule_keyword}' → {rule_account}")
@@ -2601,10 +2686,12 @@ if "transactions" in st.session_state and st.session_state.transactions:
                     if st.button("🗑️", key=f"delete_rule_{idx}"):
                         st.session_state.custom_rules.pop(idx)
 
-                        save_user_rules(
+                        save_business_rules(
                             st.session_state.user["id"],
+                            st.session_state.active_business,
                             st.session_state.custom_rules
                         )
+
 
                         # Reapply remaining rules to existing transactions
                         reapply_custom_rules()
