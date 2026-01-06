@@ -1712,22 +1712,132 @@ def create_business(user_id, business_name):
     store[user_id].setdefault(business_name, {"rules": []})
     save_business_store(store)
 
+def delete_business(user_id, business_name):
+    store = load_business_store()
+    if user_id in store and business_name in store[user_id]:
+        del store[user_id][business_name]
+        save_business_store(store)
+        return True
+    return False
+
 # ----------------------------
 # Streamlit UI
 # ----------------------------
 st.set_page_config(page_title="Bank Statement Analyzer (Hybrid)", layout="wide")
 
-st.markdown("<h3 style='text-align: center;'>Prototype v1.0</h3>", unsafe_allow_html=True)
-
-st.title("💼 Bank Statement Analyzer")
 if "user" not in st.session_state:
-    st.title("🔐 Login")
-
+    # Custom CSS for clean centered login/signup page
+    st.markdown("""
+    <style>
+        /* Hide default Streamlit elements */
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        
+        /* Main container */
+        .stApp {
+            background: #f5f7fa;
+        }
+        
+        /* Center content */
+        .block-container {
+            max-width: 480px;
+            padding-top: 5rem;
+            padding-bottom: 5rem;
+        }
+        
+        /* Input fields */
+        .stTextInput > div > div > input {
+            border-radius: 6px;
+            border: 1px solid #e1e4e8;
+            padding: 10px 12px;
+            font-size: 14px;
+            background-color: #fafbfc;
+            color: #000000;
+        }
+        
+        .stTextInput > div > div > input:focus {
+            border-color: #0366d6;
+            background-color: white;
+            outline: none;
+            color: #000000;
+        }
+        
+        .stTextInput label {
+            font-weight: 500;
+            color: #24292e;
+            font-size: 14px;
+            margin-bottom: 6px;
+        }
+        
+        /* Button */
+        .stButton > button {
+            width: 100%;
+            background-color: #2ea44f;
+            color: white;
+            border: none;
+            padding: 10px;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            margin-top: 16px;
+            cursor: pointer;
+        }
+        
+        .stButton > button:hover {
+            background-color: #2c974b;
+        }
+        
+        /* Tabs */
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 8px;
+            background-color: transparent;
+            border-bottom: 1px solid #e1e4e8;
+        }
+        
+        .stTabs [data-baseweb="tab"] {
+            padding: 8px 16px;
+            background-color: transparent;
+            border: none;
+            color: #586069;
+            font-weight: 500;
+        }
+        
+        .stTabs [aria-selected="true"] {
+            color: #24292e;
+            border-bottom: 2px solid #0366d6;
+            background-color: transparent;
+        }
+        
+        /* Messages */
+        .stSuccess, .stError {
+            padding: 12px;
+            border-radius: 6px;
+            font-size: 14px;
+            margin-top: 16px;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # Login container
+    st.markdown("""
+    <div style='background: white; padding: 32px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.06); margin-bottom: 20px;'>
+        <div style='text-align: center; margin-bottom: 24px;'>
+            <div style='font-size: 48px; margin-bottom: 16px;'>💼</div>
+            <h2 style='color: #24292e; margin: 0 0 8px 0; font-size: 24px; font-weight: 600;'>Bank Statement Analyzer</h2>
+            <p style='color: #586069; margin: 0; font-size: 14px;'>Sign in to access your account</p>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Form container
+    st.markdown("<div style='background: white; padding: 32px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.06);'>", unsafe_allow_html=True)
+    
     tab1, tab2 = st.tabs(["Login", "Sign Up"])
 
     with tab1:
-        email = st.text_input("Email")
-        password = st.text_input("Password", type="password")
+        st.markdown("<div style='padding-top: 16px;'>", unsafe_allow_html=True)
+        email = st.text_input("Email", key="login_email")
+        password = st.text_input("Password", type="password", key="login_password")
         if st.button("Login"):
             user = login_user(email, password)
             if user:
@@ -1738,8 +1848,10 @@ if "user" not in st.session_state:
                 st.rerun()
             else:
                 st.error("Invalid credentials")
+        st.markdown("</div>", unsafe_allow_html=True)
 
     with tab2:
+        st.markdown("<div style='padding-top: 16px;'>", unsafe_allow_html=True)
         name = st.text_input("Full Name")
         email = st.text_input("Email", key="signup_email")
         password = st.text_input("Password", type="password", key="signup_pwd")
@@ -1749,30 +1861,266 @@ if "user" not in st.session_state:
                 st.error(err)
             else:
                 st.success("Account created. Please login.")
+        st.markdown("</div>", unsafe_allow_html=True)
+    
+    st.markdown("</div>", unsafe_allow_html=True)
 
     st.stop()
-st.subheader("🏢 Business Profile")
+
+# Profile Selection Screen (Netflix-style)
+if "active_business" not in st.session_state or st.session_state.active_business is None:
+    # Custom CSS for Netflix-style profile selection
+    st.markdown("""
+    <style>
+        .stApp {
+            background: #141414;
+        }
+        
+        /* Profile card buttons */
+        div[data-testid="column"] .stButton > button {
+            background: #333;
+            border: 3px solid #555;
+            color: #e5e5e5;
+            padding: 20px;
+            width: 200px;
+            height: 180px;
+            border-radius: 8px;
+            transition: all 0.3s ease;
+            font-size: 3.5rem;
+            cursor: pointer;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+        }
+        
+        div[data-testid="column"] .stButton > button:hover {
+            border-color: #e5e5e5;
+            background: #444;
+            transform: scale(1.05);
+        }
+        
+        /* Text inside buttons */
+        div[data-testid="column"] .stButton > button p {
+            margin: 0;
+            font-size: 1rem;
+            color: #e5e5e5;
+            white-space: pre-line;
+            text-align: center;
+        }
+        
+        /* Delete button styling */
+        .delete-profile-btn button {
+            background: #e50914 !important;
+            border: 1px solid #e50914 !important;
+            color: white !important;
+            padding: 6px 12px !important;
+            width: auto !important;
+            height: auto !important;
+            font-size: 0.85rem !important;
+            border-radius: 4px !important;
+            margin-top: 8px !important;
+        }
+        
+        .delete-profile-btn button:hover {
+            background: #b20710 !important;
+            border-color: #b20710 !important;
+        }
+        
+        /* Logout button styling */
+        .logout-btn button {
+            background: transparent !important;
+            border: 1px solid #555 !important;
+            color: #e5e5e5 !important;
+            padding: 8px 24px !important;
+            width: auto !important;
+            height: auto !important;
+            font-size: 1rem !important;
+        }
+        
+        .logout-btn button:hover {
+            border-color: #e5e5e5 !important;
+            background: #333 !important;
+        }
+        
+        .stTextInput > div > div > input {
+            background-color: #333;
+            border: 1px solid #555;
+            color: white;
+            border-radius: 4px;
+            padding: 10px;
+        }
+        
+        .stTextInput label {
+            color: white;
+            font-weight: 500;
+        }
+        
+        /* Hide sidebar on profile selection */
+        [data-testid="stSidebar"] {
+            display: none;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # Logout button in top right
+    col_logout1, col_logout2 = st.columns([6, 1])
+    with col_logout2:
+        st.markdown('<div class="logout-btn">', unsafe_allow_html=True)
+        if st.button("Logout", key="profile_logout"):
+            for k in list(st.session_state.keys()):
+                del st.session_state[k]
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    st.markdown("<div style='text-align: center; color: white; padding: 40px 0 40px 0;'><h1 style='font-size: 3.5vw; font-weight: 400;'>Who's managing finances?</h1></div>", unsafe_allow_html=True)
+    
+    user_id = st.session_state.user_id
+    businesses = load_user_businesses(user_id)
+    
+    # Handle delete confirmation
+    if st.session_state.get("confirm_delete"):
+        business_to_delete = st.session_state.confirm_delete
+        st.markdown("<br><br>", unsafe_allow_html=True)
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            st.markdown(f"""
+            <div style='background: #1a1a1a; padding: 30px; border-radius: 8px; text-align: center;'>
+                <p style='color: white; font-size: 1.3rem; margin-bottom: 20px;'>⚠️ Delete Profile?</p>
+                <p style='color: #808080; font-size: 1rem; margin-bottom: 20px;'>Are you sure you want to delete <strong style='color: white;'>{business_to_delete}</strong>?<br>This action cannot be undone.</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if st.button("❌ Yes, Delete", key="confirm_delete_yes", use_container_width=True):
+                    if delete_business(user_id, business_to_delete):
+                        st.session_state.confirm_delete = None
+                        st.success(f"Profile '{business_to_delete}' deleted successfully")
+                        st.rerun()
+            with col_b:
+                if st.button("Cancel", key="confirm_delete_no", use_container_width=True):
+                    st.session_state.confirm_delete = None
+                    st.rerun()
+        st.stop()
+    
+    # Show create form if requested
+    if st.session_state.get("show_create_form", False):
+        st.markdown("<br><br>", unsafe_allow_html=True)
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            st.markdown("<div style='background: #1a1a1a; padding: 30px; border-radius: 8px;'>", unsafe_allow_html=True)
+            st.markdown("<p style='color: white; text-align: center; font-size: 1.2rem; margin-bottom: 20px;'>Create New Profile</p>", unsafe_allow_html=True)
+            new_business = st.text_input("Business/Profile Name", key="new_profile_name")
+            
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if st.button("✅ Create", key="confirm_create", use_container_width=True):
+                    if new_business:
+                        create_business(user_id, new_business)
+                        st.session_state.active_business = new_business
+                        st.session_state.show_create_form = False
+                        st.rerun()
+                    else:
+                        st.error("Please enter a name")
+            with col_b:
+                if st.button("❌ Cancel", key="cancel_create", use_container_width=True):
+                    st.session_state.show_create_form = False
+                    if not businesses:
+                        # If no businesses exist, keep form open
+                        st.session_state.show_create_form = True
+                    st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+    else:
+        # Show profile cards
+        if businesses:
+            # Calculate grid layout - center profiles
+            cols_per_row = min(4, len(businesses) + 1)
+            profile_icons = ["🏢", "💼", "🏪", "🏭", "🏦", "🎯", "📊", "💰"]
+            
+            st.markdown("<br>", unsafe_allow_html=True)
+            
+            # Create rows of profiles with centering
+            all_profiles = businesses + ["__add_profile__"]
+            for i in range(0, len(all_profiles), cols_per_row):
+                # Add spacing columns for centering
+                num_items = min(cols_per_row, len(all_profiles) - i)
+                spacing = (cols_per_row - num_items) / 2
+                
+                if spacing > 0:
+                    cols = st.columns([spacing] + [1] * num_items + [spacing])
+                    start_col = 1
+                else:
+                    cols = st.columns(cols_per_row)
+                    start_col = 0
+                
+                for j in range(num_items):
+                    profile_item = all_profiles[i + j]
+                    
+                    if profile_item == "__add_profile__":
+                        # Add Profile button
+                        with cols[start_col + j]:
+                            if st.button("➕\n\nAdd Profile", key="create_new_profile", help="Add Profile"):
+                                st.session_state.show_create_form = True
+                                st.rerun()
+                    else:
+                        # Existing business profile
+                        business = profile_item
+                        icon = profile_icons[(i + j) % len(profile_icons)]
+                        
+                        with cols[start_col + j]:
+                            if st.button(f"{icon}\n\n{business}", key=f"select_{business}", help=business):
+                                st.session_state.active_business = business
+                                st.rerun()
+                            
+                            # Delete button for this profile
+                            st.markdown('<div class="delete-profile-btn">', unsafe_allow_html=True)
+                            if st.button("🗑️ Delete", key=f"delete_{business}"):
+                                st.session_state.confirm_delete = business
+                                st.rerun()
+                            st.markdown('</div>', unsafe_allow_html=True)
+                
+                st.markdown("<br>", unsafe_allow_html=True)
+        else:
+            # No profiles yet - show create button
+            st.markdown("<br><br>", unsafe_allow_html=True)
+            col1, col2, col3 = st.columns([2, 1, 2])
+            with col2:
+                if st.button("➕\n\nCreate Your First Profile", key="first_profile", help="Create Your First Profile"):
+                    st.session_state.show_create_form = True
+                    st.rerun()
+    
+    st.stop()
+
+st.markdown("<h3 style='text-align: center;'>Prototype v1.0</h3>", unsafe_allow_html=True)
+
+st.title("💼 Bank Statement Analyzer")
 
 user_id = st.session_state.user_id
 
 businesses = load_user_businesses(user_id)
 
-if "active_business" not in st.session_state:
-    st.session_state.active_business = None
-
-selected_business = st.selectbox(
-    "Select Business",
-    ["➕ Create New"] + businesses
-)
-
-if selected_business == "➕ Create New":
-    new_business = st.text_input("Business Name")
-    if st.button("Create Business") and new_business:
-        create_business(user_id, new_business)
-        st.session_state.active_business = new_business
+# Add sidebar with settings and profile switcher
+with st.sidebar:
+    st.header("Settings")
+    
+    # Show active profile
+    if st.session_state.active_business:
+        st.info(f"📊 **{st.session_state.active_business}**")
+    
+    if st.button("🔄 Switch Profile"):
+        st.session_state.active_business = None
         st.rerun()
-else:
-    st.session_state.active_business = selected_business
+    
+    sort_by = st.selectbox("Sort vendor summaries by", ["Subtotal (desc)", "Transaction Count (desc)"])
+    
+    st.divider()
+    st.write(f"👤 {st.session_state.user['name']}")
+    if st.button("Logout"):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        st.rerun()
 if "rules_loaded_for_business" not in st.session_state:
     st.session_state.rules_loaded_for_business = None
 
@@ -1807,17 +2155,8 @@ def get_active_transactions():
     )
     return [t for t in txs if not getattr(t, "is_excluded", False)]
 
-    return [t for t in txs if not getattr(t, "is_excluded", False)]
 def is_tx_excluded(tx):
     return getattr(tx, "is_excluded", False)
-with st.sidebar:
-    st.header("Settings")
-    sort_by = st.selectbox("Sort vendor summaries by", ["Subtotal (desc)", "Transaction Count (desc)"])
-    st.write(f"👤 {st.session_state.user['name']}")
-    if st.button("Logout"):
-        for k in list(st.session_state.keys()):
-            del st.session_state[k]
-        st.rerun()
 uploaded = st.file_uploader("Upload statement (PDF, CSV, DOCX)", type=["pdf", "csv", "doc", "docx"])
 credit_card_file = st.file_uploader(
     "Upload Credit Card Statement (PDF)",
