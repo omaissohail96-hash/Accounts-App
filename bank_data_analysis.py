@@ -1711,7 +1711,41 @@ def create_business(user_id, business_name):
     store.setdefault(user_id, {})
     store[user_id].setdefault(business_name, {"rules": []})
     save_business_store(store)
+import pandas as pd
+def get_sub_summary(transactions , opening_balance=0.0):
+    summary_data = {
+        "Opening Balance": opening_balance,
+        "Total Deposits": 0.0,
+        "Total Checks": 0.0,
+        "Total Electronic Withdrawals": 0.0,
+        "Total ATM Withdrawals": 0.0,
+        "Closing Balance": 0.0
+    }
 
+    if not transactions:
+        return pd.DataFrame(list(summary_data.items()), columns=["Type", "Amount"])
+
+    for t in transactions:
+        amt = getattr(t, "amount", 0.0)
+
+        if amt > 0:
+            summary_data["Total Deposits"] += amt
+        else:
+            # Use section/vendor for checks
+            if getattr(t, "section", "").upper() == "CHECKS" or "check" in (getattr(t, "vendor","").lower()):
+                summary_data["Total Checks"] += abs(amt)
+            elif "atm withdrawal" in (getattr(t, "description","").lower() or ""):
+                summary_data["Total ATM Withdrawals"] += abs(amt)
+            else:
+                summary_data["Total Electronic Withdrawals"] += abs(amt)
+
+    # Closing balance
+    summary_data["Closing Balance"] = summary_data["Opening Balance"] + (summary_data["Total Deposits"]-summary_data["Opening Balance"]) \
+                                     - (summary_data["Total Checks"] + summary_data["Total Electronic Withdrawals"] + summary_data["Total ATM Withdrawals"])
+
+    df = pd.DataFrame(list(summary_data.items()), columns=["Type", "Amount"])
+    df["Amount"] = df["Amount"].apply(lambda x: f"${x:,.2f}")
+    return df
 # ----------------------------
 # Streamlit UI
 # ----------------------------
@@ -1863,13 +1897,15 @@ if uploaded or credit_card_file:
                     fallback = FallbackStatementParser(include_opening_balance=include_opening_balance)
                     bank_txs, meta = fallback.parse_statement(lines)
                     all_txs.extend(bank_txs)
-
+                st.session_state.meta = meta
+                st.session_state.opening_balance = fallback.opening_balance
+            # Process credit card statement if uploaded
             # Process credit card statement if uploaded
             if credit_card_file is not None:
                 cc_file_bytes = credit_card_file.read()
                 dp_cc = DocumentParser()
                 cc_lines, ok, unreadable = dp_cc.parse_document(cc_file_bytes, credit_card_file.name)
-                
+
                 if not ok or len(cc_lines) < 1:
                     st.error("Could not read text from credit card statement file.")
                     if unreadable:
@@ -1877,12 +1913,20 @@ if uploaded or credit_card_file:
                 else:
                     cc_txs = CreditCardParser().parse(cc_lines)
 
-                    # FORCE credit card as withdrawals
                     for tx in cc_txs:
                         tx.transaction_type = "withdrawal"
                         tx.amount = -abs(tx.amount)
 
                     all_txs.extend(cc_txs)
+
+                    # ✅ ADD THIS META BLOCK
+                    meta = {
+                        "statement_type": "credit_card",
+                        "transactions_extracted": len(cc_txs)
+                    }
+
+                    st.session_state.statement_type = "credit_card"
+
 
             valid_dates = [
                 _md_key(tx.date)
@@ -1898,7 +1942,7 @@ if uploaded or credit_card_file:
                     if u_txs:
                         # prefer universal only if it returns something meaningful
                         all_txs = u_txs
-                        meta = {"parsed_from": "universal_fallback", "transactions_extracted": len(all_txs)}
+                        meta = {"parsed_from": "universal_fallback", "statement_type": "bank","transactions_extracted": len(all_txs)}
 
             parsed_from = meta.get("parsed_from", "fallback")
 
@@ -1949,6 +1993,26 @@ if uploaded or credit_card_file:
             st.success(f"Processed {len(all_txs)} transactions ({parsed_from}).")
             st.session_state.all_transactions = transactions
             st.session_state.filtered_transactions = transactions 
+            opening_balance = (
+                st.session_state.opening_balance
+                if include_opening_balance
+                else 0.0
+            )
+
+            # -----------------------
+            # BANK STATEMENT SUMMARY
+            # ----------------------
+
+
+            st.markdown("### 🏦 Bank Statement – Transaction Breakdown")
+            sub_summary_df = get_sub_summary(
+                transactions=transactions,
+                opening_balance=opening_balance
+            )
+
+            st.table(sub_summary_df)
+
+
 
 from datetime import datetime, date
 
@@ -2067,8 +2131,8 @@ if "transactions" in st.session_state and st.session_state.transactions:
         stats['Total Deposit Amount'] = float(computed_deposits)
         stats['Total Withdrawal Amount'] = float(computed_withdrawals)
         stats['Net Income'] = float(computed_deposits - computed_withdrawals)
-
-    # Toggle to hide the Schedule C tab from the frontend while keeping
+    
+    # Toggle to hid e the Schedule C tab from the frontend while keeping
     # all Schedule C backend logic intact.
     SHOW_SCHEDULE_C = False
 

@@ -18,6 +18,20 @@
           "account_display": "801 \u00b7 SALARIES-OFFICERS"
         }
       ]
+    },
+    "E Commerce": {
+      "rules": [
+        {
+          "keyword": "Aubreystallion",
+          "account_code": "928",
+          "account_display": "928 \u00b7 RENT"
+        }
+      ]
+    }
+  },
+  "ef5cd259-c611-4b52-a687-f9caf2d7fc6c": {
+    "Construction": {
+      "rules": []
     }
   }
 }
