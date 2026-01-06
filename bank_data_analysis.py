@@ -1719,6 +1719,40 @@ def delete_business(user_id, business_name):
         save_business_store(store)
         return True
     return False
+def get_sub_summary(transactions , opening_balance=0.0):
+    summary_data = {
+        "Opening Balance": opening_balance,
+        "Total Deposits": (0.0-opening_balance),
+        "Total Checks": 0.0,
+        "Total Electronic Withdrawals": 0.0,
+        "Total ATM Withdrawals": 0.0,
+        "Closing Balance": 0.0
+    }
+
+    if not transactions:
+        return pd.DataFrame(list(summary_data.items()), columns=["Type", "Amount"])
+
+    for t in transactions:
+        amt = getattr(t, "amount", 0.0)
+
+        if amt > 0:
+            summary_data["Total Deposits"] += amt
+        else:
+            # Use section/vendor for checks
+            if getattr(t, "section", "").upper() == "CHECKS" or "check" in (getattr(t, "vendor","").lower()):
+                summary_data["Total Checks"] += abs(amt)
+            elif "atm withdrawal" in (getattr(t, "description","").lower() or ""):
+                summary_data["Total ATM Withdrawals"] += abs(amt)
+            else:
+                summary_data["Total Electronic Withdrawals"] += abs(amt)
+
+    # Closing balance
+    summary_data["Closing Balance"] = summary_data["Opening Balance"] + (summary_data["Total Deposits"]-summary_data["Opening Balance"]) \
+                                     - (summary_data["Total Checks"] + summary_data["Total Electronic Withdrawals"] + summary_data["Total ATM Withdrawals"])
+
+    df = pd.DataFrame(list(summary_data.items()), columns=["Type", "Amount"])
+    df["Amount"] = df["Amount"].apply(lambda x: f"${x:,.2f}")
+    return df
 
 # ----------------------------
 # Streamlit UI
@@ -2203,7 +2237,8 @@ if uploaded or credit_card_file:
                     fallback = FallbackStatementParser(include_opening_balance=include_opening_balance)
                     bank_txs, meta = fallback.parse_statement(lines)
                     all_txs.extend(bank_txs)
-
+                st.session_state.meta = meta
+                st.session_state.opening_balance = fallback.opening_balance
             # Process credit card statement if uploaded
             if credit_card_file is not None:
                 cc_file_bytes = credit_card_file.read()
@@ -2289,7 +2324,18 @@ if uploaded or credit_card_file:
             st.success(f"Processed {len(all_txs)} transactions ({parsed_from}).")
             st.session_state.all_transactions = transactions
             st.session_state.filtered_transactions = transactions 
+            opening_balance = (
+                st.session_state.opening_balance
+                if include_opening_balance
+                else 0.0
+            )
+            st.markdown("### Sub-summary / Transaction Breakdown")
 
+            sub_summary_df = get_sub_summary(
+                transactions=all_txs,
+                opening_balance=opening_balance
+            )
+            st.table(sub_summary_df)
 from datetime import datetime, date
 
 all_transactions = st.session_state.get("all_transactions", [])
@@ -2407,6 +2453,10 @@ if "transactions" in st.session_state and st.session_state.transactions:
         stats['Total Deposit Amount'] = float(computed_deposits)
         stats['Total Withdrawal Amount'] = float(computed_withdrawals)
         stats['Net Income'] = float(computed_deposits - computed_withdrawals)
+    
+
+    
+
 
     # Toggle to hide the Schedule C tab from the frontend while keeping
     # all Schedule C backend logic intact.
