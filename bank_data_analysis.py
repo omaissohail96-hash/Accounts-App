@@ -1830,7 +1830,8 @@ if "user" not in st.session_state:
     """, unsafe_allow_html=True)
     
     # Form container
-    st.markdown("<div style='background: white; padding: 32px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.06);'>", unsafe_allow_html=True)
+    # extra Box
+    # st.markdown("<div style='background: white; padding: 32px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.06);'>", unsafe_allow_html=True)
     
     tab1, tab2 = st.tabs(["Login", "Sign Up"])
 
@@ -2447,7 +2448,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
             st.info("No deposits found.")
         else:
             st.dataframe(df, use_container_width=True, hide_index=True)
-            st.subheader("👉 Vendor Transaction Details")
+            st.subheader("👉 Customer Transaction Details")
             deps = [t for t in st.session_state.get(
                 "filtered_transactions", st.session_state.transactions
             ) if t.amount > 0]
