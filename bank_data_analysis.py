@@ -2602,7 +2602,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
                         st.session_state.custom_rules.pop(idx)
 
                         save_user_rules(
-                            st.session_state.user_id,
+                            st.session_state.user["id"],
                             st.session_state.custom_rules
                         )
 
