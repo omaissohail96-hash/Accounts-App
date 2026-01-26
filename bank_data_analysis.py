@@ -1550,6 +1550,10 @@ def reapply_custom_rules():
     # store in session
     st.session_state.custom_rules = business_rules
 
+    # Sort rules by priority (lower number = higher priority, default = 999)
+    # This allows more specific rules to be processed first
+    sorted_rules = sorted(business_rules, key=lambda r: r.get("priority", 999))
+
     # Apply rules to both transactions and filtered_transactions (if present)
     for key in ("transactions", "filtered_transactions"):
         if key not in st.session_state:
@@ -1557,16 +1561,42 @@ def reapply_custom_rules():
         for tx in st.session_state[key]:
             text = f"{tx.vendor or ''} {tx.description or ''}"
             text = _norm(text)
+            
+            # Use absolute value of amount for comparison (withdrawals are negative)
+            tx_amount = abs(getattr(tx, "amount", 0.0))
 
             matched = False
-            for rule in business_rules:
+            for rule in sorted_rules:
+                # 1. Check primary keyword (required)
                 kw = _norm(rule.get("keyword", ""))
-                if kw and kw in text:
-                    # Apply the rule: always write account_code and mark mapped-by-rule
-                    tx.account_code = rule.get("account_code")
-                    tx._mapped_by_rule = True
-                    matched = True
-                    break
+                if not kw or kw not in text:
+                    continue
+                
+                # 2. Check amount range filters (optional)
+                min_amt = rule.get("min_amount")
+                max_amt = rule.get("max_amount")
+                
+                if min_amt is not None and tx_amount < min_amt:
+                    continue  # Amount too small for this rule
+                    
+                if max_amt is not None and tx_amount > max_amt:
+                    continue  # Amount too large for this rule
+                
+                # 3. Check exclusion keywords (optional) - skip if any match
+                exclude_kws = rule.get("exclude_keywords", [])
+                if exclude_kws and any(_norm(excl) in text for excl in exclude_kws):
+                    continue  # Excluded by keyword
+                
+                # 4. Check additional keywords (optional) - ALL must match
+                additional_kws = rule.get("additional_keywords", [])
+                if additional_kws and not all(_norm(kw_add) in text for kw_add in additional_kws):
+                    continue  # Not all additional keywords match
+                
+                # 5. All conditions met - apply the rule
+                tx.account_code = rule.get("account_code")
+                tx._mapped_by_rule = True
+                matched = True
+                break  # First matching rule wins (priority-based)
 
             # if previously mapped by a rule but now no rule matches -> clear so mapper/fallback can remap
             if not matched and getattr(tx, "_mapped_by_rule", False):
@@ -1722,7 +1752,7 @@ def delete_business(user_id, business_name):
 def get_sub_summary(transactions , opening_balance=0.0):
     summary_data = {
         "Opening Balance": opening_balance,
-        "Total Deposits": (0.0-opening_balance),
+        "Total Deposits": 0.0,
         "Total Checks": 0.0,
         "Total Electronic Withdrawals": 0.0,
         "Total ATM Withdrawals": 0.0,
@@ -1732,10 +1762,23 @@ def get_sub_summary(transactions , opening_balance=0.0):
     if not transactions:
         return pd.DataFrame(list(summary_data.items()), columns=["Type", "Amount"])
 
+    # Track if we've skipped the opening balance deposit
+    # (when opening_balance is included, it's added as the first deposit transaction)
+    skipped_opening = False
+    
     for t in transactions:
+        # 💳 Skip credit card transactions for the bank summary table
+        if getattr(t, "source", "") == "CREDIT_CARD":
+            continue
+            
         amt = getattr(t, "amount", 0.0)
 
         if amt > 0:
+            # If opening_balance is set and this is the first deposit matching it, skip it
+            # to avoid double-counting (it's already shown as "Opening Balance" row)
+            if opening_balance > 0 and not skipped_opening and abs(amt - opening_balance) < 0.01:
+                skipped_opening = True
+                continue
             summary_data["Total Deposits"] += amt
         else:
             # Use section/vendor for checks
@@ -1746,9 +1789,12 @@ def get_sub_summary(transactions , opening_balance=0.0):
             else:
                 summary_data["Total Electronic Withdrawals"] += abs(amt)
 
-    # Closing balance
-    summary_data["Closing Balance"] = summary_data["Opening Balance"] + (summary_data["Total Deposits"]-summary_data["Opening Balance"]) \
-                                     - (summary_data["Total Checks"] + summary_data["Total Electronic Withdrawals"] + summary_data["Total ATM Withdrawals"])
+    # Closing Balance = Opening Balance + Total Deposits - Total Withdrawals
+    summary_data["Closing Balance"] = (
+        summary_data["Opening Balance"] 
+        + summary_data["Total Deposits"] 
+        - (summary_data["Total Checks"] + summary_data["Total Electronic Withdrawals"] + summary_data["Total ATM Withdrawals"])
+    )
 
     df = pd.DataFrame(list(summary_data.items()), columns=["Type", "Amount"])
     df["Amount"] = df["Amount"].apply(lambda x: f"${x:,.2f}")
@@ -2192,7 +2238,7 @@ def get_active_transactions():
 
 def is_tx_excluded(tx):
     return getattr(tx, "is_excluded", False)
-uploaded = st.file_uploader("Upload statement (PDF, CSV, DOCX)", type=["pdf", "csv", "doc", "docx"])
+uploaded = st.file_uploader("Upload statement (PDF, CSV, DOCX)", type=["pdf", "csv", "doc", "docx"], accept_multiple_files=True)
 credit_card_file = st.file_uploader(
     "Upload Credit Card Statement (PDF)",
     type=["pdf"],
@@ -2203,7 +2249,10 @@ credit_card_file = st.file_uploader(
 
 if uploaded or credit_card_file:
     if uploaded:
-        st.info(f"Bank Statement: {uploaded.name} — {uploaded.size/1024:.1f} KB")
+        if isinstance(uploaded, list):
+            st.info(f"Bank Statements: {len(uploaded)} files uploaded")
+        else:
+            st.info(f"Bank Statement: {uploaded.name} — {uploaded.size/1024:.1f} KB")
     if credit_card_file:
         st.info(f"Credit Card Statement: {credit_card_file.name} — {credit_card_file.size/1024:.1f} KB")
     
@@ -2223,22 +2272,28 @@ if uploaded or credit_card_file:
             all_txs = []
             meta = {}
             
-            # Process main bank statement if uploaded
+            # Process main bank statements if uploaded
             if uploaded:
-                file_bytes = uploaded.read()
+                uploaded_list = uploaded if isinstance(uploaded, list) else [uploaded]
                 dp = DocumentParser()
-                lines, ok, unreadable = dp.parse_document(file_bytes, uploaded.name)
-                if not ok or len(lines) < 1:
-                    st.error("Could not read text from bank statement file.")
-                    if unreadable:
-                        st.warning(f"Unreadable pages: {unreadable}")
-                else:
-                    # First try Chase-optimized fallback
-                    fallback = FallbackStatementParser(include_opening_balance=include_opening_balance)
-                    bank_txs, meta = fallback.parse_statement(lines)
-                    all_txs.extend(bank_txs)
+                for up_file in uploaded_list:
+                    file_bytes = up_file.read()
+                    lines, ok, unreadable = dp.parse_document(file_bytes, up_file.name)
+                    if not ok or len(lines) < 1:
+                        st.error(f"Could not read text from bank statement file: {up_file.name}")
+                        if unreadable:
+                            st.warning(f"Unreadable pages in {up_file.name}: {unreadable}")
+                    else:
+                        # Use FallbackStatementParser for each file
+                        fb_parser = FallbackStatementParser(include_opening_balance=include_opening_balance)
+                        bank_txs, b_meta = fb_parser.parse_statement(lines)
+                        all_txs.extend(bank_txs)
+                        
+                        # Store meta from the first file or merge?
+                        if not meta:
+                            meta = b_meta
+                            st.session_state.opening_balance = fb_parser.opening_balance
                 st.session_state.meta = meta
-                st.session_state.opening_balance = fallback.opening_balance
             # Process credit card statement if uploaded
             if credit_card_file is not None:
                 cc_file_bytes = credit_card_file.read()
@@ -2362,9 +2417,11 @@ if all_transactions:
     if not parsed_dates:
         st.warning("No valid dates found in transactions.")
     else:
-        # Get actual min and max dates from the statement
+        # Get actual min and max dates from ALL uploaded statements (bank + credit card)
         min_date = min(parsed_dates)
         max_date = max(parsed_dates)
+        
+        st.info(f"📊 Date range in uploaded statements: {min_date.strftime('%b %d, %Y')} to {max_date.strftime('%b %d, %Y')}")
 
         col1, col2 = st.columns(2)
 
@@ -2372,6 +2429,8 @@ if all_transactions:
             start_md = st.date_input(
                 "Start Date",
                 value=min_date,
+                min_value=min_date,  # Ensure users can't select before earliest date
+                max_value=max_date,  # Ensure users can't select after latest date
                 key="filter_start_md"
             )
 
@@ -2379,35 +2438,29 @@ if all_transactions:
             end_md = st.date_input(
                 "End Date",
                 value=max_date,
+                min_value=min_date,  # Ensure users can't select before earliest date
+                max_value=max_date,  # Ensure users can't select after latest date
                 key="filter_end_md"
             )
 
         if st.button("Apply Date Filter"):
-            
-
-            start_key = (start_md.month, start_md.day)
-            end_key = (end_md.month, end_md.day)
-
             for tx in all_transactions:
-                md = _md_key(tx.date)
-                if not md:
+                if not tx.date:
                     continue
-
-                # handle year wrap (Dec → Jan)
-                if start_key <= end_key:
-                    if start_key <= md <= end_key:
+                try:
+                    tx_date = datetime.strptime(tx.date, "%Y-%m-%d").date()
+                    if start_md <= tx_date <= end_md:
                         filtered.append(tx)
-                else:
-                    if md >= start_key or md <= end_key:
-                        filtered.append(tx)
+                except:
+                    continue
 
             st.session_state.filtered_transactions = filtered
 
             st.success(
                 f"Showing {len(filtered)} transactions "
-                f"from {start_md.month}/{start_md.day} "
-                f"to {end_md.month}/{end_md.day}"
+                f"from {start_md.strftime('%Y-%m-%d')} to {end_md.strftime('%Y-%m-%d')}"
             )
+            st.rerun()
 
         if st.button("Reset Date Filter"):
             st.session_state.filtered_transactions = all_transactions
@@ -2998,8 +3051,8 @@ if "transactions" in st.session_state and st.session_state.transactions:
                 )
     
     elif selected_tab == (6 if SHOW_SCHEDULE_C else 5):  # Custom Rules tab
-        st.subheader("⚙️ Custom Account Code Rules")
-        st.markdown("Define custom rules to automatically assign specific vendors or keywords to account codes.")
+        st.subheader("⚙️ Enhanced Custom Account Code Rules")
+        st.markdown("Define custom rules with **amount filters, priority, and pattern matching** to automatically assign transactions to account codes.")
         
         # Load all account codes for dropdown
         import json
@@ -3016,89 +3069,221 @@ if "transactions" in st.session_state and st.session_state.transactions:
         
         # Add new rule form
         st.subheader("➕ Add New Rule")
-        col1, col2, col3 = st.columns([3, 3, 1])
+        
+        # Basic required fields
+        col1, col2 = st.columns([3, 3])
         
         with col1:
             rule_keyword = st.text_input(
-                "Keyword/Vendor Name",
-                placeholder="e.g., Amazon, Starbucks, Office Supplies",
-                key="new_rule_keyword"
+                "Keyword/Vendor Name *",
+                placeholder="e.g., ATM Withdrawal, Check, Stripe",
+                key="new_rule_keyword",
+                help="Required: Primary keyword to match in transactions"
             )
         
         with col2:
             rule_account = st.selectbox(
-                "Account Code",
+                "Account Code *",
                 options=list(all_account_options.keys()),
-                key="new_rule_account"
+                key="new_rule_account",
+                help="Required: Target account code for matching transactions"
             )
         
-        with col3:
-            st.write("")  # Spacing
-            st.write("")  # Spacing
-            if st.button("➕ Add", key="add_rule_btn"):
-                if rule_keyword.strip():
-                    account_code = all_account_options[rule_account]
-                    # Check for duplicates
-                    existing = [r for r in st.session_state.custom_rules if r['keyword'].lower() == rule_keyword.lower()]
-                    if existing:
-                        st.warning(f"Rule for '{rule_keyword}' already exists!")
-                    else:
-                        st.session_state.custom_rules.append({
-                            'keyword': rule_keyword.strip(),
-                            'account_code': account_code,
-                            'account_display': rule_account
-                        })
-                        save_business_rules(
-                            st.session_state.user["id"],
-                            st.session_state.active_business,
-                            st.session_state.custom_rules
-                        )
+        # Optional advanced filters in expander
+        with st.expander("🔧 Advanced Filters (Optional)", expanded=False):
+            st.markdown("**Amount Range Filters**")
+            col_amt1, col_amt2 = st.columns(2)
+            
+            with col_amt1:
+                min_amount = st.number_input(
+                    "Minimum Amount",
+                    min_value=0.0,
+                    value=0.0,
+                    step=10.0,
+                    key="new_rule_min_amount",
+                    help="Only match transactions >= this amount (use 0 for no minimum)"
+                )
+            
+            with col_amt2:
+                max_amount = st.number_input(
+                    "Maximum Amount",
+                    min_value=0.0,
+                    value=0.0,
+                    step=10.0,
+                    key="new_rule_max_amount",
+                    help="Only match transactions <= this amount (use 0 for no maximum)"
+                )
+            
+            st.markdown("---")
+            st.markdown("**Priority & Pattern Matching**")
+            
+            priority = st.number_input(
+                "Priority (lower = higher priority)",
+                min_value=1,
+                max_value=999,
+                value=999,
+                step=1,
+                key="new_rule_priority",
+                help="Rules with lower priority numbers are checked first (default: 999)"
+            )
+            
+            additional_keywords = st.text_input(
+                "Additional Keywords (ALL must match)",
+                placeholder="e.g., rent, landlord (comma-separated)",
+                key="new_rule_additional",
+                help="Optional: ALL these keywords must be present to match (AND logic)"
+            )
+            
+            exclude_keywords = st.text_input(
+                "Exclusion Keywords (skip if ANY match)",
+                placeholder="e.g., refund, chargeback (comma-separated)",
+                key="new_rule_exclude",
+                help="Optional: Skip this rule if ANY of these keywords are present"
+            )
+        
+        # Add button
+        if st.button("➕ Add Rule", key="add_rule_btn", type="primary"):
+            if rule_keyword.strip():
+                account_code = all_account_options[rule_account]
+                
+                # Check for duplicates (keyword + amount range)
+                existing = [
+                    r for r in st.session_state.custom_rules 
+                    if r['keyword'].lower() == rule_keyword.lower()
+                ]
+                
+                # Build the new rule
+                new_rule = {
+                    'keyword': rule_keyword.strip(),
+                    'account_code': account_code,
+                    'account_display': rule_account
+                }
+                
+                # Add optional fields only if they have meaningful values
+                if min_amount > 0:
+                    new_rule['min_amount'] = min_amount
+                if max_amount > 0:
+                    new_rule['max_amount'] = max_amount
+                if priority != 999:
+                    new_rule['priority'] = priority
+                if additional_keywords.strip():
+                    new_rule['additional_keywords'] = [kw.strip() for kw in additional_keywords.split(',') if kw.strip()]
+                if exclude_keywords.strip():
+                    new_rule['exclude_keywords'] = [kw.strip() for kw in exclude_keywords.split(',') if kw.strip()]
+                
+                st.session_state.custom_rules.append(new_rule)
+                save_business_rules(
+                    st.session_state.user["id"],
+                    st.session_state.active_business,
+                    st.session_state.custom_rules
+                )
 
-                        # Reapply rules to existing transactions
-                        reapply_custom_rules()
-                        st.success(f"✅ Rule added and applied to existing transactions: '{rule_keyword}' → {rule_account}")
-                        st.rerun()
-                else:
-                    st.error("Please enter a keyword/vendor name")
+                # Reapply rules to existing transactions
+                reapply_custom_rules()
+                
+                # Create success message with rule details
+                msg = f"✅ Rule added: '{rule_keyword}' → {rule_account}"
+                if min_amount > 0 or max_amount > 0:
+                    amount_filter = []
+                    if min_amount > 0:
+                        amount_filter.append(f"min: ${min_amount:.2f}")
+                    if max_amount > 0:
+                        amount_filter.append(f"max: ${max_amount:.2f}")
+                    msg += f" ({', '.join(amount_filter)})"
+                if priority != 999:
+                    msg += f" [Priority: {priority}]"
+                
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error("Please enter a keyword/vendor name")
         
         # Display existing rules
         st.subheader("📋 Active Rules")
         if st.session_state.custom_rules:
-            st.info(f"Total rules: {len(st.session_state.custom_rules)}")
+            # Sort rules by priority for display
+            sorted_rules = sorted(st.session_state.custom_rules, key=lambda r: r.get('priority', 999))
+            st.info(f"Total rules: {len(st.session_state.custom_rules)} (sorted by priority)")
             
-            for idx, rule in enumerate(st.session_state.custom_rules):
-                col1, col2, col3 = st.columns([3, 4, 1])
-                with col1:
-                    st.text(f"🔍 {rule['keyword']}")
-                with col2:
-                    st.text(f"→ {rule['account_display']}")
-                with col3:
-                    if st.button("🗑️", key=f"delete_rule_{idx}"):
-                        st.session_state.custom_rules.pop(idx)
+            for idx, rule in enumerate(sorted_rules):
+                # Find original index for deletion
+                orig_idx = st.session_state.custom_rules.index(rule)
+                
+                # Build display label
+                label_parts = [f"🔍 {rule['keyword']}"]
+                
+                # Add amount range if present
+                if rule.get('min_amount') or rule.get('max_amount'):
+                    amount_range = []
+                    if rule.get('min_amount'):
+                        amount_range.append(f"≥ ${rule['min_amount']:.0f}")
+                    if rule.get('max_amount'):
+                        amount_range.append(f"≤ ${rule['max_amount']:.0f}")
+                    label_parts.append(f"[{' & '.join(amount_range)}]")
+                
+                # Add priority if not default
+                if rule.get('priority', 999) != 999:
+                    label_parts.append(f"[Priority: {rule['priority']}]")
+                
+                label = " ".join(label_parts)
+                
+                with st.expander(label):
+                    col1, col2 = st.columns([4, 1])
+                    
+                    with col1:
+                        st.markdown(f"**→ {rule['account_display']}**")
+                        
+                        # Show filters if present
+                        filters = []
+                        if rule.get('min_amount'):
+                            filters.append(f"Min Amount: ${rule['min_amount']:.2f}")
+                        if rule.get('max_amount'):
+                            filters.append(f"Max Amount: ${rule['max_amount']:.2f}")
+                        if rule.get('priority', 999) != 999:
+                            filters.append(f"Priority: {rule['priority']}")
+                        if rule.get('additional_keywords'):
+                            filters.append(f"Additional Keywords: {', '.join(rule['additional_keywords'])}")
+                        if rule.get('exclude_keywords'):
+                            filters.append(f"Exclusion Keywords: {', '.join(rule['exclude_keywords'])}")
+                        
+                        if filters:
+                            st.markdown("**Filters:**")
+                            for f in filters:
+                                st.markdown(f"- {f}")
+                    
+                    with col2:
+                        if st.button("🗑️ Delete", key=f"delete_rule_{orig_idx}"):
+                            st.session_state.custom_rules.pop(orig_idx)
 
-                        save_business_rules(
-                            st.session_state.user["id"],
-                            st.session_state.active_business,
-                            st.session_state.custom_rules
-                        )
+                            save_business_rules(
+                                st.session_state.user["id"],
+                                st.session_state.active_business,
+                                st.session_state.custom_rules
+                            )
 
+                            # Reapply remaining rules to existing transactions
+                            reapply_custom_rules()
 
-                        # Reapply remaining rules to existing transactions
-                        reapply_custom_rules()
-
-                        st.success("Rule deleted and transactions updated!")
-                        st.rerun()
+                            st.success("Rule deleted and transactions updated!")
+                            st.rerun()
 
         else:
             st.info("No custom rules defined yet. Add rules above to automatically categorize transactions.")
         
         st.markdown("---")
-        st.markdown("**💡 How it works:**")
-        st.markdown("- Custom rules are checked first during transaction categorization")
-        st.markdown("- Rules are applied immediately to all current transactions when added or deleted")
-        st.markdown("- If a transaction's vendor or description contains your keyword, it will be assigned to your chosen account code")
-        st.markdown("- Rules are case-insensitive and match partial text")
-        st.markdown("- Rules are saved automatically and persist across sessions")
+        st.markdown("**💡 Enhanced Features:**")
+        st.markdown("- **Amount Filters**: Categorize same transaction types differently based on amount")
+        st.markdown("- **Priority Control**: Lower priority numbers are processed first (1 is highest)")
+        st.markdown("- **Pattern Matching**: Require multiple keywords (additional) or exclude specific ones")
+        st.markdown("- **Auto-Apply**: Rules are applied immediately to all current and future transactions")
+        st.markdown("- **Persistent**: Rules are saved automatically and persist across sessions")
+        
+        st.markdown("---")
+        st.markdown("**📖 Example Use Cases:**")
+        st.markdown("1. **ATM by Amount**: Large ATMs (≥$200) → Temp Help, Small ATMs (<$200) → Other Expenses")
+        st.markdown("2. **Check by Amount**: Checks ≥$1000 → Salaries, <$1000 → Supplies")
+        st.markdown("3. **Pattern Match**: 'payment' + 'rent' keywords → Rent category")
+        st.markdown("4. **Exclusions**: 'stripe' transactions except 'refund' → Sales")
     
     # Downloads
     st.header("📥 Download")
