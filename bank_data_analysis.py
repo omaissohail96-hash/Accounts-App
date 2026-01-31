@@ -3051,8 +3051,11 @@ if "transactions" in st.session_state and st.session_state.transactions:
                 )
     
     elif selected_tab == (6 if SHOW_SCHEDULE_C else 5):  # Custom Rules tab
-        st.subheader("⚙️ Enhanced Custom Account Code Rules")
-        st.markdown("Define custom rules with **amount filters, priority, and pattern matching** to automatically assign transactions to account codes.")
+        st.subheader("⚙️ Automatic Transaction Sorting & Categorization")
+        st.markdown("""
+        **Set up automatic filtering rules ONCE** - they'll automatically sort transactions into the right categories for all future uploads.
+        Configure your sorting parameters below and the system will remember them.
+        """)
         
         # Load all account codes for dropdown
         import json
@@ -3067,136 +3070,124 @@ if "transactions" in st.session_state and st.session_state.transactions:
         except Exception as e:
             st.error(f"Error loading account codes: {e}")
         
-        # Add new rule form
-        st.subheader("➕ Add New Rule")
+        # ==========================================
+        # MAIN RULE INPUT FORM
+        # ==========================================
+        st.subheader("➕ Setup New Rule")
         
-        # Basic required fields
-        col1, col2 = st.columns([3, 3])
+        col_adv1, col_adv2 = st.columns([2, 2])
         
-        with col1:
-            rule_keyword = st.text_input(
-                "Keyword/Vendor Name *",
-                placeholder="e.g., ATM Withdrawal, Check, Stripe",
-                key="new_rule_keyword",
-                help="Required: Primary keyword to match in transactions"
+        with col_adv1:
+            rule_keyword_adv = st.text_input(
+                "Primary Keyword *",
+                placeholder="e.g., Check, Stripe",
+                key="keyword_adv"
             )
         
-        with col2:
-            rule_account = st.selectbox(
-                "Account Code *",
+        with col_adv2:
+            rule_account_adv = st.selectbox(
+                "Target Account Code *",
                 options=list(all_account_options.keys()),
-                key="new_rule_account",
-                help="Required: Target account code for matching transactions"
+                    key="account_adv"
+                )
+            
+            st.markdown("**Filtering Parameters:**")
+            
+            col_adv_amt1, col_adv_amt2 = st.columns(2)
+            with col_adv_amt1:
+                min_amount_adv = st.number_input(
+                    "Min Amount", min_value=0.0, value=0.0, step=10.0, key="min_adv"
+                )
+            with col_adv_amt2:
+                max_amount_adv = st.number_input(
+                    "Max Amount", min_value=0.0, value=0.0, step=10.0, key="max_adv"
+                )
+            
+            st.markdown("**Pattern Matching:**")
+            
+            col_adv_pri, col_adv_add = st.columns(2)
+            with col_adv_pri:
+                priority_adv = st.number_input(
+                    "Priority (1=highest, 999=lowest)",
+                    min_value=1, max_value=999, value=999, step=1, key="priority_adv"
+                )
+            
+            with col_adv_add:
+                pass  # Placeholder for alignment
+            
+            additional_keywords_adv = st.text_input(
+                "Additional Keywords (ALL must match, comma-separated)",
+                placeholder="e.g., rent, payment",
+                key="additional_adv"
+            )
+            
+            exclude_keywords_adv = st.text_input(
+                "Exclusion Keywords (skip if ANY match, comma-separated)",
+                placeholder="e.g., refund, dispute",
+                key="exclude_adv"
             )
         
-        # Optional advanced filters in expander
-        with st.expander("🔧 Advanced Filters (Optional)", expanded=False):
-            st.markdown("**Amount Range Filters**")
-            col_amt1, col_amt2 = st.columns(2)
-            
-            with col_amt1:
-                min_amount = st.number_input(
-                    "Minimum Amount",
-                    min_value=0.0,
-                    value=0.0,
-                    step=10.0,
-                    key="new_rule_min_amount",
-                    help="Only match transactions >= this amount (use 0 for no minimum)"
-                )
-            
-            with col_amt2:
-                max_amount = st.number_input(
-                    "Maximum Amount",
-                    min_value=0.0,
-                    value=0.0,
-                    step=10.0,
-                    key="new_rule_max_amount",
-                    help="Only match transactions <= this amount (use 0 for no maximum)"
-                )
-            
-            st.markdown("---")
-            st.markdown("**Priority & Pattern Matching**")
-            
-            priority = st.number_input(
-                "Priority (lower = higher priority)",
-                min_value=1,
-                max_value=999,
-                value=999,
-                step=1,
-                key="new_rule_priority",
-                help="Rules with lower priority numbers are checked first (default: 999)"
-            )
-            
-            additional_keywords = st.text_input(
-                "Additional Keywords (ALL must match)",
-                placeholder="e.g., rent, landlord (comma-separated)",
-                key="new_rule_additional",
-                help="Optional: ALL these keywords must be present to match (AND logic)"
-            )
-            
-            exclude_keywords = st.text_input(
-                "Exclusion Keywords (skip if ANY match)",
-                placeholder="e.g., refund, chargeback (comma-separated)",
-                key="new_rule_exclude",
-                help="Optional: Skip this rule if ANY of these keywords are present"
-            )
+        # ==========================================
+        # SUBMIT RULE
+        # ==========================================
+        st.markdown("---")
         
-        # Add button
-        if st.button("➕ Add Rule", key="add_rule_btn", type="primary"):
-            if rule_keyword.strip():
-                account_code = all_account_options[rule_account]
-                
-                # Check for duplicates (keyword + amount range)
-                existing = [
-                    r for r in st.session_state.custom_rules 
-                    if r['keyword'].lower() == rule_keyword.lower()
-                ]
-                
-                # Build the new rule
-                new_rule = {
-                    'keyword': rule_keyword.strip(),
-                    'account_code': account_code,
-                    'account_display': rule_account
-                }
-                
-                # Add optional fields only if they have meaningful values
-                if min_amount > 0:
-                    new_rule['min_amount'] = min_amount
-                if max_amount > 0:
-                    new_rule['max_amount'] = max_amount
-                if priority != 999:
-                    new_rule['priority'] = priority
-                if additional_keywords.strip():
-                    new_rule['additional_keywords'] = [kw.strip() for kw in additional_keywords.split(',') if kw.strip()]
-                if exclude_keywords.strip():
-                    new_rule['exclude_keywords'] = [kw.strip() for kw in exclude_keywords.split(',') if kw.strip()]
-                
-                st.session_state.custom_rules.append(new_rule)
-                save_business_rules(
-                    st.session_state.user["id"],
-                    st.session_state.active_business,
-                    st.session_state.custom_rules
-                )
+        if st.button("Create Rule", key="add_rule_btn", type="primary"):
+            # Use advanced form inputs
+            keyword = rule_keyword_adv.strip()
+            account = rule_account_adv
+            min_amt = min_amount_adv
+            max_amt = max_amount_adv
+            add_kws = additional_keywords_adv
+            excl_kws = exclude_keywords_adv
+            priority = priority_adv
+            
+            if keyword:
+                    account_code = all_account_options[account]
+                    
+                    # Build the new rule
+                    new_rule = {
+                        'keyword': keyword,
+                        'account_code': account_code,
+                        'account_display': account
+                    }
+                    
+                    # Add optional fields only if they have meaningful values
+                    if min_amt > 0:
+                        new_rule['min_amount'] = min_amt
+                    if max_amt > 0:
+                        new_rule['max_amount'] = max_amt
+                    if priority != 999:
+                        new_rule['priority'] = priority
+                    if add_kws.strip():
+                        new_rule['additional_keywords'] = [kw.strip() for kw in add_kws.split(',') if kw.strip()]
+                    if excl_kws.strip():
+                        new_rule['exclude_keywords'] = [kw.strip() for kw in excl_kws.split(',') if kw.strip()]
+                    
+                    st.session_state.custom_rules.append(new_rule)
+                    save_business_rules(
+                        st.session_state.user["id"],
+                        st.session_state.active_business,
+                        st.session_state.custom_rules
+                    )
 
-                # Reapply rules to existing transactions
-                reapply_custom_rules()
-                
-                # Create success message with rule details
-                msg = f"✅ Rule added: '{rule_keyword}' → {rule_account}"
-                if min_amount > 0 or max_amount > 0:
-                    amount_filter = []
-                    if min_amount > 0:
-                        amount_filter.append(f"min: ${min_amount:.2f}")
-                    if max_amount > 0:
-                        amount_filter.append(f"max: ${max_amount:.2f}")
-                    msg += f" ({', '.join(amount_filter)})"
-                if priority != 999:
-                    msg += f" [Priority: {priority}]"
-                
-                st.success(msg)
-                st.rerun()
+                    # Reapply rules to existing transactions
+                    reapply_custom_rules()
+                    
+                    # Create success message with rule details
+                    msg = f"✅ Rule created: '{keyword}' → {account}"
+                    if min_amt > 0 or max_amt > 0:
+                        amount_filter = []
+                        if min_amt > 0:
+                            amount_filter.append(f"${min_amt:.2f}+")
+                        if max_amt > 0:
+                            amount_filter.append(f"up to ${max_amt:.2f}")
+                        msg += f" ({', '.join(amount_filter)})"
+                    
+                    st.success(msg)
+                    st.rerun()
             else:
-                st.error("Please enter a keyword/vendor name")
+                st.error("❌ Please enter a keyword to search for")
         
         # Display existing rules
         st.subheader("📋 Active Rules")
