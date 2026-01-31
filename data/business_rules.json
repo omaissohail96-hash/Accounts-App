@@ -65,6 +65,13 @@
           ],
           "priority": 1,
           "_comment": "Payments with 'rent' or 'landlord' keywords go to rent category"
+        },
+        {
+          "keyword": "check",
+          "account_code": "801",
+          "account_display": "801 \u00b7 SALARIES-OFFICERS",
+          "min_amount": 500.0,
+          "priority": 1
         }
       ]
     }

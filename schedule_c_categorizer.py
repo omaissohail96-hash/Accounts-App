@@ -1314,41 +1314,6 @@ class ScheduleCCategorizer:
         if period:
             report_lines.append(period)
         report_lines.append("")
-        # Extract period label (e.g., "Oct 25" from "October 2025")
-        # Format: "Month Day" like "Oct 25"
-        period_label = period
-        if period:
-            month_map = {
-                "January": "Jan", "February": "Feb", "March": "Mar", "April": "Apr",
-                "May": "May", "June": "Jun", "July": "Jul", "August": "Aug",
-                "September": "Sep", "October": "Oct", "November": "Nov", "December": "Dec"
-            }
-            parts = period.split()
-            if len(parts) >= 1 and parts[0] in month_map:
-                # Extract month abbreviation
-                month_abbr = month_map[parts[0]]
-                # Try to extract day from transactions, default to 25
-                if categorized_transactions:
-                    dates = [tx.date for tx, cat in categorized_transactions if tx.date]
-                    if dates:
-                        try:
-                            from datetime import datetime
-                            sample_date = dates[0]
-                            if isinstance(sample_date, str):
-                                date_obj = datetime.strptime(sample_date, "%Y-%m-%d")
-                            else:
-                                date_obj = sample_date
-                            day = date_obj.strftime("%d").lstrip("0") or "1"
-                            period_label = f"{month_abbr} {day}"
-                        except:
-                            period_label = f"{month_abbr} 25"
-                    else:
-                        period_label = f"{month_abbr} 25"
-                else:
-                    period_label = f"{month_abbr} 25"
-        
-        report_lines.append(f"{period_label} % of Income")
-        report_lines.append("")
         report_lines.append("Ordinary Income/Expense")
         report_lines.append("")
         
