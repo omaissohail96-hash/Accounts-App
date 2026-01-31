@@ -2421,6 +2421,11 @@ if all_transactions:
         min_date = min(parsed_dates)
         max_date = max(parsed_dates)
         
+        # Calculate first day of starting month and last day of ending month
+        from calendar import monthrange
+        first_day_of_start_month = min_date.replace(day=1)
+        last_day_of_end_month = max_date.replace(day=monthrange(max_date.year, max_date.month)[1])
+        
         st.info(f"📊 Date range in uploaded statements: {min_date.strftime('%b %d, %Y')} to {max_date.strftime('%b %d, %Y')}")
 
         col1, col2 = st.columns(2)
@@ -2428,18 +2433,18 @@ if all_transactions:
         with col1:
             start_md = st.date_input(
                 "Start Date",
-                value=min_date,
-                min_value=min_date,  # Ensure users can't select before earliest date
-                max_value=max_date,  # Ensure users can't select after latest date
+                value=first_day_of_start_month,
+                min_value=first_day_of_start_month,  # Allow selection from first day of month
+                max_value=last_day_of_end_month,  # Allow selection to last day of month
                 key="filter_start_md"
             )
 
         with col2:
             end_md = st.date_input(
                 "End Date",
-                value=max_date,
-                min_value=min_date,  # Ensure users can't select before earliest date
-                max_value=max_date,  # Ensure users can't select after latest date
+                value=last_day_of_end_month,
+                min_value=first_day_of_start_month,  # Allow selection from first day of month
+                max_value=last_day_of_end_month,  # Allow selection to last day of month
                 key="filter_end_md"
             )
 
@@ -2721,27 +2726,41 @@ if "transactions" in st.session_state and st.session_state.transactions:
             sc_categorizer = ScheduleCCategorizer()
             cur = "USD"
 
-            # ---- Robust period detection (min → max date)
-            date_objs = []
-            for tx in transactions:
-                if tx.date:
-                    try:
-                        date_objs.append(datetime.strptime(tx.date, "%Y-%m-%d"))
-                    except:
-                        pass
-
-            if date_objs:
-                start = min(date_objs)
-                end = max(date_objs)
-                default_period = f"{start.strftime('%b %Y')} – {end.strftime('%b %Y')}"
+            # ---- Robust period detection from date filter or min → max date
+            # Check if user has applied a date filter
+            if "filter_start_md" in st.session_state and "filter_end_md" in st.session_state:
+                # Use the filtered dates from the date filter
+                start = st.session_state.filter_start_md
+                end = st.session_state.filter_end_md
+                # Get first day of starting month and last day of ending month
+                from calendar import monthrange
+                first_day_of_month = start.replace(day=1)
+                last_day_of_month = end.replace(day=monthrange(end.year, end.month)[1])
+                # Format: "Jan 01, 2025 - Dec 31, 2025"
+                period_input = f"{first_day_of_month.strftime('%b %d, %Y')} - {last_day_of_month.strftime('%b %d, %Y')}"
             else:
-                default_period = datetime.now().strftime("%B %Y")
+                # Fall back to detecting from transactions
+                date_objs = []
+                for tx in transactions:
+                    if tx.date:
+                        try:
+                            date_objs.append(datetime.strptime(tx.date, "%Y-%m-%d"))
+                        except:
+                            pass
 
-            col1, col2 = st.columns(2)
-            with col1:
-                business_name = st.text_input("Business Name (optional):", key="pl_account_business")
-            with col2:
-                period_input = st.text_input("Period:", value=default_period, key="pl_account_period")
+                if date_objs:
+                    start = min(date_objs)
+                    end = max(date_objs)
+                    # Get first day of starting month and last day of ending month
+                    from calendar import monthrange
+                    first_day_of_month = start.replace(day=1)
+                    last_day_of_month = end.replace(day=monthrange(end.year, end.month)[1])
+                    period_input = f"{first_day_of_month.strftime('%b %d, %Y')} - {last_day_of_month.strftime('%b %d, %Y')}"
+                else:
+                    period_input = datetime.now().strftime("%B %Y")
+
+            # Get business name from active profile
+            business_name = st.session_state.get("active_business", "")
 
             # ---- Filter out excluded transactions for P&L statement generation
             from account_code_mapper import AccountCodeMapper
