@@ -1749,61 +1749,289 @@ def delete_business(user_id, business_name):
         save_business_store(store)
         return True
     return False
-def get_sub_summary(transactions , opening_balance=0.0):
-    summary_data = {
-        "Opening Balance": opening_balance,
-        "Total Deposits": 0.0,
-        "Total Checks": 0.0,
-        "Total Electronic Withdrawals": 0.0,
-        "Total ATM Withdrawals": 0.0,
-        "Closing Balance": 0.0
+
+def extract_chase_summary(raw_text):
+    """
+    Extract pre-formatted summary from Chase bank statements.
+    
+    Chase statements contain accurate summaries between *start*summary and *end*summary markers.
+    This avoids parsing errors from treating account numbers as transaction amounts.
+    
+    Returns: dict with summary data or None if not found
+    """
+    import re
+    
+    # Look for Chase summary section
+    summary_match = re.search(r'\*start\*summary.*?\*end\*summary', raw_text, re.DOTALL | re.IGNORECASE)
+    if not summary_match:
+        return None
+    
+    summary_section = summary_match.group(0)
+    
+    # Initialize result structure
+    result = {
+        "Beginning Balance": {"count": "", "amount": 0.0},
+        "Deposits and Additions": {"count": 0, "amount": 0.0},
+        "Checks Paid": {"count": 0, "amount": 0.0},
+        "ATM & Debit Card Withdrawals": {"count": 0, "amount": 0.0},
+        "Electronic Withdrawals": {"count": 0, "amount": 0.0},
+        "Fees": {"count": 0, "amount": 0.0},
+        "Ending Balance": {"count": "", "amount": 0.0}
+    }
+    
+    # Parse each line in the summary
+    lines = summary_section.split('\n')
+    for line in lines:
+        # Skip markers and headers
+        if any(skip in line for skip in ['*start*', '*end*', 'CHECKING SUMMARY', 'INSTANCES AMOUNT', 'Chase Business']):
+            continue
+        if not line.strip():
+            continue
+        
+        # Try to extract: Category [instances] [amount]
+        # Pattern handles: "Category $amount" or "Category instances amount" or "Category instances -amount"
+        match = re.search(r'^(.+?)\s+(\d+)?\s*([\$\-]?[\d,]+\.?\d*)$', line.strip())
+        if match:
+            category_raw = match.group(1).strip()
+            instances_str = match.group(2) if match.group(2) else ""
+            amount_str = match.group(3).strip().replace('$', '').replace(',', '')
+            
+            # Map category names (Chase format → our format)
+            category_mapping = {
+                "beginning balance": "Beginning Balance",
+                "deposits and additions": "Deposits and Additions",
+                "checks paid": "Checks Paid",
+                "atm & debit card withdrawals": "ATM & Debit Card Withdrawals",
+                "atm and debit card withdrawals": "ATM & Debit Card Withdrawals",
+                "electronic withdrawals": "Electronic Withdrawals",
+                "fees": "Fees",
+                "ending balance": "Ending Balance"
+            }
+            
+            category_key = category_mapping.get(category_raw.lower())
+            if category_key:
+                try:
+                    amount = float(amount_str)
+                    instances = int(instances_str) if instances_str else ""
+                    result[category_key] = {"count": instances, "amount": amount}
+                except ValueError:
+                    continue
+    
+    return result
+
+def render_chase_table(title, df):
+    """Render a dataframe in the Chase bank statement style"""
+    import streamlit as st
+    
+    # Build HTML table
+    header_html = f'<div class="chase-header-container"><div class="chase-header-box">{title}</div><div class="chase-header-line"></div></div>'
+    
+    rows_html = ""
+    for _, row in df.iterrows():
+        is_ending_balance = str(row.get('Type', '')).strip().lower() == "ending balance"
+        row_class = "chase-row-separator-top" if is_ending_balance else ""
+        rows_html += f'<tr class="{row_class}">'
+        for i, (col, val) in enumerate(row.items()):
+            alignment_class = "chase-text-right" if i > 0 else ""
+            rows_html += f'<td class="{alignment_class}">{val}</td>'
+        rows_html += "</tr>"
+        
+    table_headers = "".join([f'<th class="{"chase-text-right" if i > 0 else ""}">{col}</th>' for i, col in enumerate(df.columns)])
+    
+    table_html = f'<div class="chase-container">{header_html}<table class="chase-table"><thead><tr>{table_headers}</tr></thead><tbody>{rows_html}</tbody></table></div>'
+    
+    st.markdown(table_html, unsafe_allow_html=True)
+
+def render_chase_header(title):
+    """Render just the Chase-style boxed header with line"""
+    import streamlit as st
+    st.markdown(f'<div class="chase-header-container" style="margin-top: 30px; margin-bottom: 20px;"><div class="chase-header-box">{title}</div><div class="chase-header-line"></div></div>', unsafe_allow_html=True)
+
+# Global Injector for Chase Styles
+def inject_chase_styles():
+    import streamlit as st
+    st.markdown("""
+<style>
+.chase-container {
+    background-color: white;
+    padding: 20px;
+    border-radius: 5px;
+    margin-bottom: 20px;
+}
+.chase-header-container {
+    display: flex;
+    align-items: flex-end;
+    margin-bottom: 10px;
+}
+.chase-header-box {
+    border: 2px solid black;
+    padding: 4px 15px;
+    font-weight: 800;
+    font-size: 22px;
+    text-transform: uppercase;
+    color: black !important;
+    white-space: nowrap;
+    font-family: Arial, sans-serif;
+}
+.chase-header-line {
+    flex-grow: 1;
+    border-bottom: 2px solid black;
+    margin-bottom: 0px;
+    margin-left: 0px;
+}
+.chase-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: Arial, sans-serif;
+    color: black !important;
+}
+.chase-table th {
+    text-align: left;
+    padding: 10px 5px;
+    border-bottom: 2px solid black;
+    font-size: 14px;
+    text-transform: uppercase;
+    font-weight: 800;
+    color: black !important;
+}
+.chase-table td {
+    padding: 8px 5px;
+    border-bottom: none;
+    font-size: 14px;
+    color: black !important;
+}
+.chase-row-separator-top td {
+    border-top: 2px solid black;
+}
+.chase-text-right {
+    text-align: right !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+def get_sub_summary(transactions, opening_balance=0.0, raw_text=""):
+    # Try to extract Chase pre-formatted summary (more accurate than parsing)
+    if raw_text:
+        chase_summary = extract_chase_summary(raw_text)
+        if chase_summary:
+            # Use Chase's own summary - it's more reliable
+            df = pd.DataFrame([
+                {"Type": k, "INSTANCES": v["count"], "AMOUNT": f"${v['amount']:,.2f}"}
+                for k, v in chase_summary.items()
+            ])
+            return df
+    
+    # Fallback: Calculate summary from transactions (for non-Chase statements)
+    # Initialize data structure to track count (instances) and amount
+    data = {
+        "Beginning Balance": {"count": "", "amount": opening_balance},
+        "Deposits and Additions": {"count": 0, "amount": 0.0},
+        "Checks Paid": {"count": 0, "amount": 0.0},
+        "ATM & Debit Card Withdrawals": {"count": 0, "amount": 0.0},
+        "Electronic Withdrawals": {"count": 0, "amount": 0.0},
+        "Fees": {"count": 0, "amount": 0.0},
+        "Ending Balance": {"count": "", "amount": 0.0}
     }
 
     if not transactions:
-        return pd.DataFrame(list(summary_data.items()), columns=["Type", "Amount"])
+        # Return empty structure if no transactions
+        df = pd.DataFrame([
+            {"Type": k, "INSTANCES": v["count"], "AMOUNT": f"${v['amount']:,.2f}"}
+            for k, v in data.items()
+        ])
+        return df
 
     # Track if we've skipped the opening balance deposit
-    # (when opening_balance is included, it's added as the first deposit transaction)
     skipped_opening = False
     
+    total_count = 0
+
     for t in transactions:
         # 💳 Skip credit card transactions for the bank summary table
         if getattr(t, "source", "") == "CREDIT_CARD":
             continue
             
         amt = getattr(t, "amount", 0.0)
+        desc = (getattr(t, "description", "") or "").lower()
+        vendor = (getattr(t, "vendor", "") or "").lower()
 
         if amt > 0:
             # If opening_balance is set and this is the first deposit matching it, skip it
-            # to avoid double-counting (it's already shown as "Opening Balance" row)
+            # to avoid double-counting (it's already shown as "Beginning Balance" row)
             if opening_balance > 0 and not skipped_opening and abs(amt - opening_balance) < 0.01:
                 skipped_opening = True
                 continue
-            summary_data["Total Deposits"] += amt
+            
+            data["Deposits and Additions"]["amount"] += amt
+            data["Deposits and Additions"]["count"] += 1
+            total_count += 1
         else:
-            # Use section/vendor for checks
-            if getattr(t, "section", "").upper() == "CHECKS" or "check" in (getattr(t, "vendor","").lower()):
-                summary_data["Total Checks"] += abs(amt)
-            elif "atm withdrawal" in (getattr(t, "description","").lower() or ""):
-                summary_data["Total ATM Withdrawals"] += abs(amt)
+            abs_amt = abs(amt)
+            # Categorize withdrawals
+            
+            # 1. Checks
+            if getattr(t, "section", "").upper() == "CHECKS" or "check" in vendor or "check" in desc:
+                data["Checks Paid"]["amount"] -= abs_amt  # Show as negative
+                data["Checks Paid"]["count"] += 1
+            
+            # 2. ATM & Debit Card
+            elif "atm" in desc or "debit card" in desc or "withdrawal" in desc:
+                data["ATM & Debit Card Withdrawals"]["amount"] -= abs_amt
+                data["ATM & Debit Card Withdrawals"]["count"] += 1
+                
+            # 3. Fees (New Category)
+            elif "fee" in desc or "service charge" in desc or "maintenance" in desc or "overdraft" in desc:
+                data["Fees"]["amount"] -= abs_amt
+                data["Fees"]["count"] += 1
+                
+            # 4. Electronic Withdrawals (Default for others)
             else:
-                summary_data["Total Electronic Withdrawals"] += abs(amt)
+                data["Electronic Withdrawals"]["amount"] -= abs_amt
+                data["Electronic Withdrawals"]["count"] += 1
+            
+            total_count += 1
 
-    # Closing Balance = Opening Balance + Total Deposits - Total Withdrawals
-    summary_data["Closing Balance"] = (
-        summary_data["Opening Balance"] 
-        + summary_data["Total Deposits"] 
-        - (summary_data["Total Checks"] + summary_data["Total Electronic Withdrawals"] + summary_data["Total ATM Withdrawals"])
+    # Calculation for Ending Balance:
+    # Beginning Balance + Deposits - (Checks + ATM + Electronic + Fees)
+    # Note: Withdrawals are already negative in the logic above, so we sum everything
+    
+    # Actually, simpler: Opening + Sum(All processed transaction amounts)
+    # But let's follow the table logic to be precise with display values
+    
+    closing_bal = (
+        data["Beginning Balance"]["amount"] +
+        data["Deposits and Additions"]["amount"] +
+        data["Checks Paid"]["amount"] +
+        data["ATM & Debit Card Withdrawals"]["amount"] +
+        data["Electronic Withdrawals"]["amount"] +
+        data["Fees"]["amount"]
     )
+    
+    data["Ending Balance"]["amount"] = closing_bal
+    data["Ending Balance"]["count"] = total_count
 
-    df = pd.DataFrame(list(summary_data.items()), columns=["Type", "Amount"])
-    df["Amount"] = df["Amount"].apply(lambda x: f"${x:,.2f}")
-    return df
+    # Create DataFrame with exact column names requested
+    rows = []
+    for label, values in data.items():
+        rows.append({
+            "Type": label,
+            "INSTANCES": values["count"],
+            "AMOUNT": f"${values['amount']:,.2f}"
+            # Formatting Note: 
+            # - Positive for Beginning, Deposits, Ending
+            # - Negative for Checks, Withdrawals, Fees (handled by subtraction logic above)
+        })
+
+    df = pd.DataFrame(rows)
+    # Reorder columns to match screenshot: [Type (Index-like), INSTANCES, AMOUNT]
+    # But Streamlit displays index if we don't hide it. Let's make Type the first column.
+    return df[["Type", "INSTANCES", "AMOUNT"]]
 
 # ----------------------------
 # Streamlit UI
 # ----------------------------
 st.set_page_config(page_title="Bank Statement Analyzer (Hybrid)", layout="wide")
+inject_chase_styles()
 
 if "user" not in st.session_state:
     # Custom CSS for clean centered login/signup page
@@ -2264,13 +2492,15 @@ if uploaded or credit_card_file:
         include_opening_balance = st.checkbox(
             "Include Opening Balance",
             value=False,
-            help="Adds opening balance as a deposit before transactions"
+            help="Adds opening balance as a deposit before transactions",
+            key="include_opening_balance"
         )
 
     if st.button("Process Statement"):
         with st.spinner("Parsing & processing..."):
             all_txs = []
             meta = {}
+            all_raw_text = ""  # Store raw text for Chase summary extraction
             
             # Process main bank statements if uploaded
             if uploaded:
@@ -2284,6 +2514,9 @@ if uploaded or credit_card_file:
                         if unreadable:
                             st.warning(f"Unreadable pages in {up_file.name}: {unreadable}")
                     else:
+                        # Store raw text for Chase summary extraction
+                        all_raw_text += "\n".join(lines) + "\n"
+                        
                         # Use FallbackStatementParser for each file
                         fb_parser = FallbackStatementParser(include_opening_balance=include_opening_balance)
                         bank_txs, b_meta = fb_parser.parse_statement(lines)
@@ -2294,6 +2527,7 @@ if uploaded or credit_card_file:
                             meta = b_meta
                             st.session_state.opening_balance = fb_parser.opening_balance
                 st.session_state.meta = meta
+                st.session_state.raw_text = all_raw_text  # Save for summary extraction
             # Process credit card statement if uploaded
             if credit_card_file is not None:
                 cc_file_bytes = credit_card_file.read()
@@ -2388,9 +2622,10 @@ if uploaded or credit_card_file:
 
             sub_summary_df = get_sub_summary(
                 transactions=all_txs,
-                opening_balance=opening_balance
+                opening_balance=opening_balance,
+                raw_text=st.session_state.get("raw_text", "")
             )
-            st.table(sub_summary_df)
+            render_chase_table("CHECKING SUMMARY", sub_summary_df)
 from datetime import datetime, date
 
 all_transactions = st.session_state.get("all_transactions", [])
@@ -2481,18 +2716,83 @@ if "transactions" in st.session_state and st.session_state.transactions:
     stats = rg.generate_summary_statistics(transactions)
     cur = st.session_state.currency
 
-    st.header("📊 Summary")
+    # Get the opening balance setting and value
+    # Note: include_opening_balance is a checkbox in the sidebar/upload area
+    # We should use st.session_state values if available
+    include_ob = st.session_state.get('include_opening_balance', False)
+    ob_val = st.session_state.get('opening_balance', 0.0) if include_ob else 0.0
+
+    # Check for Chase summary data BEFORE displaying metrics
+    raw_text = st.session_state.get("raw_text", "")
+    chase_summary = None
+    if raw_text:
+        chase_summary = extract_chase_summary(raw_text)
+    
+    if chase_summary:
+        # Use Chase's official summary (more accurate than transaction parsing)
+        base_deposits = chase_summary["Deposits and Additions"]["amount"]
+        withdrawals_amount = abs(chase_summary["Checks Paid"]["amount"]) + \
+                            abs(chase_summary["ATM & Debit Card Withdrawals"]["amount"]) + \
+                            abs(chase_summary["Electronic Withdrawals"]["amount"]) + \
+                            abs(chase_summary["Fees"]["amount"])
+        
+        # Add opening balance to deposits if enabled
+        deposits_amount = base_deposits + ob_val
+        
+        # Update stats with Chase data
+        stats['Total Deposit Amount'] = float(deposits_amount)
+        stats['Total Withdrawal Amount'] = float(withdrawals_amount)
+        stats['Net Income'] = float(deposits_amount - withdrawals_amount)
+        
+        # Update transaction counts from Chase summary (add 1 for opening balance if included)
+        stats['Total Deposits'] = chase_summary["Deposits and Additions"]["count"] + (1 if ob_val > 0 else 0)
+        stats['Total Withdrawals'] = (chase_summary["Checks Paid"]["count"] + 
+                                     chase_summary["ATM & Debit Card Withdrawals"]["count"] + 
+                                     chase_summary["Electronic Withdrawals"]["count"] + 
+                                     chase_summary["Fees"]["count"])
+    else:
+        # For non-Chase statements, validate computed sums from transactions
+        # Note: FallbackStatementParser might have already added OB to transactions if enabled,
+        # but we recalculate here to be sure of the metrics display.
+        computed_deposits = sum(t.amount for t in transactions if t.amount > 0 and not is_tx_excluded(t))
+        computed_withdrawals = sum(-t.amount for t in transactions if t.amount < 0 and not is_tx_excluded(t))
+        
+        # If opening balance is enabled but not already in transactions list as a positive amount, 
+        # we might need to add it. However, FallbackStatementParser usually adds it.
+        # Let's ensure stats reflect the desired totals.
+        stats['Total Deposit Amount'] = float(computed_deposits)
+        stats['Total Withdrawal Amount'] = float(computed_withdrawals)
+        stats['Net Income'] = float(computed_deposits - computed_withdrawals)
+        
+        # Count transactions
+        stats['Total Deposits'] = len([t for t in transactions if t.amount > 0 and not is_tx_excluded(t)])
+        stats['Total Withdrawals'] = len([t for t in transactions if t.amount < 0 and not is_tx_excluded(t)])
+    
+    # Final check: if OB is enabled but somehow not in stats, add it
+    # (This is a safety catch for cases where it's not in the transaction list)
+    if include_ob and ob_val > 0:
+        # Check if the first deposit is already the opening balance to avoid double counting
+        first_dep = next((t for t in transactions if t.amount > 0), None)
+        is_ob_in_tx = first_dep and abs(first_dep.amount - ob_val) < 0.01
+        
+        if not chase_summary and not is_ob_in_tx:
+            stats['Total Deposit Amount'] += ob_val
+            stats['Total Deposits'] += 1
+            stats['Net Income'] += ob_val
+    
+    # Now display metrics ONCE with the correct stats
+    render_chase_header("SUMMARY")
     c1, c2, c3, c4 = st.columns(4)
 
     c1.metric(
         "Total Deposits",
         f"{cur} {stats['Total Deposit Amount']:,.2f}",
-        f"{stats['Total Deposits']} tx"
+        f"+{stats['Total Deposits']} tx"
     )
     c2.metric(
         "Total Withdrawals",
         f"{cur} {stats['Total Withdrawal Amount']:,.2f}",
-        f"{stats['Total Withdrawals']} tx"
+        f"+{stats['Total Withdrawals']} tx"
     )
     c3.metric(
         "Net Income",
@@ -2502,15 +2802,6 @@ if "transactions" in st.session_state and st.session_state.transactions:
         "Transactions",
         stats['Total Transactions']
     )
-
-
-    computed_deposits = sum(t.amount for t in transactions if t.amount > 0 and not is_tx_excluded(t))
-    computed_withdrawals = sum(-t.amount for t in transactions if t.amount < 0 and not is_tx_excluded(t))
-    if abs(computed_deposits - stats['Total Deposit Amount']) > 0.001 or abs(computed_withdrawals - stats['Total Withdrawal Amount']) > 0.001:
-        st.warning("Reconciliation mismatch: using computed sums as source of truth.")
-        stats['Total Deposit Amount'] = float(computed_deposits)
-        stats['Total Withdrawal Amount'] = float(computed_withdrawals)
-        stats['Net Income'] = float(computed_deposits - computed_withdrawals)
     
 
     
