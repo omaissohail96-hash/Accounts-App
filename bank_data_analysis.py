@@ -2626,20 +2626,19 @@ if uploaded or credit_card_file:
                 raw_text=st.session_state.get("raw_text", "")
             )
             render_chase_table("CHECKING SUMMARY", sub_summary_df)
+# =========================================================================
+# PROFESSIONAL COMPREHENSIVE FILTER SYSTEM
+# =========================================================================
 from datetime import datetime, date
+from calendar import monthrange
 
 all_transactions = st.session_state.get("all_transactions", [])
-filtered = []
-def _md_key(d):
-    try:
-        dt = datetime.strptime(d, "%Y-%m-%d")
-        return (dt.month, dt.day)
-    except:
-        return None
 
 if all_transactions:
-    st.subheader("📅 Filter by Date")
-
+    st.markdown("---")
+    st.header("🔍 Advanced Transaction Filter")
+    st.markdown("**Professional filtering system** - All filters work together to give you precise control")
+    
     # Extract all valid dates with full date information
     parsed_dates = []
     for tx in all_transactions:
@@ -2650,65 +2649,363 @@ if all_transactions:
                 pass
 
     if not parsed_dates:
-        st.warning("No valid dates found in transactions.")
+        st.warning("⚠️ No valid dates found in transactions.")
     else:
         # Get actual min and max dates from ALL uploaded statements (bank + credit card)
         min_date = min(parsed_dates)
         max_date = max(parsed_dates)
         
         # Calculate first day of starting month and last day of ending month
-        from calendar import monthrange
         first_day_of_start_month = min_date.replace(day=1)
         last_day_of_end_month = max_date.replace(day=monthrange(max_date.year, max_date.month)[1])
         
-        st.info(f"📊 Date range in uploaded statements: {min_date.strftime('%b %d, %Y')} to {max_date.strftime('%b %d, %Y')}")
+        # Store coverage dates in session state for reference
+        st.session_state.statement_coverage_start = min_date
+        st.session_state.statement_coverage_end = max_date
+        
+        # Display coverage information prominently
+        st.info(
+            f"📊 **Statement Coverage:** {min_date.strftime('%b %d, %Y')} → {max_date.strftime('%b %d, %Y')} "
+            f"({(max_date - min_date).days} days, {len(all_transactions)} total transactions)"
+        )
 
-        col1, col2 = st.columns(2)
+        # Initialize filter state if not present
+        if 'filter_active' not in st.session_state:
+            st.session_state.filter_active = False
+            st.session_state.filter_locked = False
+            
+        # Show lock status
+        lock_col1, lock_col2 = st.columns([3, 1])
+        with lock_col1:
+            if st.session_state.get('filter_locked', False):
+                st.warning("🔒 **Filter is LOCKED** - Settings preserved for printing/exporting")
+        with lock_col2:
+            if st.session_state.get('filter_locked', False):
+                if st.button("🔓 Unlock Filter"):
+                    st.session_state.filter_locked = False
+                    st.success("Filter unlocked! You can now adjust settings.")
+                    st.rerun()
+            else:
+                if st.button("🔒 Lock Filter"):
+                    st.session_state.filter_locked = True
+                    st.success("Filter locked! Settings preserved for printing/exporting.")
+                    st.rerun()
+        
+        # Disable filter controls if locked
+        filter_disabled = st.session_state.get('filter_locked', False)
+        
+        # ===== DATE FILTER =====
+        st.subheader("📅 Date Range")
+        col_date1, col_date2 = st.columns(2)
 
-        with col1:
+        with col_date1:
             start_md = st.date_input(
                 "Start Date",
-                value=first_day_of_start_month,
-                min_value=first_day_of_start_month,  # Allow selection from first day of month
-                max_value=last_day_of_end_month,  # Allow selection to last day of month
-                key="filter_start_md"
+                value=st.session_state.get('filter_start_date', first_day_of_start_month),
+                min_value=first_day_of_start_month,
+                max_value=last_day_of_end_month,
+                key="filter_start_md",
+                disabled=filter_disabled
             )
 
-        with col2:
+        with col_date2:
             end_md = st.date_input(
                 "End Date",
-                value=last_day_of_end_month,
-                min_value=first_day_of_start_month,  # Allow selection from first day of month
-                max_value=last_day_of_end_month,  # Allow selection to last day of month
-                key="filter_end_md"
+                value=st.session_state.get('filter_end_date', last_day_of_end_month),
+                min_value=first_day_of_start_month,
+                max_value=last_day_of_end_month,
+                key="filter_end_md",
+                disabled=filter_disabled
             )
-
-        if st.button("Apply Date Filter"):
-            for tx in all_transactions:
-                if not tx.date:
-                    continue
-                try:
-                    tx_date = datetime.strptime(tx.date, "%Y-%m-%d").date()
-                    if start_md <= tx_date <= end_md:
-                        filtered.append(tx)
-                except:
-                    continue
-
-            st.session_state.filtered_transactions = filtered
-
-            st.success(
-                f"Showing {len(filtered)} transactions "
-                f"from {start_md.strftime('%Y-%m-%d')} to {end_md.strftime('%Y-%m-%d')}"
+        
+        # ===== TRANSACTION TYPE FILTER =====
+        st.subheader("💵 Transaction Type")
+        transaction_type_filter = st.radio(
+            "Show:",
+            ["All Transactions", "Deposits Only", "Withdrawals Only"],
+            index=st.session_state.get('filter_tx_type_index', 0),
+            key="filter_tx_type",
+            horizontal=True,
+            disabled=filter_disabled
+        )
+        
+        # ===== AMOUNT FILTER =====
+        st.subheader("💰 Amount Range")
+        col_amt1, col_amt2 = st.columns(2)
+        
+        # Get min/max amounts from transactions
+        all_amounts = [abs(tx.amount) for tx in all_transactions if tx.amount]
+        min_amount_possible = min(all_amounts) if all_amounts else 0.0
+        max_amount_possible = max(all_amounts) if all_amounts else 10000.0
+        
+        with col_amt1:
+            min_amount_filter = st.number_input(
+                "Minimum Amount ($)",
+                min_value=0.0,
+                max_value=max_amount_possible,
+                value=st.session_state.get('filter_min_amount', 0.0),
+                step=10.0,
+                key="filter_min_amt",
+                disabled=filter_disabled
             )
-            st.rerun()
+        
+        with col_amt2:
+            max_amount_filter = st.number_input(
+                "Maximum Amount ($)",
+                min_value=0.0,
+                max_value=max_amount_possible * 2,  # Allow some overhead
+                value=st.session_state.get('filter_max_amount', max_amount_possible),
+                step=10.0,
+                key="filter_max_amt",
+                disabled=filter_disabled
+            )
+        
+        # ===== VENDOR/KEYWORD SEARCH =====
+        st.subheader("🔎 Search by Vendor or Keyword")
+        search_text = st.text_input(
+            "Enter vendor name or keyword (searches in vendor, description, and transaction details)",
+            value=st.session_state.get('filter_search_text', ""),
+            placeholder="e.g., Amazon, Stripe, Check, etc.",
+            key="filter_search",
+            disabled=filter_disabled
+        )
+        
+        # ===== ACCOUNT CODE FILTER =====
+        st.subheader("📊 Account Code Filter")
+        
+        # Load all account codes
+        import json
+        from pathlib import Path
+        all_account_options = {"All Account Codes": "ALL"}
+        account_file = Path(__file__).parent / 'account_keywords.json'
+        try:
+            with open(account_file, 'r') as f:
+                data = json.load(f)
+                for acc_code, acc_details in sorted(data.items()):
+                    all_account_options[f"{acc_code} · {acc_details['name']}"] = acc_code
+        except Exception as e:
+            st.warning(f"⚠️ Could not load account codes: {e}")
+        
+        account_code_filter = st.selectbox(
+            "Filter by Account Code:",
+            options=list(all_account_options.keys()),
+            index=st.session_state.get('filter_account_index', 0),
+            key="filter_account_code",
+            disabled=filter_disabled
+        )
+        
+        # ===== APPLY FILTER BUTTON =====
+        st.markdown("---")
+        col_btn1, col_btn2, col_btn3 = st.columns([2, 2, 2])
+        
+        with col_btn1:
+            if st.button("✅ Apply Filter", type="primary", disabled=filter_disabled, use_container_width=True):
+                # Store filter settings in session state
+                st.session_state.filter_start_date = start_md
+                st.session_state.filter_end_date = end_md
+                st.session_state.filter_min_amount = min_amount_filter
+                st.session_state.filter_max_amount = max_amount_filter
+                st.session_state.filter_search_text = search_text
+                st.session_state.filter_tx_type_index = ["All Transactions", "Deposits Only", "Withdrawals Only"].index(transaction_type_filter)
+                st.session_state.filter_account_index = list(all_account_options.keys()).index(account_code_filter)
+                
+                # Apply all filters
+                filtered = []
+                filter_stats = {
+                    'date_filtered': 0,
+                    'type_filtered': 0,
+                    'amount_filtered': 0,
+                    'search_filtered': 0,
+                    'account_filtered': 0
+                }
+                
+                for tx in all_transactions:
+                    # DATE FILTER
+                    if tx.date:
+                        try:
+                            tx_date = datetime.strptime(tx.date, "%Y-%m-%d").date()
+                            if not (start_md <= tx_date <= end_md):
+                                filter_stats['date_filtered'] += 1
+                                continue
+                        except:
+                            continue
+                    
+                    # TRANSACTION TYPE FILTER
+                    if transaction_type_filter == "Deposits Only" and tx.amount <= 0:
+                        filter_stats['type_filtered'] += 1
+                        continue
+                    elif transaction_type_filter == "Withdrawals Only" and tx.amount >= 0:
+                        filter_stats['type_filtered'] += 1
+                        continue
+                    
+                    # AMOUNT FILTER
+                    tx_abs_amount = abs(tx.amount)
+                    if tx_abs_amount < min_amount_filter or tx_abs_amount > max_amount_filter:
+                        filter_stats['amount_filtered'] += 1
+                        continue
+                    
+                    # SEARCH FILTER
+                    if search_text.strip():
+                        search_lower = search_text.lower().strip()
+                        searchable_text = f"{tx.vendor} {tx.description} {tx.raw_line}".lower()
+                        if search_lower not in searchable_text:
+                            filter_stats['search_filtered'] += 1
+                            continue
+                    
+                    # ACCOUNT CODE FILTER
+                    if account_code_filter != "All Account Codes":
+                        selected_account_code = all_account_options[account_code_filter]
+                        tx_account_code = getattr(tx, 'account_code', None)
+                        if tx_account_code != selected_account_code:
+                            filter_stats['account_filtered'] += 1
+                            continue
+                    
+                    # Transaction passed all filters
+                    filtered.append(tx)
 
-        if st.button("Reset Date Filter"):
-            st.session_state.filtered_transactions = all_transactions
-            st.info("Date filter cleared. Showing all transactions.")
+                st.session_state.filtered_transactions = filtered
+                st.session_state.filter_active = True
+                st.session_state.filter_stats = filter_stats
+
+                # Calculate totals for success message
+                filtered_active_msg = [t for t in filtered if not getattr(t, "is_excluded", False)]
+                msg_deposits = sum(t.amount for t in filtered_active_msg if t.amount > 0)
+                msg_withdrawals = sum(abs(t.amount) for t in filtered_active_msg if t.amount < 0)
+                msg_deposits_count = len([t for t in filtered_active_msg if t.amount > 0])
+                msg_withdrawals_count = len([t for t in filtered_active_msg if t.amount < 0])
+
+                # Success message with details
+                total_filtered_out = len(all_transactions) - len(filtered)
+                st.success(
+                    f"✅ **Filter Applied Successfully!**\n\n"
+                    f"📊 Showing **{len(filtered)}** out of **{len(all_transactions)}** transactions\n\n"
+                    f"🗓️ Date Range: {start_md.strftime('%b %d, %Y')} → {end_md.strftime('%b %d, %Y')}\n\n"
+                    f"---\n\n"
+                    f"💰 Deposits: **${msg_deposits:,.2f}** ({msg_deposits_count} tx)\n\n"
+                    f"💸 Withdrawals: **${msg_withdrawals:,.2f}** ({msg_withdrawals_count} tx)\n\n"
+                    f"📊 Net Income: **${msg_deposits - msg_withdrawals:,.2f}**"
+                )
+                
+                # Show filter breakdown
+                if total_filtered_out > 0:
+                    with st.expander("📋 Filter Breakdown"):
+                        if filter_stats['date_filtered'] > 0:
+                            st.write(f"• Date filter removed: {filter_stats['date_filtered']} transactions")
+                        if filter_stats['type_filtered'] > 0:
+                            st.write(f"• Type filter removed: {filter_stats['type_filtered']} transactions")
+                        if filter_stats['amount_filtered'] > 0:
+                            st.write(f"• Amount filter removed: {filter_stats['amount_filtered']} transactions")
+                        if filter_stats['search_filtered'] > 0:
+                            st.write(f"• Search filter removed: {filter_stats['search_filtered']} transactions")
+                        if filter_stats['account_filtered'] > 0:
+                            st.write(f"• Account code filter removed: {filter_stats['account_filtered']} transactions")
+                
+                st.rerun()
+
+        with col_btn2:
+            if st.button("🔄 Reset Filter", disabled=filter_disabled, use_container_width=True):
+                st.session_state.filtered_transactions = all_transactions
+                st.session_state.filter_active = False
+                st.session_state.filter_start_date = first_day_of_start_month
+                st.session_state.filter_end_date = last_day_of_end_month
+                st.session_state.filter_min_amount = 0.0
+                st.session_state.filter_max_amount = max_amount_possible
+                st.session_state.filter_search_text = ""
+                st.session_state.filter_tx_type_index = 0
+                st.session_state.filter_account_index = 0
+                st.info("🔄 Filter reset. Showing all transactions.")
+                st.rerun()
+        
+        with col_btn3:
+            if st.session_state.get('filter_active', False):
+                st.metric("Filtered", f"{len(st.session_state.get('filtered_transactions', []))} tx")
+            else:
+                st.metric("Total", f"{len(all_transactions)} tx")
+        
+        # Show active filter summary
+        if st.session_state.get('filter_active', False):
+            st.markdown("---")
+            
+            # Calculate totals for the summary
+            filtered_txs_sum = st.session_state.get('filtered_transactions', [])
+            filtered_active_sum = [t for t in filtered_txs_sum if not getattr(t, "is_excluded", False)]
+            summary_deposits = sum(t.amount for t in filtered_active_sum if t.amount > 0)
+            summary_withdrawals = sum(abs(t.amount) for t in filtered_active_sum if t.amount < 0)
+            summary_deposits_count = len([t for t in filtered_active_sum if t.amount > 0])
+            summary_withdrawals_count = len([t for t in filtered_active_sum if t.amount < 0])
+            
+            st.info(
+                f"🔍 **Active Filters:**\n\n"
+                f"📅 Dates: {st.session_state.filter_start_date.strftime('%b %d, %Y')} - {st.session_state.filter_end_date.strftime('%b %d, %Y')}\n\n"
+                f"💵 Type: {transaction_type_filter}\n\n"
+                f"💰 Amount: ${st.session_state.filter_min_amount:,.2f} - ${st.session_state.filter_max_amount:,.2f}" +
+                (f"\n\n🔎 Search: '{st.session_state.filter_search_text}'" if st.session_state.filter_search_text else "") +
+                (f"\n\n📊 Account: {account_code_filter}" if account_code_filter != "All Account Codes" else "") +
+                f"\n\n---\n\n"
+                f"**📈 Filtered Results:**\n\n"
+                f"💰 Total Deposits: ${summary_deposits:,.2f} ({summary_deposits_count} transactions)\n\n"
+                f"💸 Total Withdrawals: ${summary_withdrawals:,.2f} ({summary_withdrawals_count} transactions)\n\n"
+                f"📊 Net Income: ${summary_deposits - summary_withdrawals:,.2f}"
+            )
 
         
 # Dashboard (same UI as before)
 if "transactions" in st.session_state and st.session_state.transactions:
+    # ============================================
+    # FILTER STATUS BANNER (Always visible at top)
+    # ============================================
+    if st.session_state.get('filter_active', False):
+        # Calculate filtered totals for banner
+        filtered_txs = st.session_state.get('filtered_transactions', [])
+        filtered_active = [t for t in filtered_txs if not getattr(t, "is_excluded", False)]
+        filtered_deposits = sum(t.amount for t in filtered_active if t.amount > 0)
+        filtered_withdrawals = sum(abs(t.amount) for t in filtered_active if t.amount < 0)
+        
+        filter_banner_cols = st.columns([4, 1])
+        with filter_banner_cols[0]:
+            lock_text = " | 🔒 LOCKED" if st.session_state.get('filter_locked', False) else ""
+            banner_html = f"""
+                <div style="background-color: #4CAF50; color: white; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
+                    <h3 style="margin: 0; color: white;">🔍 FILTER ACTIVE</h3>
+                    <p style="margin: 5px 0 0 0; color: white;">
+                        Showing <strong>{len(st.session_state.get('filtered_transactions', []))}</strong> of <strong>{len(st.session_state.get('all_transactions', []))}</strong> transactions | 
+                        {st.session_state.get('filter_start_date', date.today()).strftime('%b %d, %Y')} to {st.session_state.get('filter_end_date', date.today()).strftime('%b %d, %Y')}{lock_text}
+                    </p>
+                    <p style="margin: 5px 0 0 0; color: white; font-size: 0.9em;">
+                        💰 Deposits: <strong>${filtered_deposits:,.2f}</strong> | 
+                        💸 Withdrawals: <strong>${filtered_withdrawals:,.2f}</strong> | 
+                        📊 Net: <strong>${filtered_deposits - filtered_withdrawals:,.2f}</strong>
+                    </p>
+                </div>
+            """
+            st.markdown(banner_html, unsafe_allow_html=True)
+        with filter_banner_cols[1]:
+            if st.button("📊 View All", key="view_all_banner"):
+                st.session_state.filter_active = False
+                st.session_state.filtered_transactions = st.session_state.all_transactions
+                st.rerun()
+    else:
+        # Calculate totals for all transactions
+        all_txs = st.session_state.get('all_transactions', [])
+        all_active = [t for t in all_txs if not getattr(t, "is_excluded", False)]
+        all_deposits = sum(t.amount for t in all_active if t.amount > 0)
+        all_withdrawals = sum(abs(t.amount) for t in all_active if t.amount < 0)
+        
+        banner_html = f"""
+            <div style="background-color: #2196F3; color: white; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
+                <h3 style="margin: 0; color: white;">📊 ALL TRANSACTIONS</h3>
+                <p style="margin: 5px 0 0 0; color: white;">
+                    Showing all <strong>{len(all_txs)}</strong> transactions from uploaded statements
+                </p>
+                <p style="margin: 5px 0 0 0; color: white; font-size: 0.9em;">
+                    💰 Deposits: <strong>${all_deposits:,.2f}</strong> | 
+                    💸 Withdrawals: <strong>${all_withdrawals:,.2f}</strong> | 
+                    📊 Net: <strong>${all_deposits - all_withdrawals:,.2f}</strong>
+                </p>
+            </div>
+        """
+        st.markdown(banner_html, unsafe_allow_html=True)
+    
     transactions: List[Transaction] = get_active_transactions()
 
 
@@ -2722,66 +3019,30 @@ if "transactions" in st.session_state and st.session_state.transactions:
     include_ob = st.session_state.get('include_opening_balance', False)
     ob_val = st.session_state.get('opening_balance', 0.0) if include_ob else 0.0
 
-    # Check for Chase summary data BEFORE displaying metrics
-    raw_text = st.session_state.get("raw_text", "")
-    chase_summary = None
-    if raw_text:
-        chase_summary = extract_chase_summary(raw_text)
+    # ALWAYS calculate from filtered transactions to respect date filter
+    # This ensures metrics update based on active filter
+    computed_deposits = sum(t.amount for t in transactions if t.amount > 0 and not is_tx_excluded(t))
+    computed_withdrawals = sum(-t.amount for t in transactions if t.amount < 0 and not is_tx_excluded(t))
     
-    if chase_summary:
-        # Use Chase's official summary (more accurate than transaction parsing)
-        base_deposits = chase_summary["Deposits and Additions"]["amount"]
-        withdrawals_amount = abs(chase_summary["Checks Paid"]["amount"]) + \
-                            abs(chase_summary["ATM & Debit Card Withdrawals"]["amount"]) + \
-                            abs(chase_summary["Electronic Withdrawals"]["amount"]) + \
-                            abs(chase_summary["Fees"]["amount"])
-        
-        # Add opening balance to deposits if enabled
-        deposits_amount = base_deposits + ob_val
-        
-        # Update stats with Chase data
-        stats['Total Deposit Amount'] = float(deposits_amount)
-        stats['Total Withdrawal Amount'] = float(withdrawals_amount)
-        stats['Net Income'] = float(deposits_amount - withdrawals_amount)
-        
-        # Update transaction counts from Chase summary (add 1 for opening balance if included)
-        stats['Total Deposits'] = chase_summary["Deposits and Additions"]["count"] + (1 if ob_val > 0 else 0)
-        stats['Total Withdrawals'] = (chase_summary["Checks Paid"]["count"] + 
-                                     chase_summary["ATM & Debit Card Withdrawals"]["count"] + 
-                                     chase_summary["Electronic Withdrawals"]["count"] + 
-                                     chase_summary["Fees"]["count"])
-    else:
-        # For non-Chase statements, validate computed sums from transactions
-        # Note: FallbackStatementParser might have already added OB to transactions if enabled,
-        # but we recalculate here to be sure of the metrics display.
-        computed_deposits = sum(t.amount for t in transactions if t.amount > 0 and not is_tx_excluded(t))
-        computed_withdrawals = sum(-t.amount for t in transactions if t.amount < 0 and not is_tx_excluded(t))
-        
-        # If opening balance is enabled but not already in transactions list as a positive amount, 
-        # we might need to add it. However, FallbackStatementParser usually adds it.
-        # Let's ensure stats reflect the desired totals.
-        stats['Total Deposit Amount'] = float(computed_deposits)
-        stats['Total Withdrawal Amount'] = float(computed_withdrawals)
-        stats['Net Income'] = float(computed_deposits - computed_withdrawals)
-        
-        # Count transactions
-        stats['Total Deposits'] = len([t for t in transactions if t.amount > 0 and not is_tx_excluded(t)])
-        stats['Total Withdrawals'] = len([t for t in transactions if t.amount < 0 and not is_tx_excluded(t)])
+    # Update stats with filtered transaction data
+    stats['Total Deposit Amount'] = float(computed_deposits)
+    stats['Total Withdrawal Amount'] = float(computed_withdrawals)
+    stats['Net Income'] = float(computed_deposits - computed_withdrawals)
     
-    # Final check: if OB is enabled but somehow not in stats, add it
-    # (This is a safety catch for cases where it's not in the transaction list)
-    if include_ob and ob_val > 0:
-        # Check if the first deposit is already the opening balance to avoid double counting
-        first_dep = next((t for t in transactions if t.amount > 0), None)
-        is_ob_in_tx = first_dep and abs(first_dep.amount - ob_val) < 0.01
-        
-        if not chase_summary and not is_ob_in_tx:
-            stats['Total Deposit Amount'] += ob_val
-            stats['Total Deposits'] += 1
-            stats['Net Income'] += ob_val
+    # Count transactions from filtered set
+    stats['Total Deposits'] = len([t for t in transactions if t.amount > 0 and not is_tx_excluded(t)])
+    stats['Total Withdrawals'] = len([t for t in transactions if t.amount < 0 and not is_tx_excluded(t)])
+    stats['Total Transactions'] = len(transactions)
     
-    # Now display metrics ONCE with the correct stats
+    # Now display metrics with the filtered stats
     render_chase_header("SUMMARY")
+    
+    # Show filter status in header if active
+    if st.session_state.get('filter_active', False):
+        st.caption(f"📊 Statistics based on filtered data ({len(transactions)} transactions)")
+    else:
+        st.caption(f"📊 Statistics based on all transactions ({len(transactions)} transactions)")
+    
     c1, c2, c3, c4 = st.columns(4)
 
     c1.metric(
@@ -3019,8 +3280,14 @@ if "transactions" in st.session_state and st.session_state.transactions:
 
             # ---- Robust period detection from date filter or min → max date
             # Check if user has applied a date filter
-            if "filter_start_md" in st.session_state and "filter_end_md" in st.session_state:
-                # Use the filtered dates from the date filter
+            if st.session_state.get('filter_active', False) and 'filter_start_date' in st.session_state and 'filter_end_date' in st.session_state:
+                # Use the EXACT filtered dates (don't expand to full months when filter is active)
+                start = st.session_state.filter_start_date
+                end = st.session_state.filter_end_date
+                # Format: "Jan 15, 2025 - Mar 20, 2025" (exact dates from filter)
+                period_input = f"{start.strftime('%b %d, %Y')} - {end.strftime('%b %d, %Y')}"
+            elif "filter_start_md" in st.session_state and "filter_end_md" in st.session_state:
+                # Use the date picker values (when filter UI is present but not applied)
                 start = st.session_state.filter_start_md
                 end = st.session_state.filter_end_md
                 # Get first day of starting month and last day of ending month
@@ -3587,19 +3854,75 @@ if "transactions" in st.session_state and st.session_state.transactions:
         st.markdown("4. **Exclusions**: 'stripe' transactions except 'refund' → Sales")
     
     # Downloads
-    st.header("📥 Download")
+    st.markdown("---")
+    st.header("📥 Download & Print Reports")
+    
+    # Show filter status in download section
+    if st.session_state.get('filter_active', False):
+        filter_info = f"""
+        **🔍 Active Filter Applied to Exports:**
+        - Date Range: {st.session_state.get('filter_start_date', 'N/A').strftime('%b %d, %Y')} - {st.session_state.get('filter_end_date', 'N/A').strftime('%b %d, %Y')}
+        - Showing {len(st.session_state.get('filtered_transactions', []))} of {len(st.session_state.get('all_transactions', []))} transactions
+        """
+        st.info(filter_info)
+        if st.session_state.get('filter_locked', False):
+            st.success("🔒 Filter is LOCKED - All exports and prints will use these filtered results")
+    
+    # Print button
+    st.markdown("""
+        <style>
+        @media print {
+            .stButton, .stFileUploader, .stSelectbox, .stTextInput, .stNumberInput, .stDateInput {
+                display: none !important;
+            }
+            .filter-status {
+                border: 2px solid #4CAF50;
+                padding: 10px;
+                margin: 10px 0;
+                background-color: #f0f0f0;
+                page-break-inside: avoid;
+            }
+        }
+        </style>
+    """, unsafe_allow_html=True)
+    
+    if st.button("🖨️ Print Current View", type="secondary", use_container_width=True):
+        st.markdown('<script>window.print();</script>', unsafe_allow_html=True)
+        st.info("💡 Print dialog should open. The current filter settings will be preserved in the printout.")
+    
+    st.markdown("---")
+    st.subheader("Download Files")
+    
     c1,c2,c3,c4 = st.columns(4)
+    
+    # Get the appropriate transactions for export (filtered if active)
+    export_transactions = get_active_transactions()
+    rg_export = ReportGenerator()
+    
     with c1:
-        dep_csv = st.session_state.deposit_df.to_csv(index=False) if (st.session_state.deposit_df is not None and not st.session_state.deposit_df.empty) else ""
-        st.download_button("⬇ Deposits CSV", dep_csv, "deposits.csv", mime="text/csv")
+        # Regenerate deposits with current filter
+        export_deposits_df = rg_export.generate_deposits_summary(export_transactions)
+        dep_csv = export_deposits_df.to_csv(index=False) if (export_deposits_df is not None and not export_deposits_df.empty) else ""
+        filename_suffix = "_filtered" if st.session_state.get('filter_active', False) else ""
+        st.download_button("⬇ Deposits CSV", dep_csv, f"deposits{filename_suffix}.csv", mime="text/csv")
+    
     with c2:
-        wd_csv = st.session_state.withdrawal_df.to_csv(index=False) if (st.session_state.withdrawal_df is not None and not st.session_state.withdrawal_df.empty) else ""
-        st.download_button("⬇ Withdrawals CSV", wd_csv, "withdrawals.csv", mime="text/csv")
+        # Regenerate withdrawals with current filter
+        export_withdrawals_df = rg_export.generate_withdrawals_summary(export_transactions)
+        wd_csv = export_withdrawals_df.to_csv(index=False) if (export_withdrawals_df is not None and not export_withdrawals_df.empty) else ""
+        filename_suffix = "_filtered" if st.session_state.get('filter_active', False) else ""
+        st.download_button("⬇ Withdrawals CSV", wd_csv, f"withdrawals{filename_suffix}.csv", mime="text/csv")
+    
     with c3:
-        pnl_csv = st.session_state.pl_df.to_csv(index=False) if (st.session_state.pl_df is not None and not st.session_state.pl_df.empty) else ""
-        st.download_button("⬇ P&L CSV", pnl_csv, "pnl.csv", mime="text/csv")
+        # Regenerate P&L with current filter
+        export_pl_df = rg_export.generate_pl_report(export_transactions)
+        pnl_csv = export_pl_df.to_csv(index=False) if (export_pl_df is not None and not export_pl_df.empty) else ""
+        filename_suffix = "_filtered" if st.session_state.get('filter_active', False) else ""
+        st.download_button("⬇ P&L CSV", pnl_csv, f"pnl{filename_suffix}.csv", mime="text/csv")
+    
     with c4:
         pl_statement_text = st.session_state.get("pl_statement_text", "")
-        st.download_button("⬇ P&L Statement", pl_statement_text, "pl_statement.txt", mime="text/plain")
+        filename_suffix = "_filtered" if st.session_state.get('filter_active', False) else ""
+        st.download_button("⬇ P&L Statement", pl_statement_text, f"pl_statement{filename_suffix}.txt", mime="text/plain")
 
     st.success("✅ Report generated. Verify totals against your bank statement.")
