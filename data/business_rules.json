@@ -15,47 +15,7 @@
   "330c8174-b3eb-40b1-9684-39fe63f94194": {
     "_note": "Example business with advanced rules",
     "Sample Business": {
-      "rules": [
-        {
-          "keyword": "stripe",
-          "account_code": "601",
-          "account_display": "601 \u00c2\u00b7 SALES",
-          "exclude_keywords": [
-            "refund",
-            "chargeback"
-          ],
-          "priority": 1,
-          "_comment": "Stripe payments (excluding refunds) go to sales"
-        },
-        {
-          "keyword": "stripe",
-          "account_code": "602",
-          "account_display": "602 \u00c2\u00b7 RETURNS & ALLOWANCES",
-          "additional_keywords": [
-            "refund"
-          ],
-          "priority": 2,
-          "_comment": "Stripe refunds go to returns"
-        },
-        {
-          "keyword": "payment",
-          "account_code": "928",
-          "account_display": "928 \u00c2\u00b7 RENT",
-          "additional_keywords": [
-            "rent",
-            "landlord"
-          ],
-          "priority": 1,
-          "_comment": "Payments with 'rent' or 'landlord' keywords go to rent category"
-        },
-        {
-          "keyword": "check",
-          "account_code": "801",
-          "account_display": "801 \u00b7 SALARIES-OFFICERS",
-          "min_amount": 500.0,
-          "priority": 1
-        }
-      ]
+      "rules": []
     }
   }
 }
