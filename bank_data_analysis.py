@@ -523,26 +523,51 @@ class FallbackStatementParser:
     
     def _extract_statement_year(self, lines: List[str]):
         """Extract year from statement period or date patterns in the document"""
-        # Look for patterns like "Statement Period: 11/01/2025 - 11/30/2025" or dates with year
-        for line in lines[:50]:  # Check first 50 lines
-            # Pattern 1: Statement period with year
-            m = re.search(r'(statement period|period|dates?).*?(\d{1,2}[/-]\d{1,2}[/-](\d{4}))', line, re.I)
+        # Search through more lines (first 100 lines) to find year
+        search_lines = min(100, len(lines))
+        
+        for line in lines[:search_lines]:
+            line_clean = line.strip()
+            
+            # Pattern 1: Statement period with year (e.g., "Statement Period: 12/01/2024 - 12/31/2024")
+            m = re.search(r'(statement period|period|statement date|dates?).*?(\d{1,2}[/-]\d{1,2}[/-](\d{4}))', line, re.I)
             if m:
                 year = int(m.group(3))
                 if 2000 <= year <= datetime.now().year + 1:
                     return year
             
-            # Pattern 2: Any full date with 4-digit year
+            # Pattern 2: Date range with year (e.g., "12/01/2024 - 12/31/2024" or "December 1, 2024 - December 31, 2024")
+            m = re.search(r'(\d{1,2}[/-]\d{1,2}[/-](\d{4}))\s*[-–to]+\s*\d{1,2}[/-]\d{1,2}[/-]\d{4}', line, re.I)
+            if m:
+                year = int(m.group(2))
+                if 2000 <= year <= datetime.now().year + 1:
+                    return year
+            
+            # Pattern 3: Any full date with 4-digit year (e.g., "12/17/2024")
             m = re.search(r'\b\d{1,2}[/-]\d{1,2}[/-](\d{4})\b', line)
             if m:
                 year = int(m.group(1))
                 if 2000 <= year <= datetime.now().year + 1:
                     return year
             
-            # Pattern 3: YYYY-MM-DD format
+            # Pattern 4: YYYY-MM-DD format
             m = re.search(r'\b(\d{4})-\d{1,2}-\d{1,2}\b', line)
             if m:
                 year = int(m.group(1))
+                if 2000 <= year <= datetime.now().year + 1:
+                    return year
+            
+            # Pattern 5: Month name with year (e.g., "December 2024", "Dec 2024")
+            m = re.search(r'\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[,\s]+(\d{4})\b', line, re.I)
+            if m:
+                year = int(m.group(2))
+                if 2000 <= year <= datetime.now().year + 1:
+                    return year
+            
+            # Pattern 6: Year explicitly mentioned (e.g., "For the year 2024")
+            m = re.search(r'\b(for the year|year|fiscal year)\s+(\d{4})\b', line, re.I)
+            if m:
+                year = int(m.group(2))
                 if 2000 <= year <= datetime.now().year + 1:
                     return year
         
@@ -726,11 +751,15 @@ class FallbackStatementParser:
 
 
         return "UNKNOWN"
-    def parse_statement(self, lines: List[str]) -> Tuple[List[Transaction], Dict[str, Any]]:
+    def parse_statement(self, lines: List[str], manual_year: Optional[int] = None) -> Tuple[List[Transaction], Dict[str, Any]]:
         txs: List[Transaction] = []
         
-        # Extract statement year first
-        self.statement_year = self._extract_statement_year(lines)
+        # Extract statement year - use manual year if provided, otherwise auto-detect
+        if manual_year:
+            self.statement_year = manual_year
+        else:
+            self.statement_year = self._extract_statement_year(lines)
+        
         global _STATEMENT_YEAR
         _STATEMENT_YEAR = self.statement_year
         
@@ -2484,7 +2513,56 @@ if uploaded or credit_card_file:
     if credit_card_file:
         st.info(f"Credit Card Statement: {credit_card_file.name} — {credit_card_file.size/1024:.1f} KB")
     
+    # Year selection for uploaded files
+    st.markdown("---")
+    st.subheader("📅 Statement Year Selection")
+    st.markdown("**Optional:** Manually specify the year for your statement(s) if automatic detection fails")
+    
+    # Generate year options (last 10 years)
+    current_year = datetime.now().year
+    year_options = ["Auto-detect"] + [str(y) for y in range(current_year, current_year - 10, -1)]
+    
+    # Store selected years in a dictionary
+    selected_years = {}
+    
+    if uploaded:
+        uploaded_list = uploaded if isinstance(uploaded, list) else [uploaded]
+        st.markdown("**Bank Statement(s):**")
+        for idx, file in enumerate(uploaded_list):
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.text(f"📄 {file.name}")
+            with col2:
+                year_choice = st.selectbox(
+                    "Year",
+                    year_options,
+                    key=f"year_bank_{idx}_{file.name}",
+                    label_visibility="collapsed"
+                )
+                if year_choice != "Auto-detect":
+                    selected_years[file.name] = int(year_choice)
+    
+    if credit_card_file:
+        st.markdown("**Credit Card Statement:**")
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.text(f"💳 {credit_card_file.name}")
+        with col2:
+            year_choice = st.selectbox(
+                "Year",
+                year_options,
+                key=f"year_cc_{credit_card_file.name}",
+                label_visibility="collapsed"
+            )
+            if year_choice != "Auto-detect":
+                selected_years[credit_card_file.name] = int(year_choice)
+    
+    st.markdown("---")
+    
     currency = st.selectbox("Currency", ["PKR", "USD", "EUR", "GBP", "AED", "CAD", "AUD"], index=1)
+    
+    # Store selected years in session state for use during parsing
+    st.session_state.selected_years = selected_years
     
     # Only show opening balance checkbox if bank statement is uploaded
     include_opening_balance = False
@@ -2517,9 +2595,14 @@ if uploaded or credit_card_file:
                         # Store raw text for Chase summary extraction
                         all_raw_text += "\n".join(lines) + "\n"
                         
+                        # Check if user manually selected year for this file
+                        manual_year = selected_years.get(up_file.name)
+                        if manual_year:
+                            st.info(f"✅ Using manually selected year for {up_file.name}: **{manual_year}**")
+                        
                         # Use FallbackStatementParser for each file
                         fb_parser = FallbackStatementParser(include_opening_balance=include_opening_balance)
-                        bank_txs, b_meta = fb_parser.parse_statement(lines)
+                        bank_txs, b_meta = fb_parser.parse_statement(lines, manual_year=manual_year)
                         all_txs.extend(bank_txs)
                         
                         # Store meta from the first file or merge?
@@ -2539,6 +2622,19 @@ if uploaded or credit_card_file:
                     if unreadable:
                         st.warning(f"Unreadable pages: {unreadable}")
                 else:
+                    # Check if user manually selected year for credit card file
+                    cc_manual_year = selected_years.get(credit_card_file.name)
+                    if cc_manual_year:
+                        _STATEMENT_YEAR = cc_manual_year
+                        st.info(f"✅ Using manually selected year for {credit_card_file.name}: **{cc_manual_year}**")
+                    elif not uploaded:
+                        # If no bank statement was uploaded and no manual year, try to extract year from CC statement
+                        # Use a simple year extraction for credit card statements
+                        fb_temp = FallbackStatementParser()
+                        extracted_year = fb_temp._extract_statement_year(cc_lines)
+                        if extracted_year:
+                            _STATEMENT_YEAR = extracted_year
+                    
                     cc_txs = CreditCardParser().parse(cc_lines)
 
                     # FORCE credit card as withdrawals
@@ -2611,8 +2707,37 @@ if uploaded or credit_card_file:
             reapply_custom_rules()
 
             st.success(f"Processed {len(all_txs)} transactions ({parsed_from}).")
+            
+            # Show detected statement year if available
+            if _STATEMENT_YEAR:
+                st.info(f"📅 Detected statement year: **{_STATEMENT_YEAR}** (automatically extracted from statement)")
+            else:
+                st.warning("⚠️ Could not detect year from statement - using current year for dates without year")
+            
             st.session_state.all_transactions = transactions
             st.session_state.filtered_transactions = transactions 
+            
+            # Reset all filter settings when processing new statement
+            st.session_state.filter_active = False
+            st.session_state.filter_locked = False
+            st.session_state.filter_reset_count = 0  # Reset counter for new statement
+            if 'filter_start_date' in st.session_state:
+                del st.session_state.filter_start_date
+            if 'filter_end_date' in st.session_state:
+                del st.session_state.filter_end_date
+            if 'filter_min_amount' in st.session_state:
+                del st.session_state.filter_min_amount
+            if 'filter_max_amount' in st.session_state:
+                del st.session_state.filter_max_amount
+            if 'filter_search_text' in st.session_state:
+                del st.session_state.filter_search_text
+            if 'filter_tx_type_index' in st.session_state:
+                del st.session_state.filter_tx_type_index
+            if 'filter_account_index' in st.session_state:
+                del st.session_state.filter_account_index
+            if 'filter_stats' in st.session_state:
+                del st.session_state.filter_stats
+            
             opening_balance = (
                 st.session_state.opening_balance
                 if include_opening_balance
@@ -2673,6 +2798,10 @@ if all_transactions:
         if 'filter_active' not in st.session_state:
             st.session_state.filter_active = False
             st.session_state.filter_locked = False
+        
+        # Initialize reset counter for forcing widget refresh
+        if 'filter_reset_count' not in st.session_state:
+            st.session_state.filter_reset_count = 0
             
         # Show lock status
         lock_col1, lock_col2 = st.columns([3, 1])
@@ -2697,24 +2826,27 @@ if all_transactions:
         # ===== DATE FILTER =====
         st.subheader("📅 Date Range")
         col_date1, col_date2 = st.columns(2)
+        
+        # Use reset counter in widget keys to force recreation on reset
+        reset_suffix = f"_{st.session_state.filter_reset_count}"
 
         with col_date1:
             start_md = st.date_input(
                 "Start Date",
-                value=st.session_state.get('filter_start_date', first_day_of_start_month),
+                value=first_day_of_start_month,
                 min_value=first_day_of_start_month,
                 max_value=last_day_of_end_month,
-                key="filter_start_md",
+                key=f"filter_start_md{reset_suffix}",
                 disabled=filter_disabled
             )
 
         with col_date2:
             end_md = st.date_input(
                 "End Date",
-                value=st.session_state.get('filter_end_date', last_day_of_end_month),
+                value=last_day_of_end_month,
                 min_value=first_day_of_start_month,
                 max_value=last_day_of_end_month,
-                key="filter_end_md",
+                key=f"filter_end_md{reset_suffix}",
                 disabled=filter_disabled
             )
         
@@ -2906,13 +3038,25 @@ if all_transactions:
             if st.button("🔄 Reset Filter", disabled=filter_disabled, use_container_width=True):
                 st.session_state.filtered_transactions = all_transactions
                 st.session_state.filter_active = False
-                st.session_state.filter_start_date = first_day_of_start_month
-                st.session_state.filter_end_date = last_day_of_end_month
-                st.session_state.filter_min_amount = 0.0
-                st.session_state.filter_max_amount = max_amount_possible
-                st.session_state.filter_search_text = ""
-                st.session_state.filter_tx_type_index = 0
-                st.session_state.filter_account_index = 0
+                # Increment reset counter to force widget recreation with default values
+                st.session_state.filter_reset_count += 1
+                # Clear filter state keys
+                if 'filter_start_date' in st.session_state:
+                    del st.session_state.filter_start_date
+                if 'filter_end_date' in st.session_state:
+                    del st.session_state.filter_end_date
+                if 'filter_min_amount' in st.session_state:
+                    del st.session_state.filter_min_amount
+                if 'filter_max_amount' in st.session_state:
+                    del st.session_state.filter_max_amount
+                if 'filter_search_text' in st.session_state:
+                    del st.session_state.filter_search_text
+                if 'filter_tx_type_index' in st.session_state:
+                    del st.session_state.filter_tx_type_index
+                if 'filter_account_index' in st.session_state:
+                    del st.session_state.filter_account_index
+                if 'filter_stats' in st.session_state:
+                    del st.session_state.filter_stats
                 st.info("🔄 Filter reset. Showing all transactions.")
                 st.rerun()
         
