@@ -493,8 +493,9 @@ def extract_true_amount(text: str) -> Optional[float]:
     return None
 
 class FallbackStatementParser:
-    def __init__(self, include_opening_balance: bool = False):
+    def __init__(self, include_opening_balance: bool = False, extract_check_memos: bool = False):
         self.include_opening_balance = include_opening_balance
+        self.extract_check_memos = extract_check_memos
         self.opening_balance: Optional[float] = None
         self.statement_start_date: Optional[str] = None
         self.statement_year: Optional[int] = None
@@ -863,9 +864,14 @@ class FallbackStatementParser:
                 continue
             # If we're in checks section, add the line
             if in_checks:
-                # Only add lines that look like check transactions (start with check number)
-                if re.match(r'^\d{3,6}\s', ln):
+                # If extract_check_memos is enabled, we keep lines even if they don't start with a number
+                # as they might be memos for the previous check line.
+                if self.extract_check_memos:
                     check_lines.append(ln)
+                else:
+                    # Original behavior: Only add lines that look like check transactions (start with check number)
+                    if re.match(r'^\d{3,6}\s', ln):
+                        check_lines.append(ln)
 
         check_txs = self._parse_checks_section(check_lines)
         txs.extend(check_txs)
@@ -978,33 +984,87 @@ class FallbackStatementParser:
         return txs, meta
     def _parse_checks_section(self, lines: List[str]) -> List[Transaction]:
         txs = []
+        current_check = None
 
         for ln in lines:
-            # Chase checks start with check number, any text, then amount
-            # Pattern: CHECKNO [anything] AMOUNT
-            m = re.match(r'^(\d{3,6})\s+.*?(\d{1,3}(?:,\d{3})*\.\d{2})$', ln)
-            if not m:
-                continue
-            
-            check_no = m.group(1)
-            amt_raw = m.group(2)
-            
-            amt = self._parse_amount(amt_raw)
-            if amt is None:
+            ln_stripped = ln.strip()
+            if not ln_stripped:
                 continue
 
-            txs.append(Transaction(
-                date="",  # Chase check dates are separate column
-                transaction_type="withdrawal",
-                vendor=f"Check #{check_no}",
-                amount=-abs(amt),
-                description=ln,  # Full line as description
-                raw_line=ln,
-                section="CHECKS",
-                needs_review=False
-            ))
+            # Check if this is a primary check line (Starts with 3-6 digit number)
+            # Pattern: CHECKNO [OPTIONAL TEXT] [OPTIONAL DATE] AMOUNT
+            # Date pattern: \d{1,2}/\d{1,2}
+            # Amount pattern: \d{1,3}(?:,\d{3})*\.\d{2}
+            
+            # This regex tries to capture:
+            # 1. Check number
+            # 2. Middle text (potential memo + date)
+            # 3. Final amount
+            m = re.match(r'^(\d{3,6})\s+(.*?)(\d{1,3}(?:,\d{3})*\.\d{2})$', ln_stripped)
+            
+            if m:
+                # If we have a previous check, finalize it
+                if current_check:
+                    txs.append(self._finalize_check_tx(current_check))
+                
+                check_no = m.group(1)
+                middle_text = m.group(2).strip()
+                amt_raw = m.group(3)
+                
+                # Try to extract date from middle_text
+                date_paid = ""
+                memo = middle_text
+                date_m = re.search(r'(\d{1,2}/\d{1,2})', middle_text)
+                if date_m:
+                    date_paid = date_m.group(1)
+                    # Clean memo: remove the date and some separators like '^', '*'
+                    memo = middle_text.replace(date_paid, "").replace("^", "").replace("*", "").strip()
+                else:
+                    memo = middle_text.replace("^", "").replace("*", "").strip()
+
+                current_check = {
+                    "check_no": check_no,
+                    "date": date_paid,
+                    "amount": self._parse_amount(amt_raw),
+                    "memo": memo,
+                    "raw_lines": [ln]
+                }
+            elif current_check and self.extract_check_memos:
+                # This could be a continuation of the memo
+                # Clean it up: remove common stray indicators
+                cleaned_extra = ln_stripped.replace("^", "").replace("*", "").strip()
+                if cleaned_extra:
+                    if current_check["memo"]:
+                        current_check["memo"] += " " + cleaned_extra
+                    else:
+                        current_check["memo"] = cleaned_extra
+                current_check["raw_lines"].append(ln)
+
+        # Finalize last check
+        if current_check:
+            txs.append(self._finalize_check_tx(current_check))
 
         return txs
+
+    def _finalize_check_tx(self, check_data: Dict[str, Any]) -> Transaction:
+        # Normalize date if we found one
+        date_norm = ""
+        if check_data["date"]:
+            date_norm = self._parse_date(check_data["date"]) or ""
+
+        # Build description: ONLY use the memo text if available, otherwise empty as requested
+        desc = check_data["memo"] if check_data["memo"] else ""
+
+        return Transaction(
+            date=date_norm,
+            transaction_type="withdrawal",
+            vendor=f"Check #{check_data['check_no']}",
+            amount=-abs(check_data["amount"]) if check_data["amount"] else 0.0,
+            description=desc,
+            raw_line="\n".join(check_data["raw_lines"]),
+            section="CHECKS",
+            needs_review=False
+        )
 
 
 
@@ -1882,55 +1942,57 @@ def inject_chase_styles():
     st.markdown("""
 <style>
 .chase-container {
-    background-color: white;
-    padding: 20px;
-    border-radius: 5px;
+    background-color: transparent;
+    padding: 0px;
     margin-bottom: 20px;
+    width: 100%;
 }
 .chase-header-container {
     display: flex;
     align-items: flex-end;
-    margin-bottom: 10px;
+    margin-bottom: 15px;
 }
 .chase-header-box {
-    border: 2px solid black;
-    padding: 4px 15px;
+    border: 2px solid #004a99;
+    padding: 6px 20px;
     font-weight: 800;
     font-size: 22px;
     text-transform: uppercase;
-    color: black !important;
+    color: #004a99 !important;
     white-space: nowrap;
     font-family: Arial, sans-serif;
 }
 .chase-header-line {
     flex-grow: 1;
-    border-bottom: 2px solid black;
+    border-bottom: 2px solid #004a99;
     margin-bottom: 0px;
     margin-left: 0px;
 }
 .chase-table {
-    width: 100%;
+    width: auto;
+    min-width: 600px;
+    max-width: 100%;
     border-collapse: collapse;
     font-family: Arial, sans-serif;
-    color: black !important;
+    color: inherit;
 }
 .chase-table th {
     text-align: left;
-    padding: 10px 5px;
-    border-bottom: 2px solid black;
+    padding: 12px 20px 12px 5px;
+    border-bottom: 2px solid #004a99;
     font-size: 14px;
     text-transform: uppercase;
     font-weight: 800;
-    color: black !important;
+    color: #004a99 !important;
 }
 .chase-table td {
-    padding: 8px 5px;
+    padding: 10px 20px 10px 5px;
     border-bottom: none;
-    font-size: 14px;
-    color: black !important;
+    font-size: 15px;
+    color: inherit;
 }
 .chase-row-separator-top td {
-    border-top: 2px solid black;
+    border-top: 2px solid #004a99;
 }
 .chase-text-right {
     text-align: right !important;
@@ -2564,7 +2626,6 @@ if uploaded or credit_card_file:
     # Store selected years in session state for use during parsing
     st.session_state.selected_years = selected_years
     
-    # Only show opening balance checkbox if bank statement is uploaded
     include_opening_balance = False
     if uploaded:
         include_opening_balance = st.checkbox(
@@ -2573,12 +2634,16 @@ if uploaded or credit_card_file:
             help="Adds opening balance as a deposit before transactions",
             key="include_opening_balance"
         )
+    
+    # Check memos is now always ENABLED by request
+    extract_check_memos = True
 
     if st.button("Process Statement"):
         with st.spinner("Parsing & processing..."):
             all_txs = []
             meta = {}
             all_raw_text = ""  # Store raw text for Chase summary extraction
+            st.session_state.statement_summaries = [] # Store individual summaries
             
             # Process main bank statements if uploaded
             if uploaded:
@@ -2593,7 +2658,8 @@ if uploaded or credit_card_file:
                             st.warning(f"Unreadable pages in {up_file.name}: {unreadable}")
                     else:
                         # Store raw text for Chase summary extraction
-                        all_raw_text += "\n".join(lines) + "\n"
+                        file_raw_text = "\n".join(lines)
+                        all_raw_text += file_raw_text + "\n"
                         
                         # Check if user manually selected year for this file
                         manual_year = selected_years.get(up_file.name)
@@ -2601,9 +2667,23 @@ if uploaded or credit_card_file:
                             st.info(f"✅ Using manually selected year for {up_file.name}: **{manual_year}**")
                         
                         # Use FallbackStatementParser for each file
-                        fb_parser = FallbackStatementParser(include_opening_balance=include_opening_balance)
+                        fb_parser = FallbackStatementParser(
+                            include_opening_balance=include_opening_balance,
+                            extract_check_memos=extract_check_memos
+                        )
                         bank_txs, b_meta = fb_parser.parse_statement(lines, manual_year=manual_year)
                         all_txs.extend(bank_txs)
+
+                        # Generate summary for THIS file
+                        file_summary_df = get_sub_summary(
+                            transactions=bank_txs,
+                            opening_balance=fb_parser.opening_balance if include_opening_balance else 0.0,
+                            raw_text=file_raw_text
+                        )
+                        st.session_state.statement_summaries.append({
+                            "filename": up_file.name,
+                            "df": file_summary_df
+                        })
                         
                         # Store meta from the first file or merge?
                         if not meta:
@@ -2737,20 +2817,6 @@ if uploaded or credit_card_file:
                 del st.session_state.filter_account_index
             if 'filter_stats' in st.session_state:
                 del st.session_state.filter_stats
-            
-            opening_balance = (
-                st.session_state.opening_balance
-                if include_opening_balance
-                else 0.0
-            )
-            st.markdown("### Sub-summary / Transaction Breakdown")
-
-            sub_summary_df = get_sub_summary(
-                transactions=all_txs,
-                opening_balance=opening_balance,
-                raw_text=st.session_state.get("raw_text", "")
-            )
-            render_chase_table("CHECKING SUMMARY", sub_summary_df)
 # =========================================================================
 # PROFESSIONAL COMPREHENSIVE FILTER SYSTEM
 # =========================================================================
@@ -2760,6 +2826,28 @@ from calendar import monthrange
 all_transactions = st.session_state.get("all_transactions", [])
 
 if all_transactions:
+    # Always show sub-summary if transactions exist
+    st.markdown("---")
+    opening_balance_val = (
+        st.session_state.get("opening_balance", 0.0)
+        if include_opening_balance
+        else 0.0
+    )
+    st.markdown("### Sub-summary / Transaction Breakdown")
+    with st.expander("📊 Statement Summaries / Transaction Breakdowns", expanded=True):
+        summaries = st.session_state.get("statement_summaries", [])
+        if summaries:
+            for entry in summaries:
+                render_chase_table(f"SUMMARY: {entry['filename']}", entry['df'])
+        else:
+            # Fallback for combined summary
+            sub_summary_df = get_sub_summary(
+                transactions=all_transactions,
+                opening_balance=opening_balance_val,
+                raw_text=st.session_state.get("raw_text", "")
+            )
+            render_chase_table("COMBINED CHECKING SUMMARY", sub_summary_df)
+
     st.markdown("---")
     st.header("🔍 Advanced Transaction Filter")
     st.markdown("**Professional filtering system** - All filters work together to give you precise control")

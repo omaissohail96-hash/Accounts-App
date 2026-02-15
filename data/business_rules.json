@@ -8,6 +8,12 @@
           "account_display": "801 \u00b7 SALARIES-OFFICERS",
           "max_amount": 500.0,
           "priority": 1
+        },
+        {
+          "keyword": "Aubreystallion",
+          "account_code": "928",
+          "account_display": "928 \u00b7 RENT",
+          "priority": 1
         }
       ]
     }
