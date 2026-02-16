@@ -13,9 +13,17 @@
     }
   },
   "330c8174-b3eb-40b1-9684-39fe63f94194": {
-    "_note": "Example business with advanced rules",
     "Sample Business": {
-      "rules": []
+      "rules": [
+        {
+          "keyword": "check",
+          "account_code": "703",
+          "account_display": "703 \u00b7 DIRECT MATERIALS",
+          "min_amount": 500.0,
+          "max_amount": 1000.0,
+          "priority": 1
+        }
+      ]
     }
   }
 }
