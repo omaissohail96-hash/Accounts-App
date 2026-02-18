@@ -2738,22 +2738,23 @@ def get_active_transactions():
 def is_tx_excluded(tx):
     return getattr(tx, "is_excluded", False)
 uploaded = st.file_uploader("Upload statement (PDF, CSV, DOCX)", type=["pdf", "csv", "doc", "docx"], accept_multiple_files=True)
-credit_card_file = st.file_uploader(
-    "Upload Credit Card Statement (PDF)",
+credit_card_files = st.file_uploader(
+    "Upload Credit Card Statement(s) (PDF)",
     type=["pdf"],
-    key="credit_card"
+    accept_multiple_files=True,
+    key="credit_card_multi"
 )
 
 # Initialize custom rules in session state (load from file)
 
-if uploaded or credit_card_file:
+if uploaded or credit_card_files:
     if uploaded:
         if isinstance(uploaded, list):
             st.info(f"Bank Statements: {len(uploaded)} files uploaded")
         else:
             st.info(f"Bank Statement: {uploaded.name} — {uploaded.size/1024:.1f} KB")
-    if credit_card_file:
-        st.info(f"Credit Card Statement: {credit_card_file.name} — {credit_card_file.size/1024:.1f} KB")
+    if credit_card_files:
+        st.info(f"Credit Card Statements: {len(credit_card_files)} files uploaded")
     
     # Year selection for uploaded files
     st.markdown("---")
@@ -2784,20 +2785,21 @@ if uploaded or credit_card_file:
                 if year_choice != "Auto-detect":
                     selected_years[file.name] = int(year_choice)
     
-    if credit_card_file:
-        st.markdown("**Credit Card Statement:**")
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.text(f"💳 {credit_card_file.name}")
-        with col2:
-            year_choice = st.selectbox(
-                "Year",
-                year_options,
-                key=f"year_cc_{credit_card_file.name}",
-                label_visibility="collapsed"
-            )
-            if year_choice != "Auto-detect":
-                selected_years[credit_card_file.name] = int(year_choice)
+    if credit_card_files:
+        st.markdown("**Credit Card Statement(s):**")
+        for idx, file in enumerate(credit_card_files):
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.text(f"💳 {file.name}")
+            with col2:
+                year_choice = st.selectbox(
+                    "Year",
+                    year_options,
+                    key=f"year_cc_{idx}_{file.name}",
+                    label_visibility="collapsed"
+                )
+                if year_choice != "Auto-detect":
+                    selected_years[file.name] = int(year_choice)
     
     st.markdown("---")
     
@@ -2824,7 +2826,7 @@ if uploaded or credit_card_file:
             meta = {}
             all_raw_text = ""  # Store raw text for Chase summary extraction
             st.session_state.statement_summaries = [] # Store individual summaries
-            st.session_state.cc_summary = None # Store credit card summary
+            st.session_state.cc_summaries = [] # Store list of credit card summaries
             
             # Process main bank statements if uploaded
             if uploaded:
@@ -2872,33 +2874,37 @@ if uploaded or credit_card_file:
                             st.session_state.opening_balance = fb_parser.opening_balance
                 st.session_state.meta = meta
                 st.session_state.raw_text = all_raw_text  # Save for summary extraction
-            # Process credit card statement if uploaded
-            if credit_card_file is not None:
-                cc_file_bytes = credit_card_file.read()
-                dp_cc = DocumentParser()
-                cc_lines, ok, unreadable = dp_cc.parse_document(cc_file_bytes, credit_card_file.name)
-                
-                if not ok or len(cc_lines) < 1:
-                    st.error("Could not read text from credit card statement file.")
-                    if unreadable:
-                        st.warning(f"Unreadable pages: {unreadable}")
-                else:
-                    # Store raw text for extraction
-                    cc_raw_text = "\n".join(cc_lines)
-                    st.session_state.cc_summary = extract_cc_summary(cc_raw_text)
+            # Process credit card statements if uploaded
+            if credit_card_files:
+                for cc_file in credit_card_files:
+                    cc_file_bytes = cc_file.read()
+                    dp_cc = DocumentParser()
+                    cc_lines, ok, unreadable = dp_cc.parse_document(cc_file_bytes, cc_file.name)
                     
-                    # Check if user manually selected year for credit card file
-                    cc_manual_year = selected_years.get(credit_card_file.name)
-                    if cc_manual_year:
-                        _STATEMENT_YEAR = cc_manual_year
-                        st.info(f"✅ Using manually selected year for {credit_card_file.name}: **{cc_manual_year}**")
-                    elif not uploaded:
-                        # If no bank statement was uploaded and no manual year, try to extract year from CC statement
-                        # Use a simple year extraction for credit card statements
-                        fb_temp = FallbackStatementParser()
-                        extracted_year = fb_temp._extract_statement_year(cc_lines)
-                        if extracted_year:
-                            _STATEMENT_YEAR = extracted_year
+                    if not ok or len(cc_lines) < 1:
+                        st.error(f"Could not read text from credit card statement file: {cc_file.name}")
+                        if unreadable:
+                            st.warning(f"Unreadable pages in {cc_file.name}: {unreadable}")
+                    else:
+                        # Store raw text for extraction
+                        cc_raw_text = "\n".join(cc_lines)
+                        extracted_summary = extract_cc_summary(cc_raw_text)
+                        
+                        st.session_state.cc_summaries.append({
+                            "filename": cc_file.name,
+                            "summary": extracted_summary
+                        })
+                        
+                        # Check if user manually selected year for this credit card file
+                        cc_manual_year = selected_years.get(cc_file.name)
+                        if cc_manual_year:
+                            st.info(f"✅ Using manually selected year for {cc_file.name}: **{cc_manual_year}**")
+                        elif not uploaded:
+                            # If no bank statement was uploaded and no manual year, try to extract year from CC statement
+                            fb_temp = FallbackStatementParser()
+                            extracted_year = fb_temp._extract_statement_year(cc_lines)
+                            if extracted_year:
+                                _STATEMENT_YEAR = extracted_year
                     
                     cc_txs = CreditCardParser().parse(cc_lines)
 
@@ -3021,16 +3027,18 @@ if all_transactions:
     )
     st.markdown("### Sub-summary / Transaction Breakdown")
     with st.expander("📊 Statement Summaries / Transaction Breakdowns", expanded=True):
-        # Render Credit Card Summary if available
-        cc_summary = st.session_state.get("cc_summary")
-        if cc_summary:
-            render_cc_summary(cc_summary)
+        # Render Credit Card Summaries if available
+        cc_summaries = st.session_state.get("cc_summaries", [])
+        if cc_summaries:
+            for cc_entry in cc_summaries:
+                st.markdown(f"**Credit Card Summary: {cc_entry['filename']}**")
+                render_cc_summary(cc_entry['summary'])
             
         summaries = st.session_state.get("statement_summaries", [])
         if summaries:
             for entry in summaries:
                 render_chase_table(f"SUMMARY: {entry['filename']}", entry['df'])
-        elif not cc_summary:
+        elif not cc_summaries:
             # Fallback for combined summary (only if no CC summary shown yet)
             sub_summary_df = get_sub_summary(
                 transactions=all_transactions,
