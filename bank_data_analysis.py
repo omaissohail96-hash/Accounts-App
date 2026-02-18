@@ -1861,9 +1861,10 @@ def extract_chase_summary(raw_text):
     result = {
         "Beginning Balance": {"count": "", "amount": 0.0},
         "Deposits and Additions": {"count": 0, "amount": 0.0},
-        "Checks Paid": {"count": 0, "amount": 0.0},
         "ATM & Debit Card Withdrawals": {"count": 0, "amount": 0.0},
         "Electronic Withdrawals": {"count": 0, "amount": 0.0},
+        "Checks Paid": {"count": 0, "amount": 0.0},
+        "Other Withdrawals": {"count": 0, "amount": 0.0},
         "Fees": {"count": 0, "amount": 0.0},
         "Ending Balance": {"count": "", "amount": 0.0}
     }
@@ -1893,6 +1894,7 @@ def extract_chase_summary(raw_text):
                 "atm & debit card withdrawals": "ATM & Debit Card Withdrawals",
                 "atm and debit card withdrawals": "ATM & Debit Card Withdrawals",
                 "electronic withdrawals": "Electronic Withdrawals",
+                "other withdrawals": "Other Withdrawals",
                 "fees": "Fees",
                 "ending balance": "Ending Balance"
             }
@@ -1907,6 +1909,180 @@ def extract_chase_summary(raw_text):
                     continue
     
     return result
+
+# ----------------------------
+# Credit Card Summary Extraction & Rendering
+# ----------------------------
+
+def extract_cc_summary(raw_text: str) -> Dict[str, Any]:
+    """
+    Extract summary fields from credit card statements with extreme robustness.
+    Handles noisy OCR (duplicated chars), split numbers across lines, and fuzzy labels.
+    """
+    import re
+    
+    # Initialize result with defaults
+    result = {
+        "Account Number": "N/A",
+        "Previous Balance": 0.0,
+        "Payment, Credits": 0.0,
+        "Purchases": 0.0,
+        "Cash Advances": 0.0,
+        "Balance Transfers": 0.0,
+        "Fees Charged": 0.0,
+        "Interest Charged": 0.0,
+        "New Balance": 0.0,
+        "Opening/Closing Date": "N/A",
+        "Revolving Credit Amount": 0.0,
+        "Available Credit": 0.0,
+        "Cash Access Line": 0.0,
+        "Available for Cash": 0.0,
+        "Past Due Amount": 0.0,
+        "Balance over the Credit Access Line": 0.0
+    }
+    
+    def denoise_text(text: str) -> str:
+        """Collapse duplicated characters in uppercase blocks (OCR artifact)"""
+        def collapse(match):
+            s = match.group(0)
+            new_s = ""
+            i = 0
+            while i < len(s):
+                new_s += s[i]
+                if i + 1 < len(s) and s[i] == s[i+1]: i += 2
+                else: i += 1
+            return new_s
+        return re.sub(r'[A-Z]{4,}', collapse, text)
+
+    def clean_amt(s: str) -> float:
+        if not s: return 0.0
+        s = s.strip().replace('$', '').replace(',', '').replace(' ', '').replace('+', '')
+        if '(' in s and ')' in s: s = '-' + s.replace('(', '').replace(')', '')
+        if s.endswith('-'): s = '-' + s[:-1]
+        # Remove any non-numeric/sign/dot chars sneaked in by OCR
+        s = re.sub(r'[^0-9.\-]', '', s)
+        try: return float(s)
+        except ValueError: return 0.0
+
+    # 1. Prepare Text (Denoise & Join split lines)
+    text = denoise_text(raw_text)
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
+    joined_lines = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if i + 1 < len(lines):
+            nxt = lines[i+1]
+            if re.search(r'[\d,]+\.\d$', line) and re.match(r'^\d$', nxt):
+                line += nxt
+                i += 1
+            elif re.search(r'[\d,]+$', line) and re.match(r'^\.\d{2}$', nxt):
+                line += nxt
+                i += 1
+        joined_lines.append(line)
+        i += 1
+    
+    processed_text = '\n'.join(joined_lines)
+
+    # 2. Identify Section Boundaries (Fuzzy)
+    summary_start = 0
+    for hp in [r'ACCOUNT\s*SUMMARY', r'SUMMARY\s*OF\s*ACCOUNT', r'ACCOUNT\s*AT\s*A\s*GLANCE']:
+        m = re.search(hp, processed_text, re.I)
+        if m:
+            summary_start = m.start()
+            break
+            
+    summary_text = processed_text[summary_start:]
+    m_end = re.search(r'ACCOUNT\s*ACTIVITY|TRANSACTION\s*DETAIL|ACTIVITY\s*DETAIL', summary_text[100:], re.I)
+    if m_end: summary_text = summary_text[:100+m_end.start()]
+    else: summary_text = summary_text[:2500]
+
+    # 3. Field Matching (Fuzzy Labels)
+    p_val = r'[\$]?\s*([+\-]?\s*[\d,]+\.\d{2}|[+\-]?\s*[\d,]{1,9})'
+    
+    field_patterns = {
+        "Previous Balance": r'Previ?ous\s*Bala?nce',
+        "Payment, Credits": r'Pay?ments?,\s*Credi?ts?',
+        "Purchases": r'Purch?ases?',
+        "Cash Advances": r'Cash\s*Adva?nces?(?!\s+Line)',
+        "Balance Transfers": r'Bala?nce\s*Transf?er?s?',
+        "Fees Charged": r'Fees\s*Char?ged',
+        "Interest Charged": r'Inte?re?st\s*Char?ged',
+        "New Balance": r'New\s*Bala?nce',
+        "Revolving Credit Amount": r'Revolv?ing\s*Credi?t\s*Amou?nt|Credi?t\s*Limit',
+        "Available Credit": r'Avai?labl?e\s*Credi?t',
+        "Cash Access Line": r'Cash\s*Acce?ss\s*Line',
+        "Available for Cash": r'Avai?labl?e\s*for\s*Cash',
+        "Past Due Amount": r'Past\s*Due\s*Amou?nt',
+    }
+
+    for key, f_pat in field_patterns.items():
+        full_pat = f'{f_pat}.*?{p_val}'
+        matches = list(re.finditer(full_pat, summary_text, re.I | re.DOTALL))
+        if matches:
+            best_m = matches[0]
+            for m in matches:
+                pre_text = summary_text[max(0, m.start()-15):m.start()].lower()
+                if "total" in pre_text:
+                    best_m = m
+                    break
+            result[key] = clean_amt(best_m.group(1))
+
+    # Special Case: Account Number
+    acc_match = re.search(r'Account\s*Number[:\s]+([\d\s]{10,25})', processed_text, re.I)
+    if acc_match: result["Account Number"] = acc_match.group(1).strip()
+
+    # Dates
+    date_pat = r'(?:Statement\s*Period|Opening/Closing\s*Date)\s*[:]?\s*(\d{1,2}/\d{1,2}/\d{2,4}\s*[-–to]+\s*\d{1,2}/\d{1,2}/\d{2,4})'
+    date_match = re.search(date_pat, processed_text, re.I)
+    if date_match: result["Opening/Closing Date"] = date_match.group(1).strip()
+    
+    return result
+
+def render_cc_summary(cc_summary: Dict[str, Any]):
+    """
+    Render a unified credit card summary table in the UI.
+    Uses exactly the same design system as the bank statement tables.
+    """
+    import streamlit as st
+    import pandas as pd
+    
+    def f(val):
+        if isinstance(val, (float, int)):
+            if val > 0 and val == cc_summary.get("Purchases"):
+                return f"+${val:,.2f}"
+            if val < 0:
+                return f"-${abs(val):,.2f}"
+            return f"${val:,.2f}"
+        return val
+
+    # Create a DataFrame to use the existing render_chase_table function
+    items = []
+    
+    # Priority rows
+    main_rows = [
+        "Previous Balance", "Payment, Credits", "Purchases", "Cash Advances", 
+        "Balance Transfers", "Fees Charged", "Interest Charged", "New Balance"
+    ]
+    for label in main_rows:
+        items.append({"Type": label, "INSTANCES": "", "AMOUNT": f(cc_summary.get(label, 0.0))})
+    
+    # Metadata rows
+    meta_rows = [
+        "Opening/Closing Date", "Revolving Credit Amount", "Available Credit",
+        "Cash Access Line", "Available for Cash", "Past Due Amount",
+        "Balance over the Credit Access Line"
+    ]
+    for label in meta_rows:
+        items.append({"Type": label, "INSTANCES": "", "AMOUNT": f(cc_summary.get(label, 0.0)) if label != "Opening/Closing Date" else cc_summary.get(label, "N/A")})
+
+    df = pd.DataFrame(items)
+    
+    # Account Number Metadata
+    st.markdown(f'<div style="font-family: Arial, sans-serif; font-weight: 800; color: #004a99; margin-bottom: -15px; font-size: 16px;">Account Number: {cc_summary["Account Number"]}</div>', unsafe_allow_html=True)
+    
+    # Use the existing function for total consistency
+    render_chase_table("ACCOUNT SUMMARY", df)
 
 def render_chase_table(title, df):
     """Render a dataframe in the Chase bank statement style"""
@@ -2017,9 +2193,10 @@ def get_sub_summary(transactions, opening_balance=0.0, raw_text=""):
     data = {
         "Beginning Balance": {"count": "", "amount": opening_balance},
         "Deposits and Additions": {"count": 0, "amount": 0.0},
-        "Checks Paid": {"count": 0, "amount": 0.0},
         "ATM & Debit Card Withdrawals": {"count": 0, "amount": 0.0},
         "Electronic Withdrawals": {"count": 0, "amount": 0.0},
+        "Checks Paid": {"count": 0, "amount": 0.0},
+        "Other Withdrawals": {"count": 0, "amount": 0.0},
         "Fees": {"count": 0, "amount": 0.0},
         "Ending Balance": {"count": "", "amount": 0.0}
     }
@@ -2058,11 +2235,9 @@ def get_sub_summary(transactions, opening_balance=0.0, raw_text=""):
             total_count += 1
         else:
             abs_amt = abs(amt)
-            # Categorize withdrawals
-            
-            # 1. Checks
+            # 1. Checks (high priority)
             if getattr(t, "section", "").upper() == "CHECKS" or "check" in vendor or "check" in desc:
-                data["Checks Paid"]["amount"] -= abs_amt  # Show as negative
+                data["Checks Paid"]["amount"] -= abs_amt
                 data["Checks Paid"]["count"] += 1
             
             # 2. ATM & Debit Card
@@ -2070,15 +2245,20 @@ def get_sub_summary(transactions, opening_balance=0.0, raw_text=""):
                 data["ATM & Debit Card Withdrawals"]["amount"] -= abs_amt
                 data["ATM & Debit Card Withdrawals"]["count"] += 1
                 
-            # 3. Fees (New Category)
+            # 3. Fees
             elif "fee" in desc or "service charge" in desc or "maintenance" in desc or "overdraft" in desc:
                 data["Fees"]["amount"] -= abs_amt
                 data["Fees"]["count"] += 1
                 
-            # 4. Electronic Withdrawals (Default for others)
-            else:
+            # 4. Electronic Withdrawals (Zelle, ACH, etc.)
+            elif "zelle" in desc or "ach" in desc or "electronic" in desc or "vrs" in desc:
                 data["Electronic Withdrawals"]["amount"] -= abs_amt
                 data["Electronic Withdrawals"]["count"] += 1
+            
+            # 5. Other Withdrawals (Default for anything else)
+            else:
+                data["Other Withdrawals"]["amount"] -= abs_amt
+                data["Other Withdrawals"]["count"] += 1
             
             total_count += 1
 
@@ -2644,6 +2824,7 @@ if uploaded or credit_card_file:
             meta = {}
             all_raw_text = ""  # Store raw text for Chase summary extraction
             st.session_state.statement_summaries = [] # Store individual summaries
+            st.session_state.cc_summary = None # Store credit card summary
             
             # Process main bank statements if uploaded
             if uploaded:
@@ -2702,6 +2883,10 @@ if uploaded or credit_card_file:
                     if unreadable:
                         st.warning(f"Unreadable pages: {unreadable}")
                 else:
+                    # Store raw text for extraction
+                    cc_raw_text = "\n".join(cc_lines)
+                    st.session_state.cc_summary = extract_cc_summary(cc_raw_text)
+                    
                     # Check if user manually selected year for credit card file
                     cc_manual_year = selected_years.get(credit_card_file.name)
                     if cc_manual_year:
@@ -2721,6 +2906,7 @@ if uploaded or credit_card_file:
                     for tx in cc_txs:
                         tx.transaction_type = "withdrawal"
                         tx.amount = -abs(tx.amount)
+                        tx.source = "CREDIT_CARD"
 
                     all_txs.extend(cc_txs)
 
@@ -2835,12 +3021,17 @@ if all_transactions:
     )
     st.markdown("### Sub-summary / Transaction Breakdown")
     with st.expander("📊 Statement Summaries / Transaction Breakdowns", expanded=True):
+        # Render Credit Card Summary if available
+        cc_summary = st.session_state.get("cc_summary")
+        if cc_summary:
+            render_cc_summary(cc_summary)
+            
         summaries = st.session_state.get("statement_summaries", [])
         if summaries:
             for entry in summaries:
                 render_chase_table(f"SUMMARY: {entry['filename']}", entry['df'])
-        else:
-            # Fallback for combined summary
+        elif not cc_summary:
+            # Fallback for combined summary (only if no CC summary shown yet)
             sub_summary_df = get_sub_summary(
                 transactions=all_transactions,
                 opening_balance=opening_balance_val,
