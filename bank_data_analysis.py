@@ -3003,8 +3003,6 @@ if uploaded or credit_card_files:
                 del st.session_state.filter_max_amount
             if 'filter_search_text' in st.session_state:
                 del st.session_state.filter_search_text
-            if 'filter_tx_type_index' in st.session_state:
-                del st.session_state.filter_tx_type_index
             if 'filter_account_index' in st.session_state:
                 del st.session_state.filter_account_index
             if 'filter_stats' in st.session_state:
@@ -3022,7 +3020,7 @@ if all_transactions:
     st.markdown("---")
     opening_balance_val = (
         st.session_state.get("opening_balance", 0.0)
-        if include_opening_balance
+        if st.session_state.get("include_opening_balance", False)
         else 0.0
     )
     st.markdown("### Sub-summary / Transaction Breakdown")
@@ -3137,17 +3135,6 @@ if all_transactions:
                 disabled=filter_disabled
             )
         
-        # ===== TRANSACTION TYPE FILTER =====
-        st.subheader("💵 Transaction Type")
-        transaction_type_filter = st.radio(
-            "Show:",
-            ["All Transactions", "Deposits Only", "Withdrawals Only"],
-            index=st.session_state.get('filter_tx_type_index', 0),
-            key="filter_tx_type",
-            horizontal=True,
-            disabled=filter_disabled
-        )
-        
         # ===== AMOUNT FILTER =====
         st.subheader("💰 Amount Range")
         col_amt1, col_amt2 = st.columns(2)
@@ -3225,14 +3212,12 @@ if all_transactions:
                 st.session_state.filter_min_amount = min_amount_filter
                 st.session_state.filter_max_amount = max_amount_filter
                 st.session_state.filter_search_text = search_text
-                st.session_state.filter_tx_type_index = ["All Transactions", "Deposits Only", "Withdrawals Only"].index(transaction_type_filter)
                 st.session_state.filter_account_index = list(all_account_options.keys()).index(account_code_filter)
                 
                 # Apply all filters
                 filtered = []
                 filter_stats = {
                     'date_filtered': 0,
-                    'type_filtered': 0,
                     'amount_filtered': 0,
                     'search_filtered': 0,
                     'account_filtered': 0
@@ -3248,14 +3233,6 @@ if all_transactions:
                                 continue
                         except:
                             continue
-                    
-                    # TRANSACTION TYPE FILTER
-                    if transaction_type_filter == "Deposits Only" and tx.amount <= 0:
-                        filter_stats['type_filtered'] += 1
-                        continue
-                    elif transaction_type_filter == "Withdrawals Only" and tx.amount >= 0:
-                        filter_stats['type_filtered'] += 1
-                        continue
                     
                     # AMOUNT FILTER
                     tx_abs_amount = abs(tx.amount)
@@ -3310,8 +3287,6 @@ if all_transactions:
                     with st.expander("📋 Filter Breakdown"):
                         if filter_stats['date_filtered'] > 0:
                             st.write(f"• Date filter removed: {filter_stats['date_filtered']} transactions")
-                        if filter_stats['type_filtered'] > 0:
-                            st.write(f"• Type filter removed: {filter_stats['type_filtered']} transactions")
                         if filter_stats['amount_filtered'] > 0:
                             st.write(f"• Amount filter removed: {filter_stats['amount_filtered']} transactions")
                         if filter_stats['search_filtered'] > 0:
@@ -3338,8 +3313,6 @@ if all_transactions:
                     del st.session_state.filter_max_amount
                 if 'filter_search_text' in st.session_state:
                     del st.session_state.filter_search_text
-                if 'filter_tx_type_index' in st.session_state:
-                    del st.session_state.filter_tx_type_index
                 if 'filter_account_index' in st.session_state:
                     del st.session_state.filter_account_index
                 if 'filter_stats' in st.session_state:
@@ -3368,8 +3341,7 @@ if all_transactions:
             st.info(
                 f"🔍 **Active Filters:**\n\n"
                 f"📅 Dates: {st.session_state.filter_start_date.strftime('%b %d, %Y')} - {st.session_state.filter_end_date.strftime('%b %d, %Y')}\n\n"
-                f"💵 Type: {transaction_type_filter}\n\n"
-                f"💰 Amount: ${st.session_state.filter_min_amount:,.2f} - ${st.session_state.filter_max_amount:,.2f}" +
+                f" Amount: ${st.session_state.filter_min_amount:,.2f} - ${st.session_state.filter_max_amount:,.2f}" +
                 (f"\n\n🔎 Search: '{st.session_state.filter_search_text}'" if st.session_state.filter_search_text else "") +
                 (f"\n\n📊 Account: {account_code_filter}" if account_code_filter != "All Account Codes" else "") +
                 f"\n\n---\n\n"

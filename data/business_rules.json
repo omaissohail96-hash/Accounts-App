@@ -19,14 +19,26 @@
     }
   },
   "330c8174-b3eb-40b1-9684-39fe63f94194": {
-    "Sample Business": {
+    "Business Profile 1": {
       "rules": [
         {
           "keyword": "check",
+          "account_code": "701",
+          "account_display": "701 \u00b7 PURCHASES",
+          "max_amount": 500.0,
+          "priority": 1
+        },
+        {
+          "keyword": "check",
+          "account_code": "702",
+          "account_display": "702 \u00b7 SHIPPING SUPPLIES",
+          "priority": 2
+        },
+        {
+          "keyword": "Usps",
           "account_code": "703",
           "account_display": "703 \u00b7 DIRECT MATERIALS",
-          "min_amount": 500.0,
-          "max_amount": 1000.0,
+          "max_amount": 50.0,
           "priority": 1
         }
       ]
