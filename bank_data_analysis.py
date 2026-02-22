@@ -112,14 +112,23 @@ class Transaction:
 # Utilities
 # ----------------------------
 DATE_TOKEN_RE = re.compile(r'(?P<d>\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?|\d{4}-\d{2}-\d{2}|\d{1,2}\s+[A-Za-z]{3,9}\s*\d{0,4})')
-DATE_AT_START = re.compile(r'^\s*(\d{1,2}/\d{1,2}(?:/\d{2,4})?)\b')
-AMOUNT_RE = re.compile(
-    r'([+\-]?\(?\s*\$?\d{1,3}(?:[,\s]\d{3})*\.\d{2}\)?)'
+DATE_AT_START = re.compile(
+    r'^[^\w\s]{0,4}\s*('
+    r'(?:0?[1-9]|1[0-2])[/-](?:0?[1-9]|[12][0-9]|3[01])(?:[/-]\d{2,4})?|'
+    r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[-/ ](?:0?[1-9]|[12][0-9]|3[01])(?:,?\s*[-/ ]\d{2,4})?'
+    r')\s*(?![0-9]{5,})', re.I
 )
-MULTI_DATE_AMT_RE = re.compile(r'(\d{1,2}[/-]\d{1,2}|[+\-]?\(?\s*\d{1,3}(?:[,\s]\d{3})*(?:\.\d{1,2})\)?)')
+AMOUNT_RE = re.compile(
+    r'([+\-]?\(?\s*\$?\d{1,3}(?:[,\s]\d{3})*(?:\.\d{1,2})?\)?)'
+)
+# Matches full dates with year to avoid partial phone number matches
+DATE_FULL_RE = re.compile(r'\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b')
+# matches MM/DD or MM-DD but NOT phone parts
+DATE_SHORT_RE = re.compile(r'\b\d{1,2}[/-]\d{1,2}\b(?!\d|[-]\d)')
+MULTI_DATE_AMT_RE = re.compile(r'(\d{1,2}[/-]\d{1,2}|[+\-]?\(?\s*\d{1,3}(?:[,\s]\d{3})*(?:\.\d{1,2})?\)?)')
 CHECK_ROW_RE = re.compile(r'^\s*(\d{2,6})\b') 
 FEE_KEYWORDS_RE = re.compile(
-    r'\b(fee|service fee|monthly fee|maintenance fee|bank fee|account fee)\b',
+    r'(?:^|\s)(monthly\s+service\s+fee|service\s+fee|maintenance\s+fee|bank\s+fees?|account\s+fee|overdraft\s+fee)(?:\s|$)',
     re.I
 )
 CHECK_NO_RE = re.compile(r'\bcheck\s*(\d+)\b', re.I)
@@ -182,6 +191,7 @@ def _clean_amount_token(token: str) -> Optional[float]:
         negative = True
     s = re.sub(r'[A-Za-z\$£€₹]', '', s)  # drop currency letters
     s = s.replace(',', '').replace(' ', '')
+    s = s.replace('¢', '').replace('\u00a2', '').replace('#', '').replace('*', '').replace('+', '')
     s = re.sub(r'[^0-9\.\-]', '', s)
     if not re.search(r'\d', s):
         return None
@@ -500,16 +510,40 @@ class FallbackStatementParser:
         self.statement_start_date: Optional[str] = None
         self.statement_year: Optional[int] = None
 
-    SECTION_PATTERNS = {
-        "DEPOSITS": re.compile(r'\bdeposits\s+and\s+additions\b', re.I),
-        "CHECKS": re.compile(r'\bchecks\s+paid\b', re.I),
-        "ATM": re.compile(r"ATM\s*&\s*DEBIT\s*CARD\s*WITHDRAWALS", re.I),
-        "ELECTRONIC_WITHDRAWALS": re.compile(r'\belectronic\s+withdrawals?\b', re.I),
-        "FEES": re.compile(
-             r'(monthly\s+service\s+fee|service\s+fee|bank\s+fee|fees\s+charged)',
-            re.I),
+    # List of (section_key, regex) tuples — order matters: first match wins per line
+    SECTION_PATTERNS = [
+        # Chase
+        ("DEPOSITS",              re.compile(r'\bdeposits\s+and\s+additions\b', re.I)),
+        ("CHECKS",                re.compile(r'\bchecks\s+paid\b', re.I)),
+        ("ATM",                   re.compile(r"ATM\s*&\s*DEBIT\s*CARD\s*WITHDRAWALS", re.I)),
+        ("ELECTRONIC_WITHDRAWALS",re.compile(r'\belectronic\s+withdrawals?\b', re.I)),
+        ("FEES",                  re.compile(r'^(monthly\s+service\s+fee|service\s+fee|bank\s+fees?|fees\s+charged|service\s+charges?)\s*$', re.I)),
 
-    }
+        # Bank of America
+        ("DEPOSITS",              re.compile(r'\bdeposits?\s+and\s+(other\s+)?(?:credits?|additions)\b', re.I)),
+        ("WITHDRAWALS",           re.compile(r'\bwithdrawals?\s+and\s+other\s+(?:debits?|charges?)\b', re.I)),
+        # Fifth Third
+        ("WITHDRAWALS",           re.compile(r'\bwithdrawals?\s*/\s*debits?\b', re.I)),
+        ("DEPOSITS",              re.compile(r'\bdeposits?\s*/\s*credits?\b', re.I)),
+        # US Bank
+        ("DEPOSITS",              re.compile(r'^Other\s+Deposits?\b', re.I)),
+        ("WITHDRAWALS",           re.compile(r'^Other\s+Withdrawals?\b', re.I)),
+        # BMO
+        ("DEPOSITS",              re.compile(r'\b(?:Deposits?|Credits?)\b', re.I)),
+        ("WITHDRAWALS",           re.compile(r'\b(?:Withdrawals?|Debits?|Charges?)\b', re.I)),
+
+        # AMEX
+        ("DEPOSITS",              re.compile(r'^\s*Payments\s*/\s*Credits\s*$', re.I)),
+        # Match "New Charges" or "Detailed Transactions" or just "Amount" column header
+        ("WITHDRAWALS",           re.compile(r'^\s*(New\s+Charges|Detailed\s+Transactions|Amount|Fees)\s*$', re.I)),
+    ]
+    def _get_section_pattern(self, key: str):
+        """Return the first compiled regex for the given section key."""
+        for sec_name, pat in self.SECTION_PATTERNS:
+            if sec_name == key:
+                return pat
+        return None
+
     def _extract_opening_balance(self, line: str):
         if self.opening_balance is not None:
             return
@@ -581,10 +615,22 @@ class FallbackStatementParser:
             return True
         low = ln.lower().strip()
         # lines that are obvious headings or totals
-        if re.match(r'^(daily ending balance|daily ending|daily ending balance|statement period|opening balance|ending balance|closing balance|total\b|page\s+\d+)', low):
+        if re.match(r'^(daily ending balance|daily ending|statement period|opening balance|ending balance|closing balance|page\s+\d+|minimum\s+payment|new\s+balance|previous\s+balance|payment\s+due|statement\s+date|total\s+for|automatic\s+payment)', low):
+            return True
+        # New bank section TOTAL lines (avoid pre-filtering header signals)
+        if re.match(r'^(total\s+deposits?|total\s+withdrawals?|total\s+service\s+fees?|other\s+deposits?|other\s+withdrawals?|account\s+summary|balance\s+summary)', low):
+            return True
+        # AMEX specific summary lines
+        if any(k in low for k in [
+            "minimum payment due", "pay in full portion", "pay over time portion", 
+            "total balance", "total new charges",
+            "account total", "days in billing period", "late payment warning",
+            "important notices", "preset spending limit", "amount of $", "your account current",
+            "minimum payment warning", "if you make only", "for example", "will pay off",
+            "estimated total", "member summary", "charges by category", "summary of account"
+        ]):
             return True
         # If the line contains multiple date+amount pairs (daily ending tables) skip
-        # Count date tokens and amount tokens; if >1 of each, it's probably a table column row
         date_count = len(DATE_TOKEN_RE.findall(ln))
         amount_count = len(AMOUNT_RE.findall(ln))
         if (
@@ -600,7 +646,6 @@ class FallbackStatementParser:
         # "TOTAL DEPOSITS" or similar as a whole line
         if re.search(r'\btotal deposits\b|\btotal withdrawals\b|\bdeposits and additions summary\b', low):
             return True
-        print("SKIPPED:", ln) 
         return False
 
     def _line_has_vendor_like_text(self, ln: str) -> bool:
@@ -767,20 +812,22 @@ class FallbackStatementParser:
         # 1. Pre-clean
         for ln in lines:
             self._extract_opening_balance(ln)
-        cleaned = [ln for ln in (l.strip() for l in lines) if ln and not self._is_summary_line(ln)]
-        forced_lines = []
-
-        for ln in cleaned:
-            # CHECK pattern
-            if re.search(r'\b\d{3,6}\b.*\d{1,3}(?:,\d{3})*\.\d{2}', ln):
-                forced_lines.append(ln)
-
-            # FEE pattern
-            elif re.search(r'\bfee\b', ln, re.I) and re.search(r'\d+\.\d{2}', ln):
-                forced_lines.append(ln)
-
-        cleaned = list(dict.fromkeys(cleaned + forced_lines))
-
+        
+        # Identify and exclude the "Account Summary" block from transaction parsing
+        raw_text = "\n".join(lines)
+        summary_m = re.search(r'(?:Account\s+Summary|Statement\s+Summary).*?(?=Monthly\s+Activity|Detailed\s+Transactions|New\s+Transactions|Member\s+Summary|Account\s+Activity|Amount|$)', raw_text, re.I | re.DOTALL)
+        exclude_range = (summary_m.start(), summary_m.end()) if summary_m else (0, 0)
+        
+        cleaned = []
+        char_count = 0
+        for ln in lines:
+            line_len = len(ln) + 1
+            if not (exclude_range[0] <= char_count < exclude_range[1]):
+                ln_stripped = ln.strip()
+                if ln_stripped and not self._is_summary_line(ln_stripped):
+                    cleaned.append(ln_stripped)
+            char_count += line_len
+        
         if not cleaned:
             return [], {"parsed_from": "fallback", "transactions_extracted": 0}
 
@@ -792,10 +839,12 @@ class FallbackStatementParser:
         for ln in cleaned:
             # detect section headers
             matched_section = None
-            for sec_name, pat in self.SECTION_PATTERNS.items():
+            for sec_name, pat in self.SECTION_PATTERNS:
                 if pat.search(ln):
-                    matched_section = sec_name
-                    break
+                    # Section headers must be relatively short to avoid summary noise
+                    if len(ln.strip()) < 50:
+                        matched_section = sec_name
+                        break
             if matched_section:
                 # finalize previously collected block
                 if current_block:
@@ -855,11 +904,15 @@ class FallbackStatementParser:
         in_checks = False
         for ln in cleaned:
             # Check if this is a checks section header
-            if self.SECTION_PATTERNS["CHECKS"].search(ln):
+            _checks_pat = self._get_section_pattern("CHECKS")
+            if _checks_pat and _checks_pat.search(ln):
                 in_checks = True
                 continue  # Skip the header line itself
             # Check if we're exiting the checks section
-            if in_checks and any(self.SECTION_PATTERNS[s].search(ln) for s in ["ATM", "FEES", "ELECTRONIC_WITHDRAWALS"]):
+            if in_checks and any(
+                self._get_section_pattern(s) and self._get_section_pattern(s).search(ln)
+                for s in ["ATM", "FEES", "ELECTRONIC_WITHDRAWALS"]
+            ):
                 in_checks = False
                 continue
             # If we're in checks section, add the line
@@ -881,8 +934,11 @@ class FallbackStatementParser:
             if section == "CHECKS":
                 continue
             block_text = " ".join(block_lines)
-            # skip if looks like a total or header inside
-            if section != "FEES" and re.search(r'\btotal\b.*\d', block_text, re.I):
+            # skip if looks like a total or summary block
+            if section != "FEES" and (
+                re.search(r'\btotal\b.*\d', block_text, re.I) or
+                self._is_summary_line(block_text)
+            ):
                 continue
             # get date from first line
             first_line = block_lines[0]
@@ -980,8 +1036,30 @@ class FallbackStatementParser:
                 section="OPENING",
                 needs_review=False
             ))
-        meta = {"parsed_from": "chase_sectioned_fallback", "transactions_extracted": len(txs)}
-        return txs, meta
+        # Deduplication logic (merging duplicates from multi-page summaries/details)
+        final_txs = []
+        seen = set()
+        for tx in txs:
+            # Create a identifying key: (date, absolute amount, vendor_prefix)
+            # We ignore description in the key as detail sections add more noise
+            v_norm = (tx.vendor or "").strip().lower()[:12]
+            key = (tx.date, abs(tx.amount), v_norm)
+            if key not in seen:
+                seen.add(key)
+                final_txs.append(tx)
+            else:
+                # If we already saw it but this one has a longer vendor name, prefer it
+                for i, existing in enumerate(final_txs):
+                    v_e_norm = (existing.vendor or "").strip().lower()[:12]
+                    if (existing.date == tx.date and 
+                        abs(existing.amount) == abs(tx.amount) and 
+                        v_e_norm == v_norm):
+                        if len(tx.vendor or "") > len(existing.vendor or ""):
+                            final_txs[i] = tx
+                        break
+        
+        meta = {"parsed_from": "chase_sectioned_fallback", "transactions_extracted": len(final_txs)}
+        return final_txs, meta
     def _parse_checks_section(self, lines: List[str]) -> List[Transaction]:
         txs = []
         current_check = None
@@ -1089,7 +1167,7 @@ class UniversalParser:
 
     # Matches debit/credit amount ONLY (NOT balance)
     AMOUNT_RE = re.compile(
-        r'([+\-]?\s?\d{1,3}(?:,\d{3})*(?:\.\d{1,2}))'
+        r'([+\-]?\s?\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?)'
     )
 
     IGNORE_WORDS = ["opening balance", "closing balance", "balance", "running balance"]
@@ -1098,17 +1176,44 @@ class UniversalParser:
         txs = []
 
         # -------- DETECT FORMAT --------
+        # SadaPay detection: check for specific transaction markers
         is_sadapay = any("transf" in ln.lower() or "cr/" in ln.lower() or "dr/" in ln.lower() for ln in lines)
-        is_tabular = any("Debit" in ln or "Credit" in ln for ln in lines)
+        
+        # Tabular detection: Only trigger if we see multi-column headers AND it's NOT a typical blocky statement
+        # (Avoid Page 1 summaries like AMEX "Member Summary")
+        is_tabular = False
+        text_joined = "\n".join(lines[:200]).lower()
+        if ("debit" in text_joined or "credit" in text_joined) and ("balance" in text_joined):
+             # Gating: if it looks like AMEX Page 1, don't use tabular for everything
+             if "member summary" in text_joined or "charges by category" in text_joined:
+                 is_tabular = False
+             else:
+                 is_tabular = True
 
         if is_sadapay:
-            return self._parse_sadapay(lines)
-
+            txs = self._parse_sadapay(lines)
         elif is_tabular:
-            return self._parse_tabular(lines)
-
+            txs = self._parse_tabular(lines)
         else:
-            return self._parse_simple(lines)
+            txs = self._parse_simple(lines)
+
+        # Final Deduplication Logic (consistent with FallbackStatementParser)
+        final_txs = []
+        seen = set()
+        for tx in txs:
+            v_norm = (tx.vendor or "").strip().lower()[:12]
+            key = (tx.date, abs(tx.amount), v_norm)
+            if key not in seen:
+                seen.add(key)
+                final_txs.append(tx)
+            else:
+                for i, existing in enumerate(final_txs):
+                    v_e_norm = (existing.vendor or "").strip().lower()[:12]
+                    if (existing.date == tx.date and abs(existing.amount) == abs(tx.amount) and v_e_norm == v_norm):
+                        if len(tx.vendor or "") > len(existing.vendor or ""):
+                            final_txs[i] = tx
+                        break
+        return final_txs
 
     # ===================================================================================
     # 1) S A D A P A Y    P A R S E R
@@ -1255,8 +1360,8 @@ class UniversalParser:
             date_raw = d.group(1).replace(",", "")
             date_norm = _normalize_date_token(date_raw)
 
-            # Amounts (at least 2 numbers needed)
-            nums = re.findall(r'([+-]?\(?\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?\)?)', ln)
+            # Amounts (consistent with global AMOUNT_RE, allow optional decimal to be robust to poor OCR)
+            nums = re.findall(r'([+\-]?\(?\s*\$?\d{1,3}(?:[,\s]\d{3})*(?:\.\d{1,2})?\)?)', ln)
             nums = [n for n in nums if re.search(r'\d', n)]
             if len(nums) < 2:
                 continue
@@ -1308,10 +1413,11 @@ class UniversalParser:
     # ===================================================================================
     def _parse_simple(self, lines: List[str]) -> List[Transaction]:
         txs = []
+        fb_tester = FallbackStatementParser()
         for ln in lines:
-            low = ln.lower()
+            low = ln.lower().strip()
 
-            if any(w in low for w in self.IGNORE_WORDS):
+            if any(w in low for w in self.IGNORE_WORDS) or fb_tester._is_summary_line(ln):
                 continue
 
             # DATE
@@ -1910,6 +2016,137 @@ def extract_chase_summary(raw_text):
     
     return result
 
+
+def extract_universal_bank_summary(raw_text: str) -> Optional[Dict]:
+    """
+    Extract summary data from non-Chase bank statements.
+    Supports: Bank of America, BMO, Fifth Third, US Bank.
+    Returns a dict formatted like extract_chase_summary(), or None if not detected.
+    """
+    import re
+
+    def clean_amount(s: str) -> float:
+        """Parse a dollar amount string to float, handling negatives and trailing dashes."""
+        s = s.strip().replace('$', '').replace(',', '').replace(' ', '')
+        if s.endswith('-'):
+            s = '-' + s[:-1]
+        try:
+            return float(s)
+        except ValueError:
+            return 0.0
+
+    # Base result structure (matches Chase format for compatibility)
+    result = {
+        "Beginning Balance": {"count": "", "amount": 0.0},
+        "Deposits and Additions": {"count": 0, "amount": 0.0},
+        "ATM & Debit Card Withdrawals": {"count": 0, "amount": 0.0},
+        "Electronic Withdrawals": {"count": 0, "amount": 0.0},
+        "Checks Paid": {"count": 0, "amount": 0.0},
+        "Other Withdrawals": {"count": 0, "amount": 0.0},
+        "Fees": {"count": 0, "amount": 0.0},
+        "Ending Balance": {"count": "", "amount": 0.0},
+    }
+
+    lines = [l.strip() for l in raw_text.split('\n') if l.strip()]
+    amt_re = re.compile(r'[\$]?\s*([+\-]?[\d,]+\.?\d{0,2})\-?$')
+
+    # ── Bank of America ──────────────────────────────────────────────────────
+    # Sections: "Deposits and other credits", "Withdrawals and other debits", "Service fees"
+    # Each section ends with a "Total ..." line we can use.
+    if re.search(r'Bank\s*of\s*America|BKOFAMERICA', raw_text, re.I):
+        # Beginning balance
+        m = re.search(r'Beginning\s*balance\s+on\s+\w+\s+\d+\s+\$?\s*([\d,]+\.?\d{0,2})', raw_text, re.I)
+        if m:
+            result["Beginning Balance"]["amount"] = clean_amount(m.group(1))
+        # Ending balance
+        m = re.search(r'Ending\s*balance\s+on\s+\w+\s+\d+,?\s+\d+\s+\$?\s*([\d,]+\.?\d{0,2})', raw_text, re.I)
+        if m:
+            result["Ending Balance"]["amount"] = clean_amount(m.group(1))
+        # Total deposits
+        m = re.search(r'Total\s+deposits?\s+and\s+other\s+credits?\s+\$?\s*([\d,]+\.?\d{0,2})', raw_text, re.I)
+        if m:
+            result["Deposits and Additions"]["amount"] = clean_amount(m.group(1))
+        # Total withdrawals
+        m = re.search(r'Total\s+withdrawals?\s+and\s+other\s+debits?\s+[-\$]?\s*([\d,]+\.?\d{0,2})', raw_text, re.I)
+        if m:
+            result["Other Withdrawals"]["amount"] = -abs(clean_amount(m.group(1)))
+        # Total fees
+        m = re.search(r'Total\s+(?:service\s+)?fees?\s+[-\$]?\s*([\d,]+\.?\d{0,2})', raw_text, re.I)
+        if m:
+            result["Fees"]["amount"] = -abs(clean_amount(m.group(1)))
+        return result
+
+    # ── BMO Bank ─────────────────────────────────────────────────────────────
+    # "Account Summary" block with "DEPOSIT AMOUNT ... WITHDRAWAL AMOUNT"
+    if re.search(r'\bBMO\b', raw_text, re.I):
+        # We use re.DOTALL and tighter value patterns because BMO summaries are often multi-line in OCR
+        # Beginning balance
+        m = re.search(r'BEGINNING\s+BALANCE\s+AS.*?\$\s*([\d, ]+\.\d{2})', raw_text, re.I | re.DOTALL)
+        if m: result["Beginning Balance"]["amount"] = clean_amount(m.group(1))
+        
+        # Ending balance
+        m = re.search(r'ENDING\s+BALANCE\s+AS.*?\$\s*([\d, ]+\.\d{2})', raw_text, re.I | re.DOTALL)
+        if m: result["Ending Balance"]["amount"] = clean_amount(m.group(1))
+        
+        # Total deposits
+        m = re.search(r'DEPOSIT\s+AMOUNT.*?\$\s*([\d, ]+\.\d{2})', raw_text, re.I | re.DOTALL)
+        if m: result["Deposits and Additions"]["amount"] = clean_amount(m.group(1))
+        
+        # Total withdrawals
+        m = re.search(r'WITHDRAWAL\s+AMOUNT.*?\$\s*([\d, ]+\.\d{2})', raw_text, re.I | re.DOTALL)
+        if m: result["Other Withdrawals"]["amount"] = -abs(clean_amount(m.group(1)))
+        
+        # Fallback to general BMO patterns if above fails
+        if result["Ending Balance"]["amount"] == 0.0:
+            m = re.search(r'BMO\s+ELITE\s+BUSINESS\s+CKG.*?\$\s*([\d, ]+\.\d{2})', raw_text, re.I | re.DOTALL)
+            if not m:
+                m = re.search(r'(?:BALANCE|ENDING\s+BALANCE).*?\$\s*([\d, ]+\.\d{2})', raw_text, re.I | re.DOTALL)
+            if m: result["Ending Balance"]["amount"] = clean_amount(m.group(1))
+        return result
+
+    # ── Fifth Third Bank ─────────────────────────────────────────────────────
+    # "Beginning Balance $X.XX  Number of Days in Period 30"  on one line (OCR merged)
+    # "Ending Balance $X.XX"
+    if re.search(r'Fifth\s*Third|53\.com', raw_text, re.I):
+        m = re.search(r'Beginning\s*Balance\s*\$?\s*([\d,]+\.?\d{0,2})', raw_text, re.I)
+        if m:
+            result["Beginning Balance"]["amount"] = clean_amount(m.group(1))
+        m = re.search(r'Ending\s*Balance\s*\$?\s*([\d,]+\.?\d{0,2})', raw_text, re.I)
+        if m:
+            result["Ending Balance"]["amount"] = clean_amount(m.group(1))
+        # Try to find total deposits and withdrawals
+        m = re.search(r'Total\s+(?:Deposits?|Credits?)\s*\$?\s*([\d,]+\.?\d{0,2})', raw_text, re.I)
+        if m:
+            result["Deposits and Additions"]["amount"] = clean_amount(m.group(1))
+        m = re.search(r'Total\s+(?:Withdrawals?|Debits?)\s*\$?\s*([\d,]+\.?\d{0,2})', raw_text, re.I)
+        if m:
+            result["Other Withdrawals"]["amount"] = -abs(clean_amount(m.group(1)))
+        return result
+
+    # ── US Bank ──────────────────────────────────────────────────────────────
+    # Account Summary table: rows like "Beginning Balance on Nov 3  $  26,427.22"
+    if re.search(r'U\.?S\.?\s*Bank|usbank\.com', raw_text, re.I):
+        m = re.search(r'Beginning\s*Balance\s+(?:on\s+\w+\s+\d+)?\s*\$?\s*([\d,]+\.?\d{0,2})', raw_text, re.I)
+        if m:
+            result["Beginning Balance"]["amount"] = clean_amount(m.group(1))
+        m = re.search(r'Ending\s*Balance\s+(?:on\s+\w+\s+\d+,?\s+\d+)?\s*\$?\s*([\d,]+\.?\d{0,2})', raw_text, re.I)
+        if m:
+            result["Ending Balance"]["amount"] = clean_amount(m.group(1))
+        # Other Deposits row: "Other Deposits  N  amount"
+        m = re.search(r'Other\s+Deposits?\s+(\d+)\s+([\d,]+\.?\d{0,2})', raw_text, re.I)
+        if m:
+            result["Deposits and Additions"]["count"] = int(m.group(1))
+            result["Deposits and Additions"]["amount"] = clean_amount(m.group(2))
+        # Other Withdrawals row: "Other Withdrawals  N  amount-"
+        m = re.search(r'Other\s+Withdrawals?\s+(\d+)\s+([\d,]+\.?\d{0,2})-?', raw_text, re.I)
+        if m:
+            result["Other Withdrawals"]["count"] = int(m.group(1))
+            result["Other Withdrawals"]["amount"] = -abs(clean_amount(m.group(2)))
+        return result
+
+    return None  # Unknown bank — fall back to transaction-computed summary
+
+
 # ----------------------------
 # Credit Card Summary Extraction & Rendering
 # ----------------------------
@@ -1973,10 +2210,9 @@ def extract_cc_summary(raw_text: str) -> Dict[str, Any]:
         line = lines[i]
         if i + 1 < len(lines):
             nxt = lines[i+1]
-            if re.search(r'[\d,]+\.\d$', line) and re.match(r'^\d$', nxt):
-                line += nxt
-                i += 1
-            elif re.search(r'[\d,]+$', line) and re.match(r'^\.\d{2}$', nxt):
+            # Handle split numbers: 1,234. + 56 OR 1,23 + 4.56
+            if (re.search(r'[\d,]+\.\d?$', line) and re.match(r'^\d{1,2}$', nxt)) or \
+               (re.search(r'[\d,]+$', line) and re.match(r'^\.\d{2}$', nxt)):
                 line += nxt
                 i += 1
         joined_lines.append(line)
@@ -1995,19 +2231,19 @@ def extract_cc_summary(raw_text: str) -> Dict[str, Any]:
     summary_text = processed_text[summary_start:]
     m_end = re.search(r'ACCOUNT\s*ACTIVITY|TRANSACTION\s*DETAIL|ACTIVITY\s*DETAIL', summary_text[100:], re.I)
     if m_end: summary_text = summary_text[:100+m_end.start()]
-    else: summary_text = summary_text[:2500]
+    else: summary_text = summary_text[:3000]
 
     # 3. Field Matching (Fuzzy Labels)
-    p_val = r'[\$]?\s*([+\-]?\s*[\d,]+\.\d{2}|[+\-]?\s*[\d,]{1,9})'
+    p_val = r'[\$]?\s*([+\-]?\(?\s*[\d,]+\.\d{2}|[+\-]?\(?\s*[\d,]{1,9}\)?)'
     
     field_patterns = {
         "Previous Balance": r'Previ?ous\s*Bala?nce',
-        "Payment, Credits": r'Pay?ments?,\s*Credi?ts?',
-        "Purchases": r'Purch?ases?',
+        "Payment, Credits": r'Pay?ments?(?:,\s*Credi?ts?|/Credi?ts?|/Credi?t)',
+        "Purchases": r'(?:Purch?ases?|New\s*Charges?)',
         "Cash Advances": r'Cash\s*Adva?nces?(?!\s+Line)',
         "Balance Transfers": r'Bala?nce\s*Transf?er?s?',
-        "Fees Charged": r'Fees\s*Char?ged',
-        "Interest Charged": r'Inte?re?st\s*Char?ged',
+        "Fees Charged": r'Fees(?:\s*Char?ged)?',
+        "Interest Charged": r'Inte?re?st(?:\s*Char?ged)?',
         "New Balance": r'New\s*Bala?nce',
         "Revolving Credit Amount": r'Revolv?ing\s*Credi?t\s*Amou?nt|Credi?t\s*Limit',
         "Available Credit": r'Avai?labl?e\s*Credi?t',
@@ -2016,17 +2252,56 @@ def extract_cc_summary(raw_text: str) -> Dict[str, Any]:
         "Past Due Amount": r'Past\s*Due\s*Amou?nt',
     }
 
+    # First pass: try to find each label and its value on the same line or immediate proximity
     for key, f_pat in field_patterns.items():
-        full_pat = f'{f_pat}.*?{p_val}'
-        matches = list(re.finditer(full_pat, summary_text, re.I | re.DOTALL))
-        if matches:
-            best_m = matches[0]
-            for m in matches:
-                pre_text = summary_text[max(0, m.start()-15):m.start()].lower()
-                if "total" in pre_text:
-                    best_m = m
-                    break
-            result[key] = clean_amt(best_m.group(1))
+        # A) Same line
+        same_line_pat = f'{f_pat}[^\\n]{{0,40}}?{p_val}'
+        m = re.search(same_line_pat, summary_text, re.I)
+        if m:
+            result[key] = clean_amt(m.group(1))
+            continue
+            
+        # B) Multi-line (stricter than before)
+        other_labels = '|'.join([p for k, p in field_patterns.items() if k != key])
+        # Allow up to 100 chars but don't jump over another label
+        multi_line_pat = f'{f_pat}(?:(?!(?:{other_labels})).){{0,100}}?{p_val}'
+        m = re.search(multi_line_pat, summary_text, re.I | re.DOTALL)
+        if m:
+            result[key] = clean_amt(m.group(1))
+
+    # 4. Block Mapping Fallback (For dissociated layouts like AMEX "Account Total")
+    # If key fields are still 0, look for specialized "Total" block
+    missing_count = sum(1 for k in ["Previous Balance", "New Balance", "Payment, Credits"] if result[k] == 0.0)
+    if missing_count >= 1:
+        total_m = re.search(r'(?:Account\s*Total|Total\s*Summary)', summary_text, re.I)
+        if total_m:
+            sub = summary_text[total_m.start():]
+            # Try to find all values in this sub-block
+            all_vals = []
+            for m in re.finditer(p_val, sub):
+                all_vals.append((m.start(), clean_amt(m.group(1))))
+            
+            # AMEX order is usually: Prev, Pay, New Charges, Fees, Interest, New Balance
+            # We map labels to values by order if both are found in the block
+            labels_found = []
+            for key, f_pat in field_patterns.items():
+                m = re.search(f_pat, sub, re.I)
+                if m: labels_found.append((m.start(), key))
+            labels_found.sort() # sort by appearance in text
+            
+            if labels_found and len(all_vals) >= len(labels_found):
+                # We assume the first value appearing after ALL labels starts the value block
+                # (Or they are interleaved but missed by regex)
+                # Let's try 1-to-1 mapping of those that are still 0
+                val_idx = 0
+                # Find common summary values: must have decimal or $ sign to avoid "30 days" noise
+                first_label_pos = labels_found[0][0]
+                dollar_box = [v for pos, v in all_vals if pos > first_label_pos and ('.' in str(v) or '$' in sub[pos-2:pos+1])]
+                
+                for i, (pos, key) in enumerate(labels_found):
+                    if i < len(dollar_box):
+                        if result[key] == 0.0:
+                            result[key] = dollar_box[i]
 
     # Special Case: Account Number
     acc_match = re.search(r'Account\s*Number[:\s]+([\d\s]{10,25})', processed_text, re.I)
@@ -2177,17 +2452,27 @@ def inject_chase_styles():
 """, unsafe_allow_html=True)
 
 def get_sub_summary(transactions, opening_balance=0.0, raw_text=""):
-    # Try to extract Chase pre-formatted summary (more accurate than parsing)
+    opening_balance = float(opening_balance or 0.0)  # guard against None
+
+    # Try to extract Chase pre-formatted summary (most accurate)
     if raw_text:
         chase_summary = extract_chase_summary(raw_text)
         if chase_summary:
-            # Use Chase's own summary - it's more reliable
             df = pd.DataFrame([
                 {"Type": k, "INSTANCES": v["count"], "AMOUNT": f"${v['amount']:,.2f}"}
                 for k, v in chase_summary.items()
             ])
             return df
-    
+
+        # Try universal bank summary (BoA, BMO, Fifth Third, US Bank)
+        universal_summary = extract_universal_bank_summary(raw_text)
+        if universal_summary:
+            df = pd.DataFrame([
+                {"Type": k, "INSTANCES": v["count"], "AMOUNT": f"${v['amount']:,.2f}"}
+                for k, v in universal_summary.items()
+            ])
+            return df
+
     # Fallback: Calculate summary from transactions (for non-Chase statements)
     # Initialize data structure to track count (instances) and amount
     data = {
@@ -2226,7 +2511,7 @@ def get_sub_summary(transactions, opening_balance=0.0, raw_text=""):
         if amt > 0:
             # If opening_balance is set and this is the first deposit matching it, skip it
             # to avoid double-counting (it's already shown as "Beginning Balance" row)
-            if opening_balance > 0 and not skipped_opening and abs(amt - opening_balance) < 0.01:
+            if (opening_balance or 0.0) > 0 and not skipped_opening and abs(amt - (opening_balance or 0.0)) < 0.01:
                 skipped_opening = True
                 continue
             
@@ -2275,6 +2560,7 @@ def get_sub_summary(transactions, opening_balance=0.0, raw_text=""):
         data["Checks Paid"]["amount"] +
         data["ATM & Debit Card Withdrawals"]["amount"] +
         data["Electronic Withdrawals"]["amount"] +
+        data["Other Withdrawals"]["amount"] +
         data["Fees"]["amount"]
     )
     
@@ -2923,6 +3209,7 @@ if uploaded or credit_card_files:
             ]
 
             # If nothing extracted or too few rows, try UniversalParser conservative fallback
+            # AMEX can sometimes be tricky for sectioned parser if layout is weird
             if not all_txs or len(all_txs) < 3:
                 if uploaded:  # Only try universal parser if we have a bank statement
                     up = UniversalParser()
