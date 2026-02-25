@@ -1,5 +1,4 @@
 import pytesseract
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 # bank_data_analysis.py
 # Hybrid Bank Statement Analyzer (deterministic + optional LLM)
 # Paste/replace your old file with this and run: streamlit run bank_data_analysis.py
@@ -9,6 +8,8 @@ import re
 import json
 import logging
 import tempfile
+import platform
+import shutil
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from typing import List, Tuple, Dict, Any, Optional
@@ -17,7 +18,29 @@ from pathlib import Path
 import pdfplumber
 import pandas as pd
 import streamlit as st
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+# Import new multi-bank parser
+try:
+    from bank_statement_parser import parse_bank_statement, detect_bank
+    MULTI_BANK_PARSER_AVAILABLE = True
+except ImportError:
+    MULTI_BANK_PARSER_AVAILABLE = False
+    # Logger not yet defined, will log later if needed
+
+# Platform-aware Tesseract configuration
+if platform.system() == "Windows":
+    # Only set tesseract path on Windows
+    possible_tesseract_paths = [
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    ]
+    for tess_path in possible_tesseract_paths:
+        if Path(tess_path).exists():
+            pytesseract.pytesseract.tesseract_cmd = tess_path
+            break
+# On macOS/Linux, tesseract should be in PATH (installed via brew/apt)
+# No need to set tesseract_cmd explicitly
+
 # ============================
 # Schedule C Keyword Rules
 # ============================
@@ -404,10 +427,30 @@ class DocumentParser:
 
             pdf_bytes = bytes(file_bytes)  # force fresh copy
 
+            # Try to find poppler if installed via Homebrew (macOS) or default paths
+            import shutil
+            import platform
+            
+            poppler_path = None
+            if platform.system() == "Darwin":  # macOS
+                # Check if poppler is in PATH (installed via brew)
+                if shutil.which("pdfinfo"):
+                    poppler_path = None  # Use system PATH
+            elif platform.system() == "Windows":
+                # Try common Windows paths
+                possible_paths = [
+                    r"C:\poppler\poppler-25.12.0\Library\bin",
+                    r"C:\Program Files\poppler\bin",
+                ]
+                for path in possible_paths:
+                    if Path(path).exists():
+                        poppler_path = path
+                        break
+            
             images = convert_from_bytes(
                 pdf_bytes,
                 dpi=300,
-                poppler_path=r"C:\poppler\poppler-25.12.0\Library\bin"
+                poppler_path=poppler_path
             )
 
 
@@ -491,6 +534,112 @@ def extract_true_amount(text: str) -> Optional[float]:
         return val
 
     return None
+
+# ----------------------------
+# Multi-Bank Parser Integration
+# ----------------------------
+def parse_with_multi_bank_parser(text_lines, filename, manual_year=None, include_opening_balance=False, extract_check_memos=False):
+    """
+    Uses the new multi-bank parser to parse bank statements and converts to old Transaction format.
+    
+    Args:
+        text_lines: List of text lines extracted from PDF
+        filename: Name of the file
+        manual_year: Optional manual year override
+        include_opening_balance: Whether to include opening balance
+        extract_check_memos: Whether to extract check memos
+        
+    Returns:
+        tuple: (list of Transaction objects, dict of metadata)
+    """
+    if not MULTI_BANK_PARSER_AVAILABLE:
+        return None, None
+        
+    try:
+        # Convert lines to text
+        text = '\n'.join(text_lines)
+        
+        # Parse using the new multi-bank parser
+        from bank_statement_parser import TransactionType, TransactionCategory
+        parsed_result = parse_bank_statement(text)
+        
+        if not parsed_result:
+            logger.warning(f"Multi-bank parser returned None for {filename}")
+            return None, None
+            
+        # Convert new Transaction format to old format
+        old_transactions = []
+        for new_tx in parsed_result.transactions:
+            # Determine transaction type
+            if new_tx.type == TransactionType.DEPOSIT:
+                tx_type = "deposit"
+                amount = abs(new_tx.amount)
+            elif new_tx.type == TransactionType.WITHDRAWAL:
+                tx_type = "withdrawal"
+                amount = -abs(new_tx.amount)
+            elif new_tx.type == TransactionType.FEE:
+                tx_type = "withdrawal"
+                amount = -abs(new_tx.amount)
+            elif new_tx.type == TransactionType.CHECK:
+                tx_type = "withdrawal"
+                amount = -abs(new_tx.amount)
+            elif new_tx.type == TransactionType.TRANSFER:
+                tx_type = "withdrawal" if new_tx.amount < 0 else "deposit"
+                amount = new_tx.amount
+            else:
+                tx_type = "withdrawal" if new_tx.amount < 0 else "deposit"
+                amount = new_tx.amount
+            
+            # Format date as string (old format expects string)
+            if hasattr(new_tx.date, 'strftime'):
+                date_str = new_tx.date.strftime("%m/%d/%Y")
+            else:
+                date_str = str(new_tx.date)
+            
+            # Extract vendor from description (simple approach: take first part before any details)
+            vendor = new_tx.description.split('-')[0].strip() if new_tx.description else ""
+            
+            # Map category
+            category_map = {
+                TransactionCategory.INCOME: "Income",
+                TransactionCategory.EXPENSE: "Expense", 
+                TransactionCategory.TRANSFER: "Transfer",
+                TransactionCategory.UNCATEGORIZED: None
+            }
+            category = category_map.get(new_tx.category)
+            
+            # Create old-style Transaction
+            old_tx = Transaction(
+                date=date_str,
+                transaction_type=tx_type,
+                vendor=vendor,
+                amount=amount,
+                description=new_tx.description or "",
+                raw_line=f"{date_str} {new_tx.description} {new_tx.amount}",
+                section=None,
+                category=category,
+                needs_review=False,
+                source="BANK"
+            )
+            old_transactions.append(old_tx)
+        
+        # Create metadata
+        meta = {
+            "bank": parsed_result.bank_name,
+            "statement_period": f"{parsed_result.statement_start_date} to {parsed_result.statement_end_date}" if parsed_result.statement_start_date and parsed_result.statement_end_date else None,
+            "opening_balance": parsed_result.opening_balance,
+            "closing_balance": parsed_result.closing_balance,
+            "total_deposits": parsed_result.total_deposits,
+            "total_withdrawals": parsed_result.total_withdrawals,
+            "errors": parsed_result.errors,
+            "needs_review": parsed_result.needs_review
+        }
+        
+        return old_transactions, meta
+        
+    except Exception as e:
+        logger.error(f"Error using multi-bank parser for {filename}: {e}", exc_info=True)
+        return None, None
 
 class FallbackStatementParser:
     def __init__(self, include_opening_balance: bool = False, extract_check_memos: bool = False):
@@ -2574,13 +2723,13 @@ if "active_business" not in st.session_state or st.session_state.active_business
             
             col_a, col_b = st.columns(2)
             with col_a:
-                if st.button("❌ Yes, Delete", key="confirm_delete_yes", use_container_width=True):
+                if st.button("❌ Yes, Delete", key="confirm_delete_yes", width='stretch'):
                     if delete_business(user_id, business_to_delete):
                         st.session_state.confirm_delete = None
                         st.success(f"Profile '{business_to_delete}' deleted successfully")
                         st.rerun()
             with col_b:
-                if st.button("Cancel", key="confirm_delete_no", use_container_width=True):
+                if st.button("Cancel", key="confirm_delete_no", width='stretch'):
                     st.session_state.confirm_delete = None
                     st.rerun()
         st.stop()
@@ -2596,7 +2745,7 @@ if "active_business" not in st.session_state or st.session_state.active_business
             
             col_a, col_b = st.columns(2)
             with col_a:
-                if st.button("✅ Create", key="confirm_create", use_container_width=True):
+                if st.button("✅ Create", key="confirm_create", width='stretch'):
                     if new_business:
                         create_business(user_id, new_business)
                         st.session_state.active_business = new_business
@@ -2605,7 +2754,7 @@ if "active_business" not in st.session_state or st.session_state.active_business
                     else:
                         st.error("Please enter a name")
             with col_b:
-                if st.button("❌ Cancel", key="cancel_create", use_container_width=True):
+                if st.button("❌ Cancel", key="cancel_create", width='stretch'):
                     st.session_state.show_create_form = False
                     if not businesses:
                         # If no businesses exist, keep form open
@@ -2849,18 +2998,37 @@ if uploaded or credit_card_files:
                         if manual_year:
                             st.info(f"✅ Using manually selected year for {up_file.name}: **{manual_year}**")
                         
-                        # Use FallbackStatementParser for each file
-                        fb_parser = FallbackStatementParser(
+                        # Try new multi-bank parser first
+                        bank_txs, b_meta = parse_with_multi_bank_parser(
+                            lines,  # Pass extracted text lines, not bytes
+                            up_file.name, 
+                            manual_year=manual_year,
                             include_opening_balance=include_opening_balance,
                             extract_check_memos=extract_check_memos
                         )
-                        bank_txs, b_meta = fb_parser.parse_statement(lines, manual_year=manual_year)
+                        
+                        # Fall back to FallbackStatementParser if multi-bank parser fails
+                        if bank_txs is None or b_meta is None:
+                            st.info(f"Using legacy parser for {up_file.name}")
+                            fb_parser = FallbackStatementParser(
+                                include_opening_balance=include_opening_balance,
+                                extract_check_memos=extract_check_memos
+                            )
+                            bank_txs, b_meta = fb_parser.parse_statement(lines, manual_year=manual_year)
+                        else:
+                            st.success(f"✅ Detected bank: {b_meta.get('bank', 'Unknown')}")
+                        
                         all_txs.extend(bank_txs)
+
+                        # Get opening balance from either parser
+                        opening_bal = 0.0
+                        if include_opening_balance:
+                            opening_bal = b_meta.get('opening_balance', 0.0) or 0.0
 
                         # Generate summary for THIS file
                         file_summary_df = get_sub_summary(
                             transactions=bank_txs,
-                            opening_balance=fb_parser.opening_balance if include_opening_balance else 0.0,
+                            opening_balance=opening_bal,
                             raw_text=file_raw_text
                         )
                         st.session_state.statement_summaries.append({
@@ -2871,7 +3039,7 @@ if uploaded or credit_card_files:
                         # Store meta from the first file or merge?
                         if not meta:
                             meta = b_meta
-                            st.session_state.opening_balance = fb_parser.opening_balance
+                            st.session_state.opening_balance = opening_bal
                 st.session_state.meta = meta
                 st.session_state.raw_text = all_raw_text  # Save for summary extraction
             # Process credit card statements if uploaded
@@ -3205,7 +3373,7 @@ if all_transactions:
         col_btn1, col_btn2, col_btn3 = st.columns([2, 2, 2])
         
         with col_btn1:
-            if st.button("✅ Apply Filter", type="primary", disabled=filter_disabled, use_container_width=True):
+            if st.button("✅ Apply Filter", type="primary", disabled=filter_disabled, width='stretch'):
                 # Store filter settings in session state
                 st.session_state.filter_start_date = start_md
                 st.session_state.filter_end_date = end_md
@@ -3297,7 +3465,7 @@ if all_transactions:
                 st.rerun()
 
         with col_btn2:
-            if st.button("🔄 Reset Filter", disabled=filter_disabled, use_container_width=True):
+            if st.button("🔄 Reset Filter", disabled=filter_disabled, width='stretch'):
                 st.session_state.filtered_transactions = all_transactions
                 st.session_state.filter_active = False
                 # Increment reset counter to force widget recreation with default values
@@ -3510,7 +3678,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
         if df is None or df.empty:
             st.info("No deposits found.")
         else:
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width='stretch', hide_index=True)
             st.subheader("👉 Customer Transaction Details")
             deps = [t for t in st.session_state.get(
                 "filtered_transactions", st.session_state.transactions
@@ -3530,7 +3698,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
                         "Needs Review": "⚠ Yes" if it.needs_review else "✅ No",
                         "Status": "🚫 Excluded" if is_tx_excluded(it) else "✅ Active"
                     } for it in items])
-                    st.dataframe(details, use_container_width=True, hide_index=True)
+                    st.dataframe(details, width='stretch', hide_index=True)
 
     elif selected_tab == 1:  # Withdrawals tab
         st.subheader("All Withdrawals Summary (by Vendor)")
@@ -3539,7 +3707,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
         if df is None or df.empty:
             st.info("No withdrawals found.")
         else:
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width='stretch', hide_index=True)
             st.subheader("👉 Vendor Transaction Details")
             wds = [t for t in st.session_state.get(
                 "filtered_transactions", st.session_state.transactions
@@ -3559,13 +3727,13 @@ if "transactions" in st.session_state and st.session_state.transactions:
                     "Needs Review": "⚠ Yes" if it.needs_review else "✅ No",
                     "Status": "🚫 Excluded" if is_tx_excluded(it) else "✅ Active"
                 } for it in items])
-                    st.dataframe(details, use_container_width=True, hide_index=True)
+                    st.dataframe(details, width='stretch', hide_index=True)
 
     elif selected_tab == 2:  # P&L tab
         st.subheader("Profit & Loss")
         # Regenerate P&L with filtered transactions
         filtered_pl_df = rg.generate_pl_report(get_active_transactions())
-        st.dataframe(filtered_pl_df, use_container_width=True, hide_index=True)
+        st.dataframe(filtered_pl_df, width='stretch', hide_index=True)
 
     elif selected_tab == 3:  # All Transactions tab
         st.subheader("All Transactions")
@@ -3577,7 +3745,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
             "Description": f"~~{t.description}~~" if is_tx_excluded(t) else t.description,
             "Status": "🚫 Excluded" if is_tx_excluded(t) else "✅ Active"
         } for t in transactions])
-        st.dataframe(all_df, use_container_width=True, hide_index=True)
+        st.dataframe(all_df, width='stretch', hide_index=True)
     
     elif SHOW_SCHEDULE_C and selected_tab == 4:  # Schedule C tab
             st.subheader("📄 Schedule C")
@@ -3608,7 +3776,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
                 st.code(schedule_c_text)
 
                 st.subheader("🧾 IRS Schedule C Summary")
-                st.dataframe(schedule_c_df, use_container_width=True, hide_index=True)
+                st.dataframe(schedule_c_df, width='stretch', hide_index=True)
 
                 if not categorized_transactions:
                     st.stop()
@@ -3643,7 +3811,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
                             "Needs Review": "⚠ Yes" if tx.needs_review else "✅ No"
                         } for tx, cat in items])
 
-                        st.dataframe(df, use_container_width=True, hide_index=True)
+                        st.dataframe(df, width='stretch', hide_index=True)
 
     elif selected_tab == (5 if SHOW_SCHEDULE_C else 4):  # P&L Account Codes tab
         st.subheader("📊 Profit & Loss (Account Codes)")
@@ -3874,7 +4042,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
                 summary_df = pd.DataFrame(rows)
                 
                 st.subheader("📋 Transaction Details")
-                st.dataframe(summary_df, use_container_width=True, hide_index=True)
+                st.dataframe(summary_df, width='stretch', hide_index=True)
 
                 # Group by account code
                 st.subheader("💼 By Account Code")
@@ -4289,7 +4457,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
         </style>
     """, unsafe_allow_html=True)
     
-    if st.button("🖨️ Print Current View", type="secondary", use_container_width=True):
+    if st.button("🖨️ Print Current View", type="secondary", width='stretch'):
         st.markdown('<script>window.print();</script>', unsafe_allow_html=True)
         st.info("💡 Print dialog should open. The current filter settings will be preserved in the printout.")
     
