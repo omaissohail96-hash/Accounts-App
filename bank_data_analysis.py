@@ -3134,6 +3134,8 @@ def main():
         sort_by = st.selectbox("Sort vendor summaries by", ["Subtotal (desc)", "Transaction Count (desc)"])
 
         st.divider()
+        
+
         st.write(f"👤 {st.session_state.user['name']}")
         if st.button("Logout"):
             for k in list(st.session_state.keys()):
@@ -3447,6 +3449,7 @@ def main():
                     st.warning("⚠️ Could not detect year from statement - using current year for dates without year")
 
                 st.session_state.all_transactions = transactions
+                st.session_state.transactions = transactions  # Key for global compatibility
                 st.session_state.filtered_transactions = transactions 
 
                 # Reset all filter settings when processing new statement
@@ -3500,45 +3503,55 @@ def main():
                 bank_name_display = str(bank_meta.get("bank", "BANK")).upper()
                 is_credit_card = "amex" in bank_name_display.lower() or "credit" in bank_name_display.lower()
                 summary_title = "CREDIT CARD SUMMARY" if is_credit_card else f"{bank_name_display} STATEMENT SUMMARY"
-                sub_summary_df = get_sub_summary(
-                    transactions=all_transactions,
-                    opening_balance=opening_balance_val,
-                    raw_text=st.session_state.get("raw_text", ""),
-                    bank_name=bank_name_display
-                )
                 render_chase_table(summary_title, sub_summary_df)
 
         st.markdown("---")
         st.header("🔍 Advanced Transaction Filter")
         st.markdown("**Professional filtering system** - All filters work together to give you precise control")
 
-        # Extract all valid dates with full date information
+        # Extract all valid dates with robust parsing
         parsed_dates = []
         for tx in all_transactions:
             if tx.date:
-                try:
-                    parsed_dates.append(datetime.strptime(tx.date, "%Y-%m-%d").date())
-                except:
-                    pass
+                # Try multiple formats to avoid "No valid dates" error
+                for fmt in ["%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"]:
+                    try:
+                        parsed_dates.append(datetime.strptime(tx.date, fmt).date())
+                        break
+                    except:
+                        continue
 
         if not parsed_dates:
-            st.warning("⚠️ No valid dates found in transactions.")
+            st.warning("⚠️ No valid dates found in transactions. Please check the statement format.")
         else:
-            # Get actual min and max dates from ALL uploaded statements (bank + credit card)
+            # Get actual min and max dates from ALL uploaded statements
             min_date = min(parsed_dates)
             max_date = max(parsed_dates)
 
-            # Calculate first day of starting month and last day of ending month
-            first_day_of_start_month = min_date.replace(day=1)
+            # NEW DATE LOGIC as per user request:
+            # Start date = first transaction date exactly
+            # End date = last day of month of last transaction
+            first_tx_date = min_date
             last_day_of_end_month = max_date.replace(day=monthrange(max_date.year, max_date.month)[1])
 
             # Store coverage dates in session state for reference
             st.session_state.statement_coverage_start = min_date
             st.session_state.statement_coverage_end = max_date
 
+            # Identify sources for clearer display
+            sources = set()
+            for tx in all_transactions:
+                s = getattr(tx, "source", "BANK")
+                if s == "CREDIT_CARD":
+                    sources.add("Credit Card")
+                else:
+                    sources.add("Bank")
+            
+            source_text = " & ".join(sorted(list(sources)))
+            
             # Display coverage information prominently
             st.info(
-                f"📊 **Statement Coverage:** {min_date.strftime('%b %d, %Y')} → {max_date.strftime('%b %d, %Y')} "
+                f"📊 **{source_text} Coverage:** {min_date.strftime('%b %d, %Y')} → {max_date.strftime('%b %d, %Y')} "
                 f"({(max_date - min_date).days} days, {len(all_transactions)} total transactions)"
             )
 
@@ -3558,12 +3571,12 @@ def main():
                     st.warning("🔒 **Filter is LOCKED** - Settings preserved for printing/exporting")
             with lock_col2:
                 if st.session_state.get('filter_locked', False):
-                    if st.button("🔓 Unlock Filter"):
+                    if st.button("🔓 Unlock Filter", key="unlock_main"):
                         st.session_state.filter_locked = False
                         st.success("Filter unlocked! You can now adjust settings.")
                         st.rerun()
                 else:
-                    if st.button("🔒 Lock Filter"):
+                    if st.button("🔒 Lock Filter", key="lock_main"):
                         st.session_state.filter_locked = True
                         st.success("Filter locked! Settings preserved for printing/exporting.")
                         st.rerun()
@@ -3581,8 +3594,8 @@ def main():
             with col_date1:
                 start_md = st.date_input(
                     "Start Date",
-                    value=first_day_of_start_month,
-                    min_value=first_day_of_start_month,
+                    value=first_tx_date,
+                    min_value=first_tx_date,
                     max_value=last_day_of_end_month,
                     key=f"filter_start_md{reset_suffix}",
                     disabled=filter_disabled
@@ -3592,7 +3605,7 @@ def main():
                 end_md = st.date_input(
                     "End Date",
                     value=last_day_of_end_month,
-                    min_value=first_day_of_start_month,
+                    min_value=first_tx_date,
                     max_value=last_day_of_end_month,
                     key=f"filter_end_md{reset_suffix}",
                     disabled=filter_disabled
@@ -3642,8 +3655,6 @@ def main():
             # ===== ACCOUNT CODE FILTER =====
             st.subheader("📊 Account Code Filter")
 
-            # Load all account codes
-            # (Imports moved to top level)
             all_account_options = {"All Account Codes": "ALL"}
             account_file = Path(__file__).parent / 'account_keywords.json'
             try:
@@ -3667,7 +3678,7 @@ def main():
             col_btn1, col_btn2, col_btn3 = st.columns([2, 2, 2])
 
             with col_btn1:
-                if st.button("✅ Apply Filter", type="primary", disabled=filter_disabled, width='stretch'):
+                if st.button("✅ Apply Filter", type="primary", disabled=filter_disabled, use_container_width=True):
                     # Store filter settings in session state
                     st.session_state.filter_start_date = start_md
                     st.session_state.filter_end_date = end_md
@@ -3688,13 +3699,20 @@ def main():
                     for tx in all_transactions:
                         # DATE FILTER
                         if tx.date:
-                            try:
-                                tx_date = datetime.strptime(tx.date, "%Y-%m-%d").date()
-                                if not (start_md <= tx_date <= end_md):
-                                    filter_stats['date_filtered'] += 1
+                            tx_date = None
+                            for fmt in ["%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"]:
+                                try:
+                                    tx_date = datetime.strptime(tx.date, fmt).date()
+                                    break
+                                except:
                                     continue
-                            except:
+                            
+                            if tx_date and not (start_md <= tx_date <= end_md):
+                                filter_stats['date_filtered'] += 1
                                 continue
+                            elif not tx_date:
+                                # If date couldn't be parsed, we skip date filtering but don't exclude it
+                                pass
 
                         # AMOUNT FILTER
                         tx_abs_amount = abs(tx.amount)
@@ -3759,26 +3777,16 @@ def main():
                     st.rerun()
 
             with col_btn2:
-                if st.button("🔄 Reset Filter", disabled=filter_disabled, width='stretch'):
+                if st.button("🔄 Reset Filter", disabled=filter_disabled, use_container_width=True):
                     st.session_state.filtered_transactions = all_transactions
+                    st.session_state.transactions = all_transactions  # Reset for global compatibility
                     st.session_state.filter_active = False
                     # Increment reset counter to force widget recreation with default values
                     st.session_state.filter_reset_count += 1
                     # Clear filter state keys
-                    if 'filter_start_date' in st.session_state:
-                        del st.session_state.filter_start_date
-                    if 'filter_end_date' in st.session_state:
-                        del st.session_state.filter_end_date
-                    if 'filter_min_amount' in st.session_state:
-                        del st.session_state.filter_min_amount
-                    if 'filter_max_amount' in st.session_state:
-                        del st.session_state.filter_max_amount
-                    if 'filter_search_text' in st.session_state:
-                        del st.session_state.filter_search_text
-                    if 'filter_account_index' in st.session_state:
-                        del st.session_state.filter_account_index
-                    if 'filter_stats' in st.session_state:
-                        del st.session_state.filter_stats
+                    for k in ['filter_start_date', 'filter_end_date', 'filter_min_amount', 'filter_max_amount', 'filter_search_text', 'filter_account_index', 'filter_stats']:
+                        if k in st.session_state:
+                            del st.session_state[k]
                     st.info("🔄 Filter reset. Showing all transactions.")
                     st.rerun()
 
@@ -3848,6 +3856,7 @@ def main():
                 if st.button("📊 View All", key="view_all_banner"):
                     st.session_state.filter_active = False
                     st.session_state.filtered_transactions = st.session_state.all_transactions
+                    st.session_state.transactions = st.session_state.all_transactions
                     st.rerun()
         else:
             # Calculate totals for all transactions
@@ -4089,20 +4098,30 @@ def main():
                     # from schedule_c_categorizer import ScheduleCCategorizer
                     sc_categorizer = ScheduleCCategorizer()
 
+                    # Build filtered categorized transactions for Schedule C
+                    current_filtered_ids = {id(t) for t in st.session_state.get('filtered_transactions', [])}
+                    curr_filtered_categorized = [
+                        (tx, cat)
+                        for tx, cat in categorized_transactions
+                        if (not st.session_state.get('filter_active', False) or id(tx) in current_filtered_ids)
+                    ]
+
                     # ---- Generate Schedule C report
-                    schedule_c_text = sc_categorizer.generate_schedule_c_report(categorized_transactions)
+                    schedule_c_text = sc_categorizer.generate_schedule_c_report(curr_filtered_categorized)
                     st.subheader("📄 IRS Schedule C Report")
                     st.code(schedule_c_text)
 
                     st.subheader("🧾 IRS Schedule C Summary")
-                    st.dataframe(schedule_c_df, width='stretch', hide_index=True)
+                    # Use the filtered results for the dataframe too
+                    filtered_sc_df = sc_categorizer.generate_schedule_c_dataframe(curr_filtered_categorized)
+                    st.dataframe(filtered_sc_df, width='stretch', hide_index=True)
 
                     if not categorized_transactions:
                         st.stop()
 
                     category_groups = {}
 
-                    for tx, cat in categorized_transactions:
+                    for tx, cat in curr_filtered_categorized:
                         if cat.is_excluded or not cat.line_number:
                             continue
                         key = (cat.line_number, cat.tax_code, cat.category_name)
@@ -4218,11 +4237,13 @@ def main():
                     st.session_state.mapper = AccountCodeMapper()
                 mapper = st.session_state.mapper
 
-                # Build active categorized transactions
+                # Build active categorized transactions (respecting filters)
+                current_filtered_ids = {id(t) for t in st.session_state.get('filtered_transactions', [])}
                 active_categorized_transactions = [
                     (tx, cat)
                     for tx, cat in categorized_transactions
-                    if not (cat.is_excluded or is_tx_excluded(tx))
+                    if (not st.session_state.get('filter_active', False) or id(tx) in current_filtered_ids) 
+                    and not (cat.is_excluded or is_tx_excluded(tx))
                 ]
 
                 synced_categorized = []

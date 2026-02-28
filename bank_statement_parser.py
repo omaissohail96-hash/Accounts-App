@@ -113,7 +113,7 @@ BANK_LAYOUTS = {
     BankName.CHASE: BankLayout(
         bank_name=BankName.CHASE,
         transaction_regex=r'(\d{1,2}/\d{1,2})\s+(\S.*?)\s+([-+]?\$?[\d,]+\.\d{2}|[-+]?\$?[\d,]+)$',
-        check_regex=r'(\d+)\s+[\^]?\s+(\d{1,2}/\d{1,2})\s+([-+]?\$?[\d,]+\.\d{2}|[\d,]+\.\d{2})$',
+        check_regex=r'(\d+)\s+[\*\^/ ]+\s+(\d{1,2}/\d{1,2})\s+([-+]?\$?[\d,]+\.\d{2}|[\d,]+\.\d{2})$',
         column_mapping={"date": 1, "description": 2, "amount": 3},
         section_headers={
             # Deposit sections
