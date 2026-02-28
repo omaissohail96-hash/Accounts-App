@@ -7,25 +7,41 @@ import io
 import re
 import json
 import logging
+import phonenumbers
+from commonregex import CommonRegex
 import tempfile
 import platform
 import shutil
+import os
 from dataclasses import dataclass, asdict
-from datetime import datetime
+from datetime import datetime, date
 from typing import List, Tuple, Dict, Any, Optional
 from pathlib import Path
+from calendar import monthrange
 
 import pdfplumber
 import pandas as pd
 import streamlit as st
-
-# Import new multi-bank parser
+import pytesseract
+from PIL import Image
+from pdf2image import convert_from_bytes
 try:
-    from bank_statement_parser import parse_bank_statement, detect_bank
-    MULTI_BANK_PARSER_AVAILABLE = True
+    import docx
 except ImportError:
-    MULTI_BANK_PARSER_AVAILABLE = False
-    # Logger not yet defined, will log later if needed
+    docx = None
+
+from bank_statement_parser import (
+    parse_bank_statement, 
+    detect_bank, 
+    TransactionType, 
+    TransactionCategory
+)
+from document_parser import DocumentParser
+from schedule_c_categorizer import ScheduleCCategorizer
+from account_code_mapper import AccountCodeMapper
+
+# (Imports moved to top level)
+MULTI_BANK_PARSER_AVAILABLE = True
 
 # Platform-aware Tesseract configuration
 if platform.system() == "Windows":
@@ -144,6 +160,49 @@ DATE_AT_START = re.compile(
 AMOUNT_RE = re.compile(
     r'([+\-]?\(?\s*\$?\d{1,3}(?:[,\s]\d{3})*(?:\.\d{1,2})?\)?)'
 )
+
+def _mask_non_amount_entities(line: str) -> str:
+    """
+    Identify and hide phone numbers and dates to prevent them from being
+    misidentified as amounts.
+    """
+    if not line:
+        return ""
+        
+    masked_line = line
+    entities_to_mask = []
+    
+    # 1. Identify Phone Numbers (Robust)
+    try:
+        import phonenumbers
+        for match in phonenumbers.PhoneNumberMatcher(line, "US"):
+            phone_str = line[match.start:match.end]
+            entities_to_mask.append(phone_str)
+    except Exception:
+        pass
+            
+    # 2. Identify Dates (Regex based to avoid CommonRegex false positives on amounts)
+    # Matches patterns like 11/24/25, 11-24-25, 11 24 25, 2024-11-20
+    date_patterns = [
+        r'(?<!\d)(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4})(?!\d)',  # 11/24/25 or 11/24/2025
+        r'(?<!\d)(?:\d{4}-\d{2}-\d{2})(?!\d)',              # 2024-11-20
+        r'(?<!\d)(?:\d{1,2}\s+\d{1,2}\s+\d{2,4})(?!\d)',    # 11 24 25
+        r'(?<!\w)(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}(?:,?\s+\d{2,4})?(?!\w)' # Jan 15, 2025
+    ]
+    
+    for pattern in date_patterns:
+        for match in re.finditer(pattern, line, re.IGNORECASE):
+            entities_to_mask.append(match.group(0))
+    
+    # 3. Mask identified entities (preserving length/offsets)
+    # Sort by length descending to avoid partial replacements of longer strings
+    entities_to_mask.sort(key=len, reverse=True)
+    for entity in entities_to_mask:
+        # Only mask if it's actually in masked_line (could have Been masked by a longer pattern)
+        if entity in masked_line:
+            masked_line = masked_line.replace(entity, " " * len(entity))
+            
+    return masked_line
 # Matches full dates with year to avoid partial phone number matches
 DATE_FULL_RE = re.compile(r'\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b')
 # matches MM/DD or MM-DD but NOT phone parts
@@ -208,35 +267,56 @@ def _clean_amount_token(token: str) -> Optional[float]:
         return None
     s = str(token).strip()
     negative = False
-    if s.startswith("(") and s.endswith(")"):
+    
+    # Handle parentheses (negative)
+    if (s.startswith("(") and s.endswith(")")) or s.endswith("-"):
         negative = True
-    if s.startswith("-"):
+        s = s.replace('(', '').replace(')', '').replace('-', '')
+    elif s.startswith("-"):
         negative = True
+        
     s = re.sub(r'[A-Za-z\$£€₹]', '', s)  # drop currency letters
     s = s.replace(',', '').replace(' ', '')
     s = s.replace('¢', '').replace('\u00a2', '').replace('#', '').replace('*', '').replace('+', '')
-    s = re.sub(r'[^0-9\.\-]', '', s)
-    if not re.search(r'\d', s):
+    
+    # Final cleanup: strictly numbers and dots
+    s = re.sub(r'[^0-9\.]', '', s)
+    
+    if not s or not any(c.isdigit() for c in s):
         return None
+        
+    # Strict check: must have a decimal point followed by two digits, or not be a suspected zip/date
+    if not re.search(r'\d+\.\d{2}', s):
+        # If it's exactly 5 digits or doesn't have a decimal, it's suspicious
+        if len(s) == 5 or '.' not in s:
+            return None
+            
     parts = s.split('.')
     if len(parts) > 2:
         s = "".join(parts[:-1]) + "." + parts[-1]
     try:
         val = float(s)
+        return -abs(val) if negative else abs(val)
     except Exception:
         return None
-    return -abs(val) if negative else abs(val)
 
 def _short_vendor(v: str) -> str:
     if not v:
         return "UNKNOWN"
     
-    # Remove common ID patterns and codes
-    v2 = re.sub(r'\b(id|ref|code|num|number)[:\s]*\d+', '', v, flags=re.I)
-    v2 = re.sub(r'\b\d{5,}\b', '', v2)  # Remove long numeric IDs
+    v2 = v
+    # Pattern to extract just the vendor name from "Orig CO Name:VENDOR Orig ID:..."
+    m = re.search(r'Orig CO Name:\s*(.*?)\s*(?:Orig ID|Desc Date|Entry|CO\b)', v, flags=re.I)
+    if m:
+        v2 = m.group(1).strip()
+    else:
+        # Fallback to existing cleaning
+        v2 = re.sub(r'\b(id|ref|code|num|number)[:\s]*\d+', '', v2, flags=re.I)
+        v2 = re.sub(r'\b\d{5,}\b', '', v2)  # Remove long numeric IDs
+        v2 = re.sub(r'(?i)\b(orig|co|name|entry|descr|desc)\b', '', v2)
     
-    # Remove ACH noise words and prefixes
-    v2 = re.sub(r'\b(orig|co|name|entry|descr|desc)\b', '', v2, flags=re.I)
+    # Further cleanup of trailing noise
+    v2 = re.sub(r'(?i)(?:Orig ID|Desc Date|CO Entry).*', '', v2)
     
     # Clean special characters but keep important ones
     v2 = re.sub(r'[^A-Za-z0-9\-\&\.\s]', ' ', v2)
@@ -400,120 +480,7 @@ def _clean_description(desc: str, vendor: str = "", transaction_type: str = "") 
 # ----------------------------
 # Document parsing helpers
 # ----------------------------
-class DocumentParser:
-    def parse_pdf_text_lines(self, file_bytes: bytes) -> Tuple[List[str], List[int]]:
-        lines = []
-        unreadable_pages = []
-
-        # ---------- TRY NORMAL PDF TEXT ----------
-        try:
-            with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-                for page in pdf.pages:
-                    try:
-                        text = page.extract_text() or ""
-                        text = text.replace('\xa0', ' ').strip()
-                        if text:
-                            lines.extend(
-                                [ln.strip() for ln in text.splitlines() if ln.strip()]
-                            )
-                    except Exception:
-                        continue
-
-            # If text extracted successfully → return
-            if lines:
-                return lines, unreadable_pages
-
-        except Exception as e:
-            logger.warning("pdfplumber failed, switching to OCR-only mode")
-
-        # ---------- OCR FALLBACK (IMAGE-ONLY PDF) ----------
-        try:
-            from pdf2image import convert_from_bytes
-            from PIL import Image
-            import pytesseract
-
-            if not file_bytes or len(file_bytes) < 100:
-                raise ValueError("PDF bytes are empty or invalid")
-
-            pdf_bytes = bytes(file_bytes)  # force fresh copy
-
-            # Try to find poppler if installed via Homebrew (macOS) or default paths
-            import shutil
-            import platform
-            
-            poppler_path = None
-            if platform.system() == "Darwin":  # macOS
-                # Check if poppler is in PATH (installed via brew)
-                if shutil.which("pdfinfo"):
-                    poppler_path = None  # Use system PATH
-            elif platform.system() == "Windows":
-                # Try common Windows paths
-                possible_paths = [
-                    r"C:\poppler\poppler-25.12.0\Library\bin",
-                    r"C:\Program Files\poppler\bin",
-                ]
-                for path in possible_paths:
-                    if Path(path).exists():
-                        poppler_path = path
-                        break
-            
-            images = convert_from_bytes(
-                pdf_bytes,
-                dpi=300,
-                poppler_path=poppler_path
-            )
-
-
-            for i, img in enumerate(images):
-                try:
-                    ocr_text = pytesseract.image_to_string(img)
-                    if ocr_text.strip():
-                        lines.extend(
-                            [ln.strip() for ln in ocr_text.splitlines() if ln.strip()]
-                        )
-                    else:
-                        unreadable_pages.append(i + 1)
-                except Exception:
-                    unreadable_pages.append(i + 1)
-
-            return lines, unreadable_pages
-
-        except Exception as e:
-            logger.exception("OCR failed completely: %s", e)
-            return [], []
-
-
-
-    def parse_document(self, file_bytes: bytes, filename: str) -> Tuple[List[str], bool, List[int]]:
-        ext = filename.lower().split('.')[-1]
-        if ext == "pdf":
-            lines, unreadable = self.parse_pdf_text_lines(file_bytes)
-            return lines, len(lines) > 0, unreadable
-        if ext == "csv":
-            try:
-                txt = file_bytes.decode("utf-8", errors="ignore")
-            except Exception:
-                txt = str(file_bytes)
-            lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
-            return lines, True, []
-        if ext in ("doc", "docx"):
-            try:
-                import docx
-                tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.' + ext)
-                tmp.write(file_bytes)
-                tmp.flush()
-                doc = docx.Document(tmp.name)
-                lines = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-                return lines, True, []
-            except Exception as e:
-                logger.exception("DOCX parse failed: %s", e)
-                return [], False, []
-        try:
-            txt = file_bytes.decode("utf-8", errors="ignore")
-            lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
-            return lines, True, []
-        except Exception:
-            return [], False, []
+# DocumentParser now imported from document_parser.py
     
 # ----------------------------
 # Fallback parser (Chase-optimized, robust)
@@ -570,8 +537,8 @@ def parse_with_multi_bank_parser(text_lines, filename, manual_year=None, include
         text = '\n'.join(text_lines)
         
         # Parse using the new multi-bank parser
-        from bank_statement_parser import TransactionType, TransactionCategory
-        parsed_result = parse_bank_statement(text)
+        # (Imports moved to top level)
+        parsed_result = parse_bank_statement(text, manual_year=manual_year)
         
         if not parsed_result:
             logger.warning(f"Multi-bank parser returned None for {filename}")
@@ -580,25 +547,14 @@ def parse_with_multi_bank_parser(text_lines, filename, manual_year=None, include
         # Convert new Transaction format to old format
         old_transactions = []
         for new_tx in parsed_result.transactions:
-            # Determine transaction type
-            if new_tx.type == TransactionType.DEPOSIT:
+            # Bridging to the older internal 'tx_type' based on amount sign
+            # This is more robust than string-checking the Enum
+            if new_tx.amount > 0:
                 tx_type = "deposit"
-                amount = abs(new_tx.amount)
-            elif new_tx.type == TransactionType.WITHDRAWAL:
-                tx_type = "withdrawal"
-                amount = -abs(new_tx.amount)
-            elif new_tx.type == TransactionType.FEE:
-                tx_type = "withdrawal"
-                amount = -abs(new_tx.amount)
-            elif new_tx.type == TransactionType.CHECK:
-                tx_type = "withdrawal"
-                amount = -abs(new_tx.amount)
-            elif new_tx.type == TransactionType.TRANSFER:
-                tx_type = "withdrawal" if new_tx.amount < 0 else "deposit"
-                amount = new_tx.amount
             else:
-                tx_type = "withdrawal" if new_tx.amount < 0 else "deposit"
-                amount = new_tx.amount
+                tx_type = "withdrawal"
+            
+            amount = new_tx.amount
             
             # Format date as string (old format expects string)
             if hasattr(new_tx.date, 'strftime'):
@@ -606,8 +562,8 @@ def parse_with_multi_bank_parser(text_lines, filename, manual_year=None, include
             else:
                 date_str = str(new_tx.date)
             
-            # Extract vendor from description (simple approach: take first part before any details)
-            vendor = new_tx.description.split('-')[0].strip() if new_tx.description else ""
+            # Extract cleaner vendor from description using the dedicated short_vendor function
+            vendor = _short_vendor(new_tx.description) if new_tx.description else "UNKNOWN"
             
             # Map category
             category_map = {
@@ -633,18 +589,28 @@ def parse_with_multi_bank_parser(text_lines, filename, manual_year=None, include
             )
             old_transactions.append(old_tx)
         
-        # Create metadata
+        # Create metadata - mapping from new ParsedStatement properties
+        per = getattr(parsed_result, "statement_period", None)
+        from_d = per.from_date if per else None
+        to_d = per.to_date if per else None
+        
         meta = {
             "bank": parsed_result.bank_name,
-            "statement_period": f"{parsed_result.statement_start_date} to {parsed_result.statement_end_date}" if parsed_result.statement_start_date and parsed_result.statement_end_date else None,
-            "opening_balance": parsed_result.opening_balance,
-            "closing_balance": parsed_result.closing_balance,
-            "total_deposits": parsed_result.total_deposits,
-            "total_withdrawals": parsed_result.total_withdrawals,
+            "statement_period": f"{from_d} to {to_d}" if from_d and to_d else None,
+            "opening_balance": getattr(parsed_result, "beginning_balance", getattr(parsed_result, "opening_balance", 0.0)),
+            "ending_balance": getattr(parsed_result, "ending_balance", getattr(parsed_result, "closing_balance", 0.0)),
+            "parsed_from": "multi_bank_parser",
+            "transactions_extracted": len(old_transactions),
             "errors": parsed_result.errors,
             "needs_review": parsed_result.needs_review
         }
         
+        # Log success and return
+        if not old_transactions and parsed_result.bank_name == "unknown":
+            logger.warning(f"No transactions extracted from {filename} by multi-bank parser (Bank: Unknown)")
+            return None, None
+            
+        logger.info(f"Successfully parsed {filename} with {parsed_result.bank_name} parser (Tx: {len(old_transactions)})")
         return old_transactions, meta
         
     except Exception as e:
@@ -1189,20 +1155,23 @@ class FallbackStatementParser:
         final_txs = []
         seen = set()
         for tx in txs:
-            # Create a identifying key: (date, absolute amount, vendor_prefix)
-            # We ignore description in the key as detail sections add more noise
-            v_norm = (tx.vendor or "").strip().lower()[:12]
-            key = (tx.date, abs(tx.amount), v_norm)
+            # Create a identifying key: (date, absolute amount, vendor_prefix, desc_prefix)
+            # We include more vendor and description to avoid merging distinct Zelle payments
+            v_norm = (tx.vendor or "").strip().lower()[:20]
+            d_norm = (tx.description or "").strip().lower()[:15]
+            key = (tx.date, abs(tx.amount), v_norm, d_norm)
             if key not in seen:
                 seen.add(key)
                 final_txs.append(tx)
             else:
                 # If we already saw it but this one has a longer vendor name, prefer it
                 for i, existing in enumerate(final_txs):
-                    v_e_norm = (existing.vendor or "").strip().lower()[:12]
+                    v_e_norm = (existing.vendor or "").strip().lower()[:20]
+                    d_e_norm = (existing.description or "").strip().lower()[:15]
                     if (existing.date == tx.date and 
                         abs(existing.amount) == abs(tx.amount) and 
-                        v_e_norm == v_norm):
+                        v_e_norm == v_norm and
+                        d_e_norm == d_norm):
                         if len(tx.vendor or "") > len(existing.vendor or ""):
                             final_txs[i] = tx
                         break
@@ -1350,15 +1319,17 @@ class UniversalParser:
         final_txs = []
         seen = set()
         for tx in txs:
-            v_norm = (tx.vendor or "").strip().lower()[:12]
-            key = (tx.date, abs(tx.amount), v_norm)
+            v_norm = (tx.vendor or "").strip().lower()[:20]
+            d_norm = (tx.description or "").strip().lower()[:15]
+            key = (tx.date, abs(tx.amount), v_norm, d_norm)
             if key not in seen:
                 seen.add(key)
                 final_txs.append(tx)
             else:
                 for i, existing in enumerate(final_txs):
-                    v_e_norm = (existing.vendor or "").strip().lower()[:12]
-                    if (existing.date == tx.date and abs(existing.amount) == abs(tx.amount) and v_e_norm == v_norm):
+                    v_e_norm = (existing.vendor or "").strip().lower()[:20]
+                    d_e_norm = (existing.description or "").strip().lower()[:15]
+                    if (existing.date == tx.date and abs(existing.amount) == abs(tx.amount) and v_e_norm == v_norm and d_e_norm == d_norm):
                         if len(tx.vendor or "") > len(existing.vendor or ""):
                             final_txs[i] = tx
                         break
@@ -1394,8 +1365,9 @@ class UniversalParser:
                 date_raw = d.group(1).replace(",", "")
                 date_norm = _normalize_date_token(date_raw)
 
-                # Parse amount
-                amt_m = self.AMOUNT_RE.search(ln)
+                # Parse amount (after masking phone/dates)
+                masked_ln = _mask_non_amount_entities(ln)
+                amt_m = self.AMOUNT_RE.search(masked_ln)
                 if not amt_m:
                     i += 2
                     continue
@@ -1510,7 +1482,8 @@ class UniversalParser:
             date_norm = _normalize_date_token(date_raw)
 
             # Amounts (consistent with global AMOUNT_RE, allow optional decimal to be robust to poor OCR)
-            nums = re.findall(r'([+\-]?\(?\s*\$?\d{1,3}(?:[,\s]\d{3})*(?:\.\d{1,2})?\)?)', ln)
+            masked_ln = _mask_non_amount_entities(ln)
+            nums = re.findall(r'([+\-]?\(?\s*\$?\d{1,3}(?:[,\s]\d{3})*(?:\.\d{1,2})?\)?)', masked_ln)
             nums = [n for n in nums if re.search(r'\d', n)]
             if len(nums) < 2:
                 continue
@@ -1576,8 +1549,9 @@ class UniversalParser:
             date_raw = d.group(1).replace(",", "")
             date_norm = _normalize_date_token(date_raw)
 
-            # AMOUNT
-            m = self.AMOUNT_RE.findall(ln)
+            # AMOUNT (after masking phone/dates)
+            masked_ln = _mask_non_amount_entities(ln)
+            m = self.AMOUNT_RE.findall(masked_ln)
             if not m:
                 continue
 
@@ -1865,12 +1839,7 @@ def generate_pl_report_with_account_codes(self, categorized_transactions: List[t
 # Custom Rules Management
 # ----------------------------
 def reapply_custom_rules():
-    import json
-    from pathlib import Path
-    from datetime import datetime
-    from schedule_c_categorizer import ScheduleCCategorizer
-    from account_code_mapper import AccountCodeMapper
-    import streamlit as st
+    # (Imports moved to top level)
 
     # Safety checks
     if "user" not in st.session_state or "active_business" not in st.session_state:
@@ -2103,7 +2072,7 @@ def extract_chase_summary(raw_text):
     
     Returns: dict with summary data or None if not found
     """
-    import re
+    # (Imports moved to top level)
     
     # Look for Chase summary section
     summary_match = re.search(r'\*start\*summary.*?\*end\*summary', raw_text, re.DOTALL | re.IGNORECASE)
@@ -2172,7 +2141,7 @@ def extract_universal_bank_summary(raw_text: str) -> Optional[Dict]:
     Supports: Bank of America, BMO, Fifth Third, US Bank.
     Returns a dict formatted like extract_chase_summary(), or None if not detected.
     """
-    import re
+    # (Imports moved to top level)
 
     def clean_amount(s: str) -> float:
         """Parse a dollar amount string to float, handling negatives and trailing dashes."""
@@ -2305,7 +2274,7 @@ def extract_cc_summary(raw_text: str) -> Dict[str, Any]:
     Extract summary fields from credit card statements with extreme robustness.
     Handles noisy OCR (duplicated chars), split numbers across lines, and fuzzy labels.
     """
-    import re
+    # (Imports moved to top level)
     
     # Initialize result with defaults
     result = {
@@ -2468,8 +2437,7 @@ def render_cc_summary(cc_summary: Dict[str, Any]):
     Render a unified credit card summary table in the UI.
     Uses exactly the same design system as the bank statement tables.
     """
-    import streamlit as st
-    import pandas as pd
+    # (Imports moved to top level)
     
     def f(val):
         if isinstance(val, (float, int)):
@@ -2510,7 +2478,7 @@ def render_cc_summary(cc_summary: Dict[str, Any]):
 
 def render_chase_table(title, df):
     """Render a dataframe in the Chase bank statement style"""
-    import streamlit as st
+    # (Imports moved to top level)
     
     # Build HTML table
     header_html = f'<div class="chase-header-container"><div class="chase-header-box">{title}</div><div class="chase-header-line"></div></div>'
@@ -2533,12 +2501,12 @@ def render_chase_table(title, df):
 
 def render_chase_header(title):
     """Render just the Chase-style boxed header with line"""
-    import streamlit as st
+    # (Imports moved to top level)
     st.markdown(f'<div class="chase-header-container" style="margin-top: 30px; margin-bottom: 20px;"><div class="chase-header-box">{title}</div><div class="chase-header-line"></div></div>', unsafe_allow_html=True)
 
 # Global Injector for Chase Styles
 def inject_chase_styles():
-    import streamlit as st
+    # (Imports moved to top level)
     st.markdown("""
 <style>
 .chase-container {
@@ -2600,7 +2568,7 @@ def inject_chase_styles():
 </style>
 """, unsafe_allow_html=True)
 
-def get_sub_summary(transactions, opening_balance=0.0, raw_text=""):
+def get_sub_summary(transactions, opening_balance=0.0, raw_text="", bank_name=""):
     opening_balance = float(opening_balance or 0.0)  # guard against None
 
     # Try to extract Chase pre-formatted summary (most accurate)
@@ -2613,7 +2581,9 @@ def get_sub_summary(transactions, opening_balance=0.0, raw_text=""):
             ])
             return df
 
-        # Try universal bank summary (BoA, BMO, Fifth Third, US Bank)
+    # Try universal bank summary (BoA, BMO, Fifth Third, US Bank) ONLY if transactions are empty
+    # If we have transactions, we use the fallback logic below which calculates from the list
+    if not transactions and raw_text:
         universal_summary = extract_universal_bank_summary(raw_text)
         if universal_summary:
             df = pd.DataFrame([
@@ -2622,7 +2592,38 @@ def get_sub_summary(transactions, opening_balance=0.0, raw_text=""):
             ])
             return df
 
-    # Fallback: Calculate summary from transactions (for non-Chase statements)
+    # Credit Card Summary for AMEX
+    if "amex" in str(bank_name).lower():
+        data = {
+            "Previous Balance": {"count": "", "amount": opening_balance},
+            "Payments and Credits": {"count": 0, "amount": 0.0},
+            "New Charges": {"count": 0, "amount": 0.0},
+            "Fees": {"count": 0, "amount": 0.0},
+            "New Balance": {"count": "", "amount": 0.0}
+        }
+        for t in transactions:
+            amt = getattr(t, "amount", 0.0)
+            cat = getattr(t, "category", "")
+            if amt > 0: # Payment/Credit
+                data["Payments and Credits"]["amount"] += amt
+                data["Payments and Credits"]["count"] += 1
+            else: # Charge/Fee
+                if cat == "fee":
+                    data["Fees"]["amount"] -= abs(amt)
+                    data["Fees"]["count"] += 1
+                else:
+                    data["New Charges"]["amount"] -= abs(amt)
+                    data["New Charges"]["count"] += 1
+        
+        closing = opening_balance + data["Payments and Credits"]["amount"] + data["New Charges"]["amount"] + data["Fees"]["amount"]
+        data["New Balance"]["amount"] = closing
+        
+        return pd.DataFrame([
+            {"Type": k, "INSTANCES": v["count"], "AMOUNT": f"${v['amount']:,.2f}"}
+            for k, v in data.items()
+        ])
+
+    # Fallback: Calculate summary from transactions (for Checking accounts)
     # Initialize data structure to track count (instances) and amount
     data = {
         "Beginning Balance": {"count": "", "amount": opening_balance},
@@ -2670,7 +2671,7 @@ def get_sub_summary(transactions, opening_balance=0.0, raw_text=""):
         else:
             abs_amt = abs(amt)
             # 1. Checks (high priority)
-            if getattr(t, "section", "").upper() == "CHECKS" or "check" in vendor or "check" in desc:
+            if (getattr(t, "section", "") or "").upper() == "CHECKS" or "check" in vendor or "check" in desc:
                 data["Checks Paid"]["amount"] -= abs_amt
                 data["Checks Paid"]["count"] += 1
             
@@ -2735,1029 +2736,723 @@ def get_sub_summary(transactions, opening_balance=0.0, raw_text=""):
 
 # ----------------------------
 # Streamlit UI
-# ----------------------------
-st.set_page_config(page_title="Bank Statement Analyzer (Hybrid)", layout="wide")
-inject_chase_styles()
+def main():
+    global _STATEMENT_YEAR
+    # ----------------------------
+    st.set_page_config(page_title="Bank Statement Analyzer (Hybrid)", layout="wide")
+    inject_chase_styles()
 
-if "user" not in st.session_state:
-    # Custom CSS for clean centered login/signup page
-    st.markdown("""
-    <style>
-        /* Hide default Streamlit elements */
-        #MainMenu {visibility: hidden;}
-        footer {visibility: hidden;}
-        
-        /* Main container */
-        .stApp {
-            background: #f5f7fa;
-        }
-        
-        /* Center content */
-        .block-container {
-            max-width: 480px;
-            padding-top: 5rem;
-            padding-bottom: 5rem;
-        }
-        
-        /* Input fields */
-        .stTextInput > div > div > input {
-            border-radius: 6px;
-            border: 1px solid #e1e4e8;
-            padding: 10px 12px;
-            font-size: 14px;
-            background-color: #fafbfc;
-            color: #000000;
-        }
-        
-        .stTextInput > div > div > input:focus {
-            border-color: #0366d6;
-            background-color: white;
-            outline: none;
-            color: #000000;
-        }
-        
-        .stTextInput label {
-            font-weight: 500;
-            color: #24292e;
-            font-size: 14px;
-            margin-bottom: 6px;
-        }
-        
-        /* Button */
-        .stButton > button {
-            width: 100%;
-            background-color: #2ea44f;
-            color: white;
-            border: none;
-            padding: 10px;
-            border-radius: 6px;
-            font-size: 14px;
-            font-weight: 600;
-            margin-top: 16px;
-            cursor: pointer;
-        }
-        
-        .stButton > button:hover {
-            background-color: #2c974b;
-        }
-        
-        /* Tabs */
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 8px;
-            background-color: transparent;
-            border-bottom: 1px solid #e1e4e8;
-        }
-        
-        .stTabs [data-baseweb="tab"] {
-            padding: 8px 16px;
-            background-color: transparent;
-            border: none;
-            color: #586069;
-            font-weight: 500;
-        }
-        
-        .stTabs [aria-selected="true"] {
-            color: #24292e;
-            border-bottom: 2px solid #0366d6;
-            background-color: transparent;
-        }
-        
-        /* Messages */
-        .stSuccess, .stError {
-            padding: 12px;
-            border-radius: 6px;
-            font-size: 14px;
-            margin-top: 16px;
-        }
-    </style>
-    """, unsafe_allow_html=True)
-    
-    # Login container
-    st.markdown("""
-    <div style='background: white; padding: 32px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.06); margin-bottom: 20px;'>
-        <div style='text-align: center; margin-bottom: 24px;'>
-            <div style='font-size: 48px; margin-bottom: 16px;'>💼</div>
-            <h2 style='color: #24292e; margin: 0 0 8px 0; font-size: 24px; font-weight: 600;'>Bank Statement Analyzer</h2>
-            <p style='color: #586069; margin: 0; font-size: 14px;'>Sign in to access your account</p>
+    if "user" not in st.session_state:
+        # Custom CSS for clean centered login/signup page
+        st.markdown("""
+        <style>
+            /* Hide default Streamlit elements */
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+
+            /* Main container */
+            .stApp {
+                background: #f5f7fa;
+            }
+
+            /* Center content */
+            .block-container {
+                max-width: 480px;
+                padding-top: 5rem;
+                padding-bottom: 5rem;
+            }
+
+            /* Input fields */
+            .stTextInput > div > div > input {
+                border-radius: 6px;
+                border: 1px solid #e1e4e8;
+                padding: 10px 12px;
+                font-size: 14px;
+                background-color: #fafbfc;
+                color: #000000;
+            }
+
+            .stTextInput > div > div > input:focus {
+                border-color: #0366d6;
+                background-color: white;
+                outline: none;
+                color: #000000;
+            }
+
+            .stTextInput label {
+                font-weight: 500;
+                color: #24292e;
+                font-size: 14px;
+                margin-bottom: 6px;
+            }
+
+            /* Button */
+            .stButton > button {
+                width: 100%;
+                background-color: #2ea44f;
+                color: white;
+                border: none;
+                padding: 10px;
+                border-radius: 6px;
+                font-size: 14px;
+                font-weight: 600;
+                margin-top: 16px;
+                cursor: pointer;
+            }
+
+            .stButton > button:hover {
+                background-color: #2c974b;
+            }
+
+            /* Tabs */
+            .stTabs [data-baseweb="tab-list"] {
+                gap: 8px;
+                background-color: transparent;
+                border-bottom: 1px solid #e1e4e8;
+            }
+
+            .stTabs [data-baseweb="tab"] {
+                padding: 8px 16px;
+                background-color: transparent;
+                border: none;
+                color: #586069;
+                font-weight: 500;
+            }
+
+            .stTabs [aria-selected="true"] {
+                color: #24292e;
+                border-bottom: 2px solid #0366d6;
+                background-color: transparent;
+            }
+
+            /* Messages */
+            .stSuccess, .stError {
+                padding: 12px;
+                border-radius: 6px;
+                font-size: 14px;
+                margin-top: 16px;
+            }
+        </style>
+        """, unsafe_allow_html=True)
+
+        # Login container
+        st.markdown("""
+        <div style='background: white; padding: 32px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.06); margin-bottom: 20px;'>
+            <div style='text-align: center; margin-bottom: 24px;'>
+                <div style='font-size: 48px; margin-bottom: 16px;'>💼</div>
+                <h2 style='color: #24292e; margin: 0 0 8px 0; font-size: 24px; font-weight: 600;'>Bank Statement Analyzer</h2>
+                <p style='color: #586069; margin: 0; font-size: 14px;'>Sign in to access your account</p>
+            </div>
         </div>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Form container
-    # extra Box
-    # st.markdown("<div style='background: white; padding: 32px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.06);'>", unsafe_allow_html=True)
-    
-    tab1, tab2 = st.tabs(["Login", "Sign Up"])
+        """, unsafe_allow_html=True)
 
-    with tab1:
-        st.markdown("<div style='padding-top: 16px;'>", unsafe_allow_html=True)
-        email = st.text_input("Email", key="login_email")
-        password = st.text_input("Password", type="password", key="login_password")
-        if st.button("Login"):
-            user = login_user(email, password)
-            if user:
-                st.session_state.user = user
-                st.session_state.user_id = user["id"]
-                st.session_state.custom_rules = []
-                st.success("Login successful")
+        # Form container
+        # extra Box
+        # st.markdown("<div style='background: white; padding: 32px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.06);'>", unsafe_allow_html=True)
+
+        tab1, tab2 = st.tabs(["Login", "Sign Up"])
+
+        with tab1:
+            st.markdown("<div style='padding-top: 16px;'>", unsafe_allow_html=True)
+            email = st.text_input("Email", key="login_email")
+            password = st.text_input("Password", type="password", key="login_password")
+            if st.button("Login"):
+                user = login_user(email, password)
+                if user:
+                    st.session_state.user = user
+                    st.session_state.user_id = user["id"]
+                    st.session_state.custom_rules = []
+                    st.success("Login successful")
+                    st.rerun()
+                else:
+                    st.error("Invalid credentials")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        with tab2:
+            st.markdown("<div style='padding-top: 16px;'>", unsafe_allow_html=True)
+            name = st.text_input("Full Name")
+            email = st.text_input("Email", key="signup_email")
+            password = st.text_input("Password", type="password", key="signup_pwd")
+            if st.button("Sign Up"):
+                user_id, err = signup_user(name, email, password)
+                if err:
+                    st.error(err)
+                else:
+                    st.success("Account created. Please login.")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.stop()
+
+    # Profile Selection Screen (Netflix-style)
+    if "active_business" not in st.session_state or st.session_state.active_business is None:
+        # Custom CSS for Netflix-style profile selection
+        st.markdown("""
+        <style>
+            .stApp {
+                background: #141414;
+            }
+
+            /* Profile card buttons */
+            div[data-testid="column"] .stButton > button {
+                background: #333;
+                border: 3px solid #555;
+                color: #e5e5e5;
+                padding: 20px;
+                width: 200px;
+                height: 180px;
+                border-radius: 8px;
+                transition: all 0.3s ease;
+                font-size: 3.5rem;
+                cursor: pointer;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                gap: 12px;
+            }
+
+            div[data-testid="column"] .stButton > button:hover {
+                border-color: #e5e5e5;
+                background: #444;
+                transform: scale(1.05);
+            }
+
+            /* Text inside buttons */
+            div[data-testid="column"] .stButton > button p {
+                margin: 0;
+                font-size: 1rem;
+                color: #e5e5e5;
+                white-space: pre-line;
+                text-align: center;
+            }
+
+            /* Delete button styling */
+            .delete-profile-btn button {
+                background: #e50914 !important;
+                border: 1px solid #e50914 !important;
+                color: white !important;
+                padding: 6px 12px !important;
+                width: auto !important;
+                height: auto !important;
+                font-size: 0.85rem !important;
+                border-radius: 4px !important;
+                margin-top: 8px !important;
+            }
+
+            .delete-profile-btn button:hover {
+                background: #b20710 !important;
+                border-color: #b20710 !important;
+            }
+
+            /* Logout button styling */
+            .logout-btn button {
+                background: transparent !important;
+                border: 1px solid #555 !important;
+                color: #e5e5e5 !important;
+                padding: 8px 24px !important;
+                width: auto !important;
+                height: auto !important;
+                font-size: 1rem !important;
+            }
+
+            .logout-btn button:hover {
+                border-color: #e5e5e5 !important;
+                background: #333 !important;
+            }
+
+            .stTextInput > div > div > input {
+                background-color: #333;
+                border: 1px solid #555;
+                color: white;
+                border-radius: 4px;
+                padding: 10px;
+            }
+
+            .stTextInput label {
+                color: white;
+                font-weight: 500;
+            }
+
+            /* Hide sidebar on profile selection */
+            [data-testid="stSidebar"] {
+                display: none;
+            }
+        </style>
+        """, unsafe_allow_html=True)
+
+        # Logout button in top right
+        col_logout1, col_logout2 = st.columns([6, 1])
+        with col_logout2:
+            st.markdown('<div class="logout-btn">', unsafe_allow_html=True)
+            if st.button("Logout", key="profile_logout"):
+                for k in list(st.session_state.keys()):
+                    del st.session_state[k]
                 st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown("<div style='text-align: center; color: white; padding: 40px 0 40px 0;'><h1 style='font-size: 3.5vw; font-weight: 400;'>Who's managing finances?</h1></div>", unsafe_allow_html=True)
+
+        user_id = st.session_state.user_id
+        businesses = load_user_businesses(user_id)
+
+        # Handle delete confirmation
+        if st.session_state.get("confirm_delete"):
+            business_to_delete = st.session_state.confirm_delete
+            st.markdown("<br><br>", unsafe_allow_html=True)
+            col1, col2, col3 = st.columns([1, 2, 1])
+            with col2:
+                st.markdown(f"""
+                <div style='background: #1a1a1a; padding: 30px; border-radius: 8px; text-align: center;'>
+                    <p style='color: white; font-size: 1.3rem; margin-bottom: 20px;'>⚠️ Delete Profile?</p>
+                    <p style='color: #808080; font-size: 1rem; margin-bottom: 20px;'>Are you sure you want to delete <strong style='color: white;'>{business_to_delete}</strong>?<br>This action cannot be undone.</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    if st.button("❌ Yes, Delete", key="confirm_delete_yes", width='stretch'):
+                        if delete_business(user_id, business_to_delete):
+                            st.session_state.confirm_delete = None
+                            st.success(f"Profile '{business_to_delete}' deleted successfully")
+                            st.rerun()
+                with col_b:
+                    if st.button("Cancel", key="confirm_delete_no", width='stretch'):
+                        st.session_state.confirm_delete = None
+                        st.rerun()
+            st.stop()
+
+        # Show create form if requested
+        if st.session_state.get("show_create_form", False):
+            st.markdown("<br><br>", unsafe_allow_html=True)
+            col1, col2, col3 = st.columns([1, 1, 1])
+            with col2:
+                st.markdown("<div style='background: #1a1a1a; padding: 30px; border-radius: 8px;'>", unsafe_allow_html=True)
+                st.markdown("<p style='color: white; text-align: center; font-size: 1.2rem; margin-bottom: 20px;'>Create New Profile</p>", unsafe_allow_html=True)
+                new_business = st.text_input("Business/Profile Name", key="new_profile_name")
+
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    if st.button("✅ Create", key="confirm_create", width='stretch'):
+                        if new_business:
+                            create_business(user_id, new_business)
+                            st.session_state.active_business = new_business
+                            st.session_state.show_create_form = False
+                            st.rerun()
+                        else:
+                            st.error("Please enter a name")
+                with col_b:
+                    if st.button("❌ Cancel", key="cancel_create", width='stretch'):
+                        st.session_state.show_create_form = False
+                        if not businesses:
+                            # If no businesses exist, keep form open
+                            st.session_state.show_create_form = True
+                        st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+        else:
+            # Show profile cards
+            if businesses:
+                # Calculate grid layout - center profiles
+                cols_per_row = min(4, len(businesses) + 1)
+                profile_icons = ["🏢", "💼", "🏪", "🏭", "🏦", "🎯", "📊", "💰"]
+
+                st.markdown("<br>", unsafe_allow_html=True)
+
+                # Create rows of profiles with centering
+                all_profiles = businesses + ["__add_profile__"]
+                for i in range(0, len(all_profiles), cols_per_row):
+                    # Add spacing columns for centering
+                    num_items = min(cols_per_row, len(all_profiles) - i)
+                    spacing = (cols_per_row - num_items) / 2
+
+                    if spacing > 0:
+                        cols = st.columns([spacing] + [1] * num_items + [spacing])
+                        start_col = 1
+                    else:
+                        cols = st.columns(cols_per_row)
+                        start_col = 0
+
+                    for j in range(num_items):
+                        profile_item = all_profiles[i + j]
+
+                        if profile_item == "__add_profile__":
+                            # Add Profile button
+                            with cols[start_col + j]:
+                                if st.button("➕\n\nAdd Profile", key="create_new_profile", help="Add Profile"):
+                                    st.session_state.show_create_form = True
+                                    st.rerun()
+                        else:
+                            # Existing business profile
+                            business = profile_item
+                            icon = profile_icons[(i + j) % len(profile_icons)]
+
+                            with cols[start_col + j]:
+                                if st.button(f"{icon}\n\n{business}", key=f"select_{business}", help=business):
+                                    st.session_state.active_business = business
+                                    st.rerun()
+
+                                # Delete button for this profile
+                                st.markdown('<div class="delete-profile-btn">', unsafe_allow_html=True)
+                                if st.button("🗑️ Delete", key=f"delete_{business}"):
+                                    st.session_state.confirm_delete = business
+                                    st.rerun()
+                                st.markdown('</div>', unsafe_allow_html=True)
+
+                    st.markdown("<br>", unsafe_allow_html=True)
             else:
-                st.error("Invalid credentials")
-        st.markdown("</div>", unsafe_allow_html=True)
+                # No profiles yet - show create button
+                st.markdown("<br><br>", unsafe_allow_html=True)
+                col1, col2, col3 = st.columns([2, 1, 2])
+                with col2:
+                    if st.button("➕\n\nCreate Your First Profile", key="first_profile", help="Create Your First Profile"):
+                        st.session_state.show_create_form = True
+                        st.rerun()
 
-    with tab2:
-        st.markdown("<div style='padding-top: 16px;'>", unsafe_allow_html=True)
-        name = st.text_input("Full Name")
-        email = st.text_input("Email", key="signup_email")
-        password = st.text_input("Password", type="password", key="signup_pwd")
-        if st.button("Sign Up"):
-            user_id, err = signup_user(name, email, password)
-            if err:
-                st.error(err)
-            else:
-                st.success("Account created. Please login.")
-        st.markdown("</div>", unsafe_allow_html=True)
-    
-    st.markdown("</div>", unsafe_allow_html=True)
+        st.stop()
 
-    st.stop()
+    st.markdown("<h3 style='text-align: center;'>Prototype v1.0</h3>", unsafe_allow_html=True)
 
-# Profile Selection Screen (Netflix-style)
-if "active_business" not in st.session_state or st.session_state.active_business is None:
-    # Custom CSS for Netflix-style profile selection
-    st.markdown("""
-    <style>
-        .stApp {
-            background: #141414;
-        }
-        
-        /* Profile card buttons */
-        div[data-testid="column"] .stButton > button {
-            background: #333;
-            border: 3px solid #555;
-            color: #e5e5e5;
-            padding: 20px;
-            width: 200px;
-            height: 180px;
-            border-radius: 8px;
-            transition: all 0.3s ease;
-            font-size: 3.5rem;
-            cursor: pointer;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            gap: 12px;
-        }
-        
-        div[data-testid="column"] .stButton > button:hover {
-            border-color: #e5e5e5;
-            background: #444;
-            transform: scale(1.05);
-        }
-        
-        /* Text inside buttons */
-        div[data-testid="column"] .stButton > button p {
-            margin: 0;
-            font-size: 1rem;
-            color: #e5e5e5;
-            white-space: pre-line;
-            text-align: center;
-        }
-        
-        /* Delete button styling */
-        .delete-profile-btn button {
-            background: #e50914 !important;
-            border: 1px solid #e50914 !important;
-            color: white !important;
-            padding: 6px 12px !important;
-            width: auto !important;
-            height: auto !important;
-            font-size: 0.85rem !important;
-            border-radius: 4px !important;
-            margin-top: 8px !important;
-        }
-        
-        .delete-profile-btn button:hover {
-            background: #b20710 !important;
-            border-color: #b20710 !important;
-        }
-        
-        /* Logout button styling */
-        .logout-btn button {
-            background: transparent !important;
-            border: 1px solid #555 !important;
-            color: #e5e5e5 !important;
-            padding: 8px 24px !important;
-            width: auto !important;
-            height: auto !important;
-            font-size: 1rem !important;
-        }
-        
-        .logout-btn button:hover {
-            border-color: #e5e5e5 !important;
-            background: #333 !important;
-        }
-        
-        .stTextInput > div > div > input {
-            background-color: #333;
-            border: 1px solid #555;
-            color: white;
-            border-radius: 4px;
-            padding: 10px;
-        }
-        
-        .stTextInput label {
-            color: white;
-            font-weight: 500;
-        }
-        
-        /* Hide sidebar on profile selection */
-        [data-testid="stSidebar"] {
-            display: none;
-        }
-    </style>
-    """, unsafe_allow_html=True)
-    
-    # Logout button in top right
-    col_logout1, col_logout2 = st.columns([6, 1])
-    with col_logout2:
-        st.markdown('<div class="logout-btn">', unsafe_allow_html=True)
-        if st.button("Logout", key="profile_logout"):
+    st.title("💼 Bank Statement Analyzer")
+
+    user_id = st.session_state.user_id
+
+    businesses = load_user_businesses(user_id)
+
+    # Add sidebar with settings and profile switcher
+    with st.sidebar:
+        st.header("Settings")
+
+        # Show active profile
+        if st.session_state.active_business:
+            st.info(f"📊 **{st.session_state.active_business}**")
+
+        if st.button("🔄 Switch Profile"):
+            st.session_state.active_business = None
+            st.rerun()
+
+        sort_by = st.selectbox("Sort vendor summaries by", ["Subtotal (desc)", "Transaction Count (desc)"])
+
+        st.divider()
+        st.write(f"👤 {st.session_state.user['name']}")
+        if st.button("Logout"):
             for k in list(st.session_state.keys()):
                 del st.session_state[k]
             st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    st.markdown("<div style='text-align: center; color: white; padding: 40px 0 40px 0;'><h1 style='font-size: 3.5vw; font-weight: 400;'>Who's managing finances?</h1></div>", unsafe_allow_html=True)
-    
-    user_id = st.session_state.user_id
-    businesses = load_user_businesses(user_id)
-    
-    # Handle delete confirmation
-    if st.session_state.get("confirm_delete"):
-        business_to_delete = st.session_state.confirm_delete
-        st.markdown("<br><br>", unsafe_allow_html=True)
-        col1, col2, col3 = st.columns([1, 2, 1])
-        with col2:
-            st.markdown(f"""
-            <div style='background: #1a1a1a; padding: 30px; border-radius: 8px; text-align: center;'>
-                <p style='color: white; font-size: 1.3rem; margin-bottom: 20px;'>⚠️ Delete Profile?</p>
-                <p style='color: #808080; font-size: 1rem; margin-bottom: 20px;'>Are you sure you want to delete <strong style='color: white;'>{business_to_delete}</strong>?<br>This action cannot be undone.</p>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            col_a, col_b = st.columns(2)
-            with col_a:
-                if st.button("❌ Yes, Delete", key="confirm_delete_yes", width='stretch'):
-                    if delete_business(user_id, business_to_delete):
-                        st.session_state.confirm_delete = None
-                        st.success(f"Profile '{business_to_delete}' deleted successfully")
-                        st.rerun()
-            with col_b:
-                if st.button("Cancel", key="confirm_delete_no", width='stretch'):
-                    st.session_state.confirm_delete = None
-                    st.rerun()
-        st.stop()
-    
-    # Show create form if requested
-    if st.session_state.get("show_create_form", False):
-        st.markdown("<br><br>", unsafe_allow_html=True)
-        col1, col2, col3 = st.columns([1, 1, 1])
-        with col2:
-            st.markdown("<div style='background: #1a1a1a; padding: 30px; border-radius: 8px;'>", unsafe_allow_html=True)
-            st.markdown("<p style='color: white; text-align: center; font-size: 1.2rem; margin-bottom: 20px;'>Create New Profile</p>", unsafe_allow_html=True)
-            new_business = st.text_input("Business/Profile Name", key="new_profile_name")
-            
-            col_a, col_b = st.columns(2)
-            with col_a:
-                if st.button("✅ Create", key="confirm_create", width='stretch'):
-                    if new_business:
-                        create_business(user_id, new_business)
-                        st.session_state.active_business = new_business
-                        st.session_state.show_create_form = False
-                        st.rerun()
-                    else:
-                        st.error("Please enter a name")
-            with col_b:
-                if st.button("❌ Cancel", key="cancel_create", width='stretch'):
-                    st.session_state.show_create_form = False
-                    if not businesses:
-                        # If no businesses exist, keep form open
-                        st.session_state.show_create_form = True
-                    st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
-    else:
-        # Show profile cards
-        if businesses:
-            # Calculate grid layout - center profiles
-            cols_per_row = min(4, len(businesses) + 1)
-            profile_icons = ["🏢", "💼", "🏪", "🏭", "🏦", "🎯", "📊", "💰"]
-            
-            st.markdown("<br>", unsafe_allow_html=True)
-            
-            # Create rows of profiles with centering
-            all_profiles = businesses + ["__add_profile__"]
-            for i in range(0, len(all_profiles), cols_per_row):
-                # Add spacing columns for centering
-                num_items = min(cols_per_row, len(all_profiles) - i)
-                spacing = (cols_per_row - num_items) / 2
-                
-                if spacing > 0:
-                    cols = st.columns([spacing] + [1] * num_items + [spacing])
-                    start_col = 1
-                else:
-                    cols = st.columns(cols_per_row)
-                    start_col = 0
-                
-                for j in range(num_items):
-                    profile_item = all_profiles[i + j]
-                    
-                    if profile_item == "__add_profile__":
-                        # Add Profile button
-                        with cols[start_col + j]:
-                            if st.button("➕\n\nAdd Profile", key="create_new_profile", help="Add Profile"):
-                                st.session_state.show_create_form = True
-                                st.rerun()
-                    else:
-                        # Existing business profile
-                        business = profile_item
-                        icon = profile_icons[(i + j) % len(profile_icons)]
-                        
-                        with cols[start_col + j]:
-                            if st.button(f"{icon}\n\n{business}", key=f"select_{business}", help=business):
-                                st.session_state.active_business = business
-                                st.rerun()
-                            
-                            # Delete button for this profile
-                            st.markdown('<div class="delete-profile-btn">', unsafe_allow_html=True)
-                            if st.button("🗑️ Delete", key=f"delete_{business}"):
-                                st.session_state.confirm_delete = business
-                                st.rerun()
-                            st.markdown('</div>', unsafe_allow_html=True)
-                
-                st.markdown("<br>", unsafe_allow_html=True)
-        else:
-            # No profiles yet - show create button
-            st.markdown("<br><br>", unsafe_allow_html=True)
-            col1, col2, col3 = st.columns([2, 1, 2])
-            with col2:
-                if st.button("➕\n\nCreate Your First Profile", key="first_profile", help="Create Your First Profile"):
-                    st.session_state.show_create_form = True
-                    st.rerun()
-    
-    st.stop()
+    if "rules_loaded_for_business" not in st.session_state:
+        st.session_state.rules_loaded_for_business = None
 
-st.markdown("<h3 style='text-align: center;'>Prototype v1.0</h3>", unsafe_allow_html=True)
-
-st.title("💼 Bank Statement Analyzer")
-
-user_id = st.session_state.user_id
-
-businesses = load_user_businesses(user_id)
-
-# Add sidebar with settings and profile switcher
-with st.sidebar:
-    st.header("Settings")
-    
-    # Show active profile
     if st.session_state.active_business:
-        st.info(f"📊 **{st.session_state.active_business}**")
-    
-    if st.button("🔄 Switch Profile"):
-        st.session_state.active_business = None
-        st.rerun()
-    
-    sort_by = st.selectbox("Sort vendor summaries by", ["Subtotal (desc)", "Transaction Count (desc)"])
-    
-    st.divider()
-    st.write(f"👤 {st.session_state.user['name']}")
-    if st.button("Logout"):
-        for k in list(st.session_state.keys()):
-            del st.session_state[k]
-        st.rerun()
-if "rules_loaded_for_business" not in st.session_state:
-    st.session_state.rules_loaded_for_business = None
+        if st.session_state.rules_loaded_for_business != st.session_state.active_business:
+            st.session_state.custom_rules = load_business_rules(
+                st.session_state.user["id"],
+                st.session_state.active_business
+            )
+            st.session_state.rules_loaded_for_business = st.session_state.active_business
+            reapply_custom_rules()
 
-if st.session_state.active_business:
-    if st.session_state.rules_loaded_for_business != st.session_state.active_business:
-        st.session_state.custom_rules = load_business_rules(
-            st.session_state.user["id"],
-            st.session_state.active_business
-        )
-        st.session_state.rules_loaded_for_business = st.session_state.active_business
-        reapply_custom_rules()
-        
-        # after running reapply_custom_rules:
-        # show count
-        st.markdown(
-    "Upload a bank statement (PDF / CSV / DOCX)"
-)
-def filter_atm_withdrawals(transactions: List[Transaction]) -> List[Transaction]:
-    return [
-        t for t in transactions
-        if t.section == "ATM" and t.transaction_type == "withdrawal"
-    ]
-
-
-def get_active_transactions():
-    """
-    Date filter + Exclude dono apply karta hai
-    """
-    txs = st.session_state.get(
-        "filtered_transactions",
-        st.session_state.transactions
+            # after running reapply_custom_rules:
+            # show count
+            st.markdown(
+        "Upload a bank statement (PDF / CSV / DOCX)"
     )
-    return [t for t in txs if not getattr(t, "is_excluded", False)]
+    def filter_atm_withdrawals(transactions: List[Transaction]) -> List[Transaction]:
+        return [
+            t for t in transactions
+            if t.section == "ATM" and t.transaction_type == "withdrawal"
+        ]
 
-def is_tx_excluded(tx):
-    return getattr(tx, "is_excluded", False)
-uploaded = st.file_uploader("Upload statement (PDF, CSV, DOCX)", type=["pdf", "csv", "doc", "docx"], accept_multiple_files=True)
-credit_card_files = st.file_uploader(
-    "Upload Credit Card Statement(s) (PDF)",
-    type=["pdf"],
-    accept_multiple_files=True,
-    key="credit_card_multi"
-)
 
-# Initialize custom rules in session state (load from file)
-
-if uploaded or credit_card_files:
-    if uploaded:
-        if isinstance(uploaded, list):
-            st.info(f"Bank Statements: {len(uploaded)} files uploaded")
-        else:
-            st.info(f"Bank Statement: {uploaded.name} — {uploaded.size/1024:.1f} KB")
-    if credit_card_files:
-        st.info(f"Credit Card Statements: {len(credit_card_files)} files uploaded")
-    
-    # Year selection for uploaded files
-    st.markdown("---")
-    st.subheader("📅 Statement Year Selection")
-    st.markdown("**Optional:** Manually specify the year for your statement(s) if automatic detection fails")
-    
-    # Generate year options (last 10 years)
-    current_year = datetime.now().year
-    year_options = ["Auto-detect"] + [str(y) for y in range(current_year, current_year - 10, -1)]
-    
-    # Store selected years in a dictionary
-    selected_years = {}
-    
-    if uploaded:
-        uploaded_list = uploaded if isinstance(uploaded, list) else [uploaded]
-        st.markdown("**Bank Statement(s):**")
-        for idx, file in enumerate(uploaded_list):
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.text(f"📄 {file.name}")
-            with col2:
-                year_choice = st.selectbox(
-                    "Year",
-                    year_options,
-                    key=f"year_bank_{idx}_{file.name}",
-                    label_visibility="collapsed"
-                )
-                if year_choice != "Auto-detect":
-                    selected_years[file.name] = int(year_choice)
-    
-    if credit_card_files:
-        st.markdown("**Credit Card Statement(s):**")
-        for idx, file in enumerate(credit_card_files):
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.text(f"💳 {file.name}")
-            with col2:
-                year_choice = st.selectbox(
-                    "Year",
-                    year_options,
-                    key=f"year_cc_{idx}_{file.name}",
-                    label_visibility="collapsed"
-                )
-                if year_choice != "Auto-detect":
-                    selected_years[file.name] = int(year_choice)
-    
-    st.markdown("---")
-    
-    currency = st.selectbox("Currency", ["PKR", "USD", "EUR", "GBP", "AED", "CAD", "AUD"], index=1)
-    
-    # Store selected years in session state for use during parsing
-    st.session_state.selected_years = selected_years
-    
-    include_opening_balance = False
-    if uploaded:
-        include_opening_balance = st.checkbox(
-            "Include Opening Balance",
-            value=False,
-            help="Adds opening balance as a deposit before transactions",
-            key="include_opening_balance"
+    def get_active_transactions():
+        """
+        Date filter + Exclude dono apply karta hai
+        """
+        txs = st.session_state.get(
+            "filtered_transactions",
+            st.session_state.transactions
         )
-    
-    # Check memos is now always ENABLED by request
-    extract_check_memos = True
+        return [t for t in txs if not getattr(t, "is_excluded", False)]
 
-    if st.button("Process Statement"):
-        with st.spinner("Parsing & processing..."):
-            all_txs = []
-            meta = {}
-            all_raw_text = ""  # Store raw text for Chase summary extraction
-            st.session_state.statement_summaries = [] # Store individual summaries
-            st.session_state.cc_summaries = [] # Store list of credit card summaries
-            
-            # Process main bank statements if uploaded
-            if uploaded:
-                uploaded_list = uploaded if isinstance(uploaded, list) else [uploaded]
-                dp = DocumentParser()
-                for up_file in uploaded_list:
-                    file_bytes = up_file.read()
-                    lines, ok, unreadable = dp.parse_document(file_bytes, up_file.name)
-                    if not ok or len(lines) < 1:
-                        st.error(f"Could not read text from bank statement file: {up_file.name}")
-                        if unreadable:
-                            st.warning(f"Unreadable pages in {up_file.name}: {unreadable}")
-                    else:
-                        # Store raw text for Chase summary extraction
-                        file_raw_text = "\n".join(lines)
-                        all_raw_text += file_raw_text + "\n"
-                        
-                        # Check if user manually selected year for this file
-                        manual_year = selected_years.get(up_file.name)
-                        if manual_year:
-                            st.info(f"✅ Using manually selected year for {up_file.name}: **{manual_year}**")
-                        
-                        # Try new multi-bank parser first
-                        bank_txs, b_meta = parse_with_multi_bank_parser(
-                            lines,  # Pass extracted text lines, not bytes
-                            up_file.name, 
-                            manual_year=manual_year,
-                            include_opening_balance=include_opening_balance,
-                            extract_check_memos=extract_check_memos
-                        )
-                        
-                        # Fall back to FallbackStatementParser if multi-bank parser fails
-                        if bank_txs is None or b_meta is None:
-                            st.info(f"Using legacy parser for {up_file.name}")
-                            fb_parser = FallbackStatementParser(
+    def is_tx_excluded(tx):
+        return getattr(tx, "is_excluded", False)
+    uploaded = st.file_uploader("Upload statement (PDF, CSV, DOCX)", type=["pdf", "csv", "doc", "docx"], accept_multiple_files=True)
+    credit_card_files = st.file_uploader(
+        "Upload Credit Card Statement(s) (PDF)",
+        type=["pdf"],
+        accept_multiple_files=True,
+        key="credit_card_multi"
+    )
+
+    # Initialize custom rules in session state (load from file)
+
+    if uploaded or credit_card_files:
+        if uploaded:
+            if isinstance(uploaded, list):
+                st.info(f"Bank Statements: {len(uploaded)} files uploaded")
+            else:
+                st.info(f"Bank Statement: {uploaded.name} — {uploaded.size/1024:.1f} KB")
+        if credit_card_files:
+            st.info(f"Credit Card Statements: {len(credit_card_files)} files uploaded")
+
+        # Year selection for uploaded files
+        st.markdown("---")
+        st.subheader("📅 Statement Year Selection")
+        st.markdown("**Optional:** Manually specify the year for your statement(s) if automatic detection fails")
+
+        # Generate year options (last 10 years)
+        current_year = datetime.now().year
+        year_options = ["Auto-detect"] + [str(y) for y in range(current_year, current_year - 10, -1)]
+
+        # Store selected years in a dictionary
+        selected_years = {}
+
+        if uploaded:
+            uploaded_list = uploaded if isinstance(uploaded, list) else [uploaded]
+            st.markdown("**Bank Statement(s):**")
+            for idx, file in enumerate(uploaded_list):
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.text(f"📄 {file.name}")
+                with col2:
+                    year_choice = st.selectbox(
+                        "Year",
+                        year_options,
+                        key=f"year_bank_{idx}_{file.name}",
+                        label_visibility="collapsed"
+                    )
+                    if year_choice != "Auto-detect":
+                        selected_years[file.name] = int(year_choice)
+
+        if credit_card_files:
+            st.markdown("**Credit Card Statement(s):**")
+            for idx, file in enumerate(credit_card_files):
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.text(f"💳 {file.name}")
+                with col2:
+                    year_choice = st.selectbox(
+                        "Year",
+                        year_options,
+                        key=f"year_cc_{idx}_{file.name}",
+                        label_visibility="collapsed"
+                    )
+                    if year_choice != "Auto-detect":
+                        selected_years[file.name] = int(year_choice)
+
+        st.markdown("---")
+
+        currency = st.selectbox("Currency", ["PKR", "USD", "EUR", "GBP", "AED", "CAD", "AUD"], index=1)
+
+        # Store selected years in session state for use during parsing
+        st.session_state.selected_years = selected_years
+
+        include_opening_balance = False
+        if uploaded:
+            include_opening_balance = st.checkbox(
+                "Include Opening Balance",
+                value=False,
+                help="Adds opening balance as a deposit before transactions",
+                key="include_opening_balance"
+            )
+
+        # Check memos is now always ENABLED by request
+        extract_check_memos = True
+
+        if st.button("Process Statement"):
+            with st.spinner("Parsing & processing..."):
+                all_txs = []
+                meta = {}
+                all_raw_text = ""  # Store raw text for Chase summary extraction
+                st.session_state.statement_summaries = [] # Store individual summaries
+                st.session_state.cc_summaries = [] # Store list of credit card summaries
+
+                # Process main bank statements if uploaded
+                if uploaded:
+                    uploaded_list = uploaded if isinstance(uploaded, list) else [uploaded]
+                    dp = DocumentParser()
+                    for up_file in uploaded_list:
+                        file_bytes = up_file.read()
+                        lines, ok, unreadable = dp.parse_document(file_bytes, up_file.name)
+                        if not ok or len(lines) < 1:
+                            st.error(f"Could not read text from bank statement file: {up_file.name}")
+                            if unreadable:
+                                st.warning(f"Unreadable pages in {up_file.name}: {unreadable}")
+                        else:
+                            # Store raw text for Chase summary extraction
+                            file_raw_text = "\n".join(lines)
+                            all_raw_text += file_raw_text + "\n"
+
+                            # Check if user manually selected year for this file
+                            manual_year = selected_years.get(up_file.name)
+                            if manual_year:
+                                st.info(f"✅ Using manually selected year for {up_file.name}: **{manual_year}**")
+
+                            # Try new multi-bank parser first
+                            bank_txs, b_meta = parse_with_multi_bank_parser(
+                                lines,  # Pass extracted text lines, not bytes
+                                up_file.name, 
+                                manual_year=manual_year,
                                 include_opening_balance=include_opening_balance,
                                 extract_check_memos=extract_check_memos
                             )
-                            bank_txs, b_meta = fb_parser.parse_statement(lines, manual_year=manual_year)
-                        else:
-                            st.success(f"✅ Detected bank: {b_meta.get('bank', 'Unknown')}")
-                        
-                        all_txs.extend(bank_txs)
 
-                        # Get opening balance from either parser
-                        opening_bal = 0.0
-                        if include_opening_balance:
+                            # Fall back to FallbackStatementParser if multi-bank parser fails
+                            if bank_txs is None or b_meta is None:
+                                st.info(f"Using legacy parser for {up_file.name}")
+                                fb_parser = FallbackStatementParser(
+                                    include_opening_balance=include_opening_balance,
+                                    extract_check_memos=extract_check_memos
+                                )
+                                bank_txs, b_meta = fb_parser.parse_statement(lines, manual_year=manual_year)
+                            else:
+                                st.success(f"✅ Detected bank: {b_meta.get('bank', 'Unknown')}")
+                                st.write(f"Processed {len(bank_txs)} transactions (multi_bank_parser).")
+
+                            all_txs.extend(bank_txs)
+
+                            # Get opening balance from either parser
                             opening_bal = b_meta.get('opening_balance', 0.0) or 0.0
+                            if include_opening_balance:
+                                opening_bal = opening_bal  # respected from meta
 
-                        # Generate summary for THIS file
-                        file_summary_df = get_sub_summary(
-                            transactions=bank_txs,
-                            opening_balance=opening_bal,
-                            raw_text=file_raw_text
-                        )
-                        st.session_state.statement_summaries.append({
-                            "filename": up_file.name,
-                            "df": file_summary_df
-                        })
-                        
-                        # Store meta from the first file or merge?
-                        if not meta:
-                            meta = b_meta
-                            st.session_state.opening_balance = opening_bal
-                st.session_state.meta = meta
-                st.session_state.raw_text = all_raw_text  # Save for summary extraction
-            # Process credit card statements if uploaded
-            if credit_card_files:
-                for cc_file in credit_card_files:
-                    cc_file_bytes = cc_file.read()
+                            # Generate summary for THIS file
+                            file_summary_df = get_sub_summary(
+                                transactions=bank_txs,
+                                opening_balance=opening_bal,
+                                raw_text=file_raw_text,
+                                bank_name=b_meta.get("bank", "")
+                            )
+                            st.session_state.statement_summaries.append({
+                                "filename": up_file.name,
+                                "df": file_summary_df
+                            })
+
+                            if not meta:
+                                meta = b_meta
+                                # Always persist beginning_balance so UI can show it in deposits
+                                st.session_state.opening_balance = opening_bal
+                    st.session_state.meta = meta
+                    st.session_state.raw_text = all_raw_text  # Save for summary extraction
+                # Process credit card statements if uploaded
+                if credit_card_files:
                     dp_cc = DocumentParser()
-                    cc_lines, ok, unreadable = dp_cc.parse_document(cc_file_bytes, cc_file.name)
-                    
-                    if not ok or len(cc_lines) < 1:
-                        st.error(f"Could not read text from credit card statement file: {cc_file.name}")
-                        if unreadable:
-                            st.warning(f"Unreadable pages in {cc_file.name}: {unreadable}")
+                    for cc_file in credit_card_files:
+                        cc_file_bytes = cc_file.read()
+                        cc_lines, ok, unreadable = dp_cc.parse_document(cc_file_bytes, cc_file.name)
+
+                        if not ok or len(cc_lines) < 1:
+                            st.error(f"Could not read text from credit card statement file: {cc_file.name}")
+                            if unreadable:
+                                st.warning(f"Unreadable pages in {cc_file.name}: {unreadable}")
+                        else:
+                            # Store raw text for extraction
+                            cc_raw_text = "\n".join(cc_lines)
+                            extracted_summary = extract_cc_summary(cc_raw_text)
+
+                            st.session_state.cc_summaries.append({
+                                "filename": cc_file.name,
+                                "summary": extracted_summary
+                            })
+
+                            # Check if user manually selected year for this credit card file
+                            cc_manual_year = selected_years.get(cc_file.name)
+                            if cc_manual_year:
+                                st.info(f"✅ Using manually selected year for {cc_file.name}: **{cc_manual_year}**")
+                            elif not uploaded:
+                                # If no bank statement was uploaded and no manual year, try to extract year from CC statement
+                                fb_temp = FallbackStatementParser()
+                                extracted_year = fb_temp._extract_statement_year(cc_lines)
+                                if extracted_year:
+                                    _STATEMENT_YEAR = extracted_year
+
+                        cc_txs = CreditCardParser().parse(cc_lines)
+
+                        # FORCE credit card as withdrawals
+                        for tx in cc_txs:
+                            tx.transaction_type = "withdrawal"
+                            tx.amount = -abs(tx.amount)
+                            tx.source = "CREDIT_CARD"
+
+                        all_txs.extend(cc_txs)
+
+                valid_dates = [
+                    _md_key(tx.date)
+                    for tx in all_txs
+                    if _md_key(tx.date) is not None
+                ]
+
+                # If nothing extracted or too few rows, try UniversalParser conservative fallback
+                # AMEX can sometimes be tricky for sectioned parser if layout is weird
+                if not all_txs or len(all_txs) < 3:
+                    if uploaded:  # Only try universal parser if we have a bank statement
+                        up = UniversalParser()
+                        u_txs = up.parse(lines)
+                        if u_txs:
+                            # prefer universal only if it returns something meaningful
+                            all_txs = u_txs
+                            meta = {"parsed_from": "universal_fallback", "transactions_extracted": len(all_txs)}
+
+                parsed_from = meta.get("parsed_from", "fallback")
+
+                if not all_txs:
+                    st.error("No transactions extracted.")
+                    st.stop()
+                # categorize & dedupe
+                categorizer = RuleEngineCategorizer()
+                transactions = categorizer.apply(all_txs)
+
+                # stats & reports
+                rg = ReportGenerator()
+                stats = rg.generate_summary_statistics(transactions)
+                deposits_df = rg.generate_deposits_summary(all_txs)
+                withdrawals_df = rg.generate_withdrawals_summary(all_txs)
+                pl_df = rg.generate_pl_report(all_txs)
+                # Use the comprehensive Schedule C categorizer
+                # (Imports moved to top level)
+                sc_categorizer = ScheduleCCategorizer()
+                categorized_transactions = sc_categorizer.categorize_transactions(all_txs)
+                schedule_c_df = sc_categorizer.generate_schedule_c_dataframe(categorized_transactions)
+                st.session_state.schedule_c_df = schedule_c_df
+                st.session_state.categorized_transactions = categorized_transactions  # Store for detail view
+
+                # Sorting vendor summary based on UI
+                if deposits_df is not None and not deposits_df.empty:
+                    if sort_by == "Subtotal (desc)":
+                        deposits_df = deposits_df.sort_values("Subtotal ($)", ascending=False).reset_index(drop=True)
                     else:
-                        # Store raw text for extraction
-                        cc_raw_text = "\n".join(cc_lines)
-                        extracted_summary = extract_cc_summary(cc_raw_text)
-                        
-                        st.session_state.cc_summaries.append({
-                            "filename": cc_file.name,
-                            "summary": extracted_summary
-                        })
-                        
-                        # Check if user manually selected year for this credit card file
-                        cc_manual_year = selected_years.get(cc_file.name)
-                        if cc_manual_year:
-                            st.info(f"✅ Using manually selected year for {cc_file.name}: **{cc_manual_year}**")
-                        elif not uploaded:
-                            # If no bank statement was uploaded and no manual year, try to extract year from CC statement
-                            fb_temp = FallbackStatementParser()
-                            extracted_year = fb_temp._extract_statement_year(cc_lines)
-                            if extracted_year:
-                                _STATEMENT_YEAR = extracted_year
-                    
-                    cc_txs = CreditCardParser().parse(cc_lines)
+                        deposits_df = deposits_df.sort_values("Transaction Count", ascending=False).reset_index(drop=True)
 
-                    # FORCE credit card as withdrawals
-                    for tx in cc_txs:
-                        tx.transaction_type = "withdrawal"
-                        tx.amount = -abs(tx.amount)
-                        tx.source = "CREDIT_CARD"
+                if withdrawals_df is not None and not withdrawals_df.empty:
+                    if sort_by == "Subtotal (desc)":
+                        withdrawals_df = withdrawals_df.sort_values("Subtotal ($)", ascending=False).reset_index(drop=True)
+                    else:
+                        withdrawals_df = withdrawals_df.sort_values("Transaction Count", ascending=False).reset_index(drop=True)
 
-                    all_txs.extend(cc_txs)
+                # store in session
+                st.session_state.transactions = all_txs
+                st.session_state.stats = stats
+                st.session_state.deposit_df = deposits_df
+                st.session_state.withdrawal_df = withdrawals_df
+                st.session_state.pl_df = pl_df
+                st.session_state.currency = currency
+                st.session_state.parsed_from = parsed_from
+                reapply_custom_rules()
 
-            valid_dates = [
-                _md_key(tx.date)
-                for tx in all_txs
-                if _md_key(tx.date) is not None
-            ]
+                st.success(f"Processed {len(all_txs)} transactions ({parsed_from}).")
 
-            # If nothing extracted or too few rows, try UniversalParser conservative fallback
-            # AMEX can sometimes be tricky for sectioned parser if layout is weird
-            if not all_txs or len(all_txs) < 3:
-                if uploaded:  # Only try universal parser if we have a bank statement
-                    up = UniversalParser()
-                    u_txs = up.parse(lines)
-                    if u_txs:
-                        # prefer universal only if it returns something meaningful
-                        all_txs = u_txs
-                        meta = {"parsed_from": "universal_fallback", "transactions_extracted": len(all_txs)}
-
-            parsed_from = meta.get("parsed_from", "fallback")
-
-            if not all_txs:
-                st.error("No transactions extracted.")
-                st.stop()
-            # categorize & dedupe
-            categorizer = RuleEngineCategorizer()
-            transactions = categorizer.apply(all_txs)
-
-            # stats & reports
-            rg = ReportGenerator()
-            stats = rg.generate_summary_statistics(transactions)
-            deposits_df = rg.generate_deposits_summary(all_txs)
-            withdrawals_df = rg.generate_withdrawals_summary(all_txs)
-            pl_df = rg.generate_pl_report(all_txs)
-            # Use the comprehensive Schedule C categorizer
-            from schedule_c_categorizer import ScheduleCCategorizer
-            sc_categorizer = ScheduleCCategorizer()
-            categorized_transactions = sc_categorizer.categorize_transactions(all_txs)
-            schedule_c_df = sc_categorizer.generate_schedule_c_dataframe(categorized_transactions)
-            st.session_state.schedule_c_df = schedule_c_df
-            st.session_state.categorized_transactions = categorized_transactions  # Store for detail view
-
-            # Sorting vendor summary based on UI
-            if deposits_df is not None and not deposits_df.empty:
-                if sort_by == "Subtotal (desc)":
-                    deposits_df = deposits_df.sort_values("Subtotal ($)", ascending=False).reset_index(drop=True)
+                # Show detected statement year if available
+                if _STATEMENT_YEAR:
+                    st.info(f"📅 Detected statement year: **{_STATEMENT_YEAR}** (automatically extracted from statement)")
                 else:
-                    deposits_df = deposits_df.sort_values("Transaction Count", ascending=False).reset_index(drop=True)
+                    st.warning("⚠️ Could not detect year from statement - using current year for dates without year")
 
-            if withdrawals_df is not None and not withdrawals_df.empty:
-                if sort_by == "Subtotal (desc)":
-                    withdrawals_df = withdrawals_df.sort_values("Subtotal ($)", ascending=False).reset_index(drop=True)
-                else:
-                    withdrawals_df = withdrawals_df.sort_values("Transaction Count", ascending=False).reset_index(drop=True)
+                st.session_state.all_transactions = transactions
+                st.session_state.filtered_transactions = transactions 
 
-            # store in session
-            st.session_state.transactions = all_txs
-            st.session_state.stats = stats
-            st.session_state.deposit_df = deposits_df
-            st.session_state.withdrawal_df = withdrawals_df
-            st.session_state.pl_df = pl_df
-            st.session_state.currency = currency
-            st.session_state.parsed_from = parsed_from
-            reapply_custom_rules()
-
-            st.success(f"Processed {len(all_txs)} transactions ({parsed_from}).")
-            
-            # Show detected statement year if available
-            if _STATEMENT_YEAR:
-                st.info(f"📅 Detected statement year: **{_STATEMENT_YEAR}** (automatically extracted from statement)")
-            else:
-                st.warning("⚠️ Could not detect year from statement - using current year for dates without year")
-            
-            st.session_state.all_transactions = transactions
-            st.session_state.filtered_transactions = transactions 
-            
-            # Reset all filter settings when processing new statement
-            st.session_state.filter_active = False
-            st.session_state.filter_locked = False
-            st.session_state.filter_reset_count = 0  # Reset counter for new statement
-            if 'filter_start_date' in st.session_state:
-                del st.session_state.filter_start_date
-            if 'filter_end_date' in st.session_state:
-                del st.session_state.filter_end_date
-            if 'filter_min_amount' in st.session_state:
-                del st.session_state.filter_min_amount
-            if 'filter_max_amount' in st.session_state:
-                del st.session_state.filter_max_amount
-            if 'filter_search_text' in st.session_state:
-                del st.session_state.filter_search_text
-            if 'filter_account_index' in st.session_state:
-                del st.session_state.filter_account_index
-            if 'filter_stats' in st.session_state:
-                del st.session_state.filter_stats
-# =========================================================================
-# PROFESSIONAL COMPREHENSIVE FILTER SYSTEM
-# =========================================================================
-from datetime import datetime, date
-from calendar import monthrange
-
-all_transactions = st.session_state.get("all_transactions", [])
-
-if all_transactions:
-    # Always show sub-summary if transactions exist
-    st.markdown("---")
-    opening_balance_val = (
-        st.session_state.get("opening_balance", 0.0)
-        if st.session_state.get("include_opening_balance", False)
-        else 0.0
-    )
-    st.markdown("### Sub-summary / Transaction Breakdown")
-    with st.expander("📊 Statement Summaries / Transaction Breakdowns", expanded=True):
-        # Render Credit Card Summaries if available
-        cc_summaries = st.session_state.get("cc_summaries", [])
-        if cc_summaries:
-            for cc_entry in cc_summaries:
-                st.markdown(f"**Credit Card Summary: {cc_entry['filename']}**")
-                render_cc_summary(cc_entry['summary'])
-            
-        summaries = st.session_state.get("statement_summaries", [])
-        if summaries:
-            for entry in summaries:
-                render_chase_table(f"SUMMARY: {entry['filename']}", entry['df'])
-        elif not cc_summaries:
-            # Fallback for combined summary (only if no CC summary shown yet)
-            sub_summary_df = get_sub_summary(
-                transactions=all_transactions,
-                opening_balance=opening_balance_val,
-                raw_text=st.session_state.get("raw_text", "")
-            )
-            render_chase_table("COMBINED CHECKING SUMMARY", sub_summary_df)
-
-    st.markdown("---")
-    st.header("🔍 Advanced Transaction Filter")
-    st.markdown("**Professional filtering system** - All filters work together to give you precise control")
-    
-    # Extract all valid dates with full date information
-    parsed_dates = []
-    for tx in all_transactions:
-        if tx.date:
-            try:
-                parsed_dates.append(datetime.strptime(tx.date, "%Y-%m-%d").date())
-            except:
-                pass
-
-    if not parsed_dates:
-        st.warning("⚠️ No valid dates found in transactions.")
-    else:
-        # Get actual min and max dates from ALL uploaded statements (bank + credit card)
-        min_date = min(parsed_dates)
-        max_date = max(parsed_dates)
-        
-        # Calculate first day of starting month and last day of ending month
-        first_day_of_start_month = min_date.replace(day=1)
-        last_day_of_end_month = max_date.replace(day=monthrange(max_date.year, max_date.month)[1])
-        
-        # Store coverage dates in session state for reference
-        st.session_state.statement_coverage_start = min_date
-        st.session_state.statement_coverage_end = max_date
-        
-        # Display coverage information prominently
-        st.info(
-            f"📊 **Statement Coverage:** {min_date.strftime('%b %d, %Y')} → {max_date.strftime('%b %d, %Y')} "
-            f"({(max_date - min_date).days} days, {len(all_transactions)} total transactions)"
-        )
-
-        # Initialize filter state if not present
-        if 'filter_active' not in st.session_state:
-            st.session_state.filter_active = False
-            st.session_state.filter_locked = False
-        
-        # Initialize reset counter for forcing widget refresh
-        if 'filter_reset_count' not in st.session_state:
-            st.session_state.filter_reset_count = 0
-            
-        # Show lock status
-        lock_col1, lock_col2 = st.columns([3, 1])
-        with lock_col1:
-            if st.session_state.get('filter_locked', False):
-                st.warning("🔒 **Filter is LOCKED** - Settings preserved for printing/exporting")
-        with lock_col2:
-            if st.session_state.get('filter_locked', False):
-                if st.button("🔓 Unlock Filter"):
-                    st.session_state.filter_locked = False
-                    st.success("Filter unlocked! You can now adjust settings.")
-                    st.rerun()
-            else:
-                if st.button("🔒 Lock Filter"):
-                    st.session_state.filter_locked = True
-                    st.success("Filter locked! Settings preserved for printing/exporting.")
-                    st.rerun()
-        
-        # Disable filter controls if locked
-        filter_disabled = st.session_state.get('filter_locked', False)
-        
-        # ===== DATE FILTER =====
-        st.subheader("📅 Date Range")
-        col_date1, col_date2 = st.columns(2)
-        
-        # Use reset counter in widget keys to force recreation on reset
-        reset_suffix = f"_{st.session_state.filter_reset_count}"
-
-        with col_date1:
-            start_md = st.date_input(
-                "Start Date",
-                value=first_day_of_start_month,
-                min_value=first_day_of_start_month,
-                max_value=last_day_of_end_month,
-                key=f"filter_start_md{reset_suffix}",
-                disabled=filter_disabled
-            )
-
-        with col_date2:
-            end_md = st.date_input(
-                "End Date",
-                value=last_day_of_end_month,
-                min_value=first_day_of_start_month,
-                max_value=last_day_of_end_month,
-                key=f"filter_end_md{reset_suffix}",
-                disabled=filter_disabled
-            )
-        
-        # ===== AMOUNT FILTER =====
-        st.subheader("💰 Amount Range")
-        col_amt1, col_amt2 = st.columns(2)
-        
-        # Get min/max amounts from transactions
-        all_amounts = [abs(tx.amount) for tx in all_transactions if tx.amount]
-        min_amount_possible = min(all_amounts) if all_amounts else 0.0
-        max_amount_possible = max(all_amounts) if all_amounts else 10000.0
-        
-        with col_amt1:
-            min_amount_filter = st.number_input(
-                "Minimum Amount ($)",
-                min_value=0.0,
-                max_value=max_amount_possible,
-                value=st.session_state.get('filter_min_amount', 0.0),
-                step=10.0,
-                key="filter_min_amt",
-                disabled=filter_disabled
-            )
-        
-        with col_amt2:
-            max_amount_filter = st.number_input(
-                "Maximum Amount ($)",
-                min_value=0.0,
-                max_value=max_amount_possible * 2,  # Allow some overhead
-                value=st.session_state.get('filter_max_amount', max_amount_possible),
-                step=10.0,
-                key="filter_max_amt",
-                disabled=filter_disabled
-            )
-        
-        # ===== VENDOR/KEYWORD SEARCH =====
-        st.subheader("🔎 Search by Vendor or Keyword")
-        search_text = st.text_input(
-            "Enter vendor name or keyword (searches in vendor, description, and transaction details)",
-            value=st.session_state.get('filter_search_text', ""),
-            placeholder="e.g., Amazon, Stripe, Check, etc.",
-            key="filter_search",
-            disabled=filter_disabled
-        )
-        
-        # ===== ACCOUNT CODE FILTER =====
-        st.subheader("📊 Account Code Filter")
-        
-        # Load all account codes
-        import json
-        from pathlib import Path
-        all_account_options = {"All Account Codes": "ALL"}
-        account_file = Path(__file__).parent / 'account_keywords.json'
-        try:
-            with open(account_file, 'r') as f:
-                data = json.load(f)
-                for acc_code, acc_details in sorted(data.items()):
-                    all_account_options[f"{acc_code} · {acc_details['name']}"] = acc_code
-        except Exception as e:
-            st.warning(f"⚠️ Could not load account codes: {e}")
-        
-        account_code_filter = st.selectbox(
-            "Filter by Account Code:",
-            options=list(all_account_options.keys()),
-            index=st.session_state.get('filter_account_index', 0),
-            key="filter_account_code",
-            disabled=filter_disabled
-        )
-        
-        # ===== APPLY FILTER BUTTON =====
-        st.markdown("---")
-        col_btn1, col_btn2, col_btn3 = st.columns([2, 2, 2])
-        
-        with col_btn1:
-            if st.button("✅ Apply Filter", type="primary", disabled=filter_disabled, width='stretch'):
-                # Store filter settings in session state
-                st.session_state.filter_start_date = start_md
-                st.session_state.filter_end_date = end_md
-                st.session_state.filter_min_amount = min_amount_filter
-                st.session_state.filter_max_amount = max_amount_filter
-                st.session_state.filter_search_text = search_text
-                st.session_state.filter_account_index = list(all_account_options.keys()).index(account_code_filter)
-                
-                # Apply all filters
-                filtered = []
-                filter_stats = {
-                    'date_filtered': 0,
-                    'amount_filtered': 0,
-                    'search_filtered': 0,
-                    'account_filtered': 0
-                }
-                
-                for tx in all_transactions:
-                    # DATE FILTER
-                    if tx.date:
-                        try:
-                            tx_date = datetime.strptime(tx.date, "%Y-%m-%d").date()
-                            if not (start_md <= tx_date <= end_md):
-                                filter_stats['date_filtered'] += 1
-                                continue
-                        except:
-                            continue
-                    
-                    # AMOUNT FILTER
-                    tx_abs_amount = abs(tx.amount)
-                    if tx_abs_amount < min_amount_filter or tx_abs_amount > max_amount_filter:
-                        filter_stats['amount_filtered'] += 1
-                        continue
-                    
-                    # SEARCH FILTER
-                    if search_text.strip():
-                        search_lower = search_text.lower().strip()
-                        searchable_text = f"{tx.vendor} {tx.description} {tx.raw_line}".lower()
-                        if search_lower not in searchable_text:
-                            filter_stats['search_filtered'] += 1
-                            continue
-                    
-                    # ACCOUNT CODE FILTER
-                    if account_code_filter != "All Account Codes":
-                        selected_account_code = all_account_options[account_code_filter]
-                        tx_account_code = getattr(tx, 'account_code', None)
-                        if tx_account_code != selected_account_code:
-                            filter_stats['account_filtered'] += 1
-                            continue
-                    
-                    # Transaction passed all filters
-                    filtered.append(tx)
-
-                st.session_state.filtered_transactions = filtered
-                st.session_state.filter_active = True
-                st.session_state.filter_stats = filter_stats
-
-                # Calculate totals for success message
-                filtered_active_msg = [t for t in filtered if not getattr(t, "is_excluded", False)]
-                msg_deposits = sum(t.amount for t in filtered_active_msg if t.amount > 0)
-                msg_withdrawals = sum(abs(t.amount) for t in filtered_active_msg if t.amount < 0)
-                msg_deposits_count = len([t for t in filtered_active_msg if t.amount > 0])
-                msg_withdrawals_count = len([t for t in filtered_active_msg if t.amount < 0])
-
-                # Success message with details
-                total_filtered_out = len(all_transactions) - len(filtered)
-                st.success(
-                    f"✅ **Filter Applied Successfully!**\n\n"
-                    f"📊 Showing **{len(filtered)}** out of **{len(all_transactions)}** transactions\n\n"
-                    f"🗓️ Date Range: {start_md.strftime('%b %d, %Y')} → {end_md.strftime('%b %d, %Y')}\n\n"
-                    f"---\n\n"
-                    f"💰 Deposits: **${msg_deposits:,.2f}** ({msg_deposits_count} tx)\n\n"
-                    f"💸 Withdrawals: **${msg_withdrawals:,.2f}** ({msg_withdrawals_count} tx)\n\n"
-                    f"📊 Net Income: **${msg_deposits - msg_withdrawals:,.2f}**"
-                )
-                
-                # Show filter breakdown
-                if total_filtered_out > 0:
-                    with st.expander("📋 Filter Breakdown"):
-                        if filter_stats['date_filtered'] > 0:
-                            st.write(f"• Date filter removed: {filter_stats['date_filtered']} transactions")
-                        if filter_stats['amount_filtered'] > 0:
-                            st.write(f"• Amount filter removed: {filter_stats['amount_filtered']} transactions")
-                        if filter_stats['search_filtered'] > 0:
-                            st.write(f"• Search filter removed: {filter_stats['search_filtered']} transactions")
-                        if filter_stats['account_filtered'] > 0:
-                            st.write(f"• Account code filter removed: {filter_stats['account_filtered']} transactions")
-                
-                st.rerun()
-
-        with col_btn2:
-            if st.button("🔄 Reset Filter", disabled=filter_disabled, width='stretch'):
-                st.session_state.filtered_transactions = all_transactions
+                # Reset all filter settings when processing new statement
                 st.session_state.filter_active = False
-                # Increment reset counter to force widget recreation with default values
-                st.session_state.filter_reset_count += 1
-                # Clear filter state keys
+                st.session_state.filter_locked = False
+                st.session_state.filter_reset_count = 0  # Reset counter for new statement
                 if 'filter_start_date' in st.session_state:
                     del st.session_state.filter_start_date
                 if 'filter_end_date' in st.session_state:
@@ -3772,578 +3467,850 @@ if all_transactions:
                     del st.session_state.filter_account_index
                 if 'filter_stats' in st.session_state:
                     del st.session_state.filter_stats
-                st.info("🔄 Filter reset. Showing all transactions.")
-                st.rerun()
-        
-        with col_btn3:
-            if st.session_state.get('filter_active', False):
-                st.metric("Filtered", f"{len(st.session_state.get('filtered_transactions', []))} tx")
-            else:
-                st.metric("Total", f"{len(all_transactions)} tx")
-        
-        # Show active filter summary
-        if st.session_state.get('filter_active', False):
-            st.markdown("---")
-            
-            # Calculate totals for the summary
-            filtered_txs_sum = st.session_state.get('filtered_transactions', [])
-            filtered_active_sum = [t for t in filtered_txs_sum if not getattr(t, "is_excluded", False)]
-            summary_deposits = sum(t.amount for t in filtered_active_sum if t.amount > 0)
-            summary_withdrawals = sum(abs(t.amount) for t in filtered_active_sum if t.amount < 0)
-            summary_deposits_count = len([t for t in filtered_active_sum if t.amount > 0])
-            summary_withdrawals_count = len([t for t in filtered_active_sum if t.amount < 0])
-            
+    # =========================================================================
+    # PROFESSIONAL COMPREHENSIVE FILTER SYSTEM
+    # =========================================================================
+    # (Imports moved to top level)
+
+    all_transactions = st.session_state.get("all_transactions", [])
+
+    if all_transactions:
+        # Always show sub-summary if transactions exist
+        st.markdown("---")
+        opening_balance_val = st.session_state.get("opening_balance", 0.0) or 0.0
+        st.markdown("### Sub-summary / Transaction Breakdown")
+        with st.expander("📊 Statement Summaries / Transaction Breakdowns", expanded=True):
+            # Render Credit Card Summaries if available
+            cc_summaries = st.session_state.get("cc_summaries", [])
+            if cc_summaries:
+                for cc_entry in cc_summaries:
+                    st.markdown(f"**Credit Card Summary: {cc_entry['filename']}**")
+                    render_cc_summary(cc_entry['summary'])
+
+            summaries = st.session_state.get("statement_summaries", [])
+            if summaries:
+                for entry in summaries:
+                    # Adaptive title  — pick bank from meta if available
+                    bank_meta = st.session_state.get("meta", {})
+                    bank_name_display = str(bank_meta.get("bank", "BANK")).upper()
+                    render_chase_table(f"STATEMENT SUMMARY: {entry['filename']}", entry['df'])
+            elif not cc_summaries:
+                # Fallback for combined summary (only if no CC summary shown yet)
+                bank_meta = st.session_state.get("meta", {})
+                bank_name_display = str(bank_meta.get("bank", "BANK")).upper()
+                is_credit_card = "amex" in bank_name_display.lower() or "credit" in bank_name_display.lower()
+                summary_title = "CREDIT CARD SUMMARY" if is_credit_card else f"{bank_name_display} STATEMENT SUMMARY"
+                sub_summary_df = get_sub_summary(
+                    transactions=all_transactions,
+                    opening_balance=opening_balance_val,
+                    raw_text=st.session_state.get("raw_text", ""),
+                    bank_name=bank_name_display
+                )
+                render_chase_table(summary_title, sub_summary_df)
+
+        st.markdown("---")
+        st.header("🔍 Advanced Transaction Filter")
+        st.markdown("**Professional filtering system** - All filters work together to give you precise control")
+
+        # Extract all valid dates with full date information
+        parsed_dates = []
+        for tx in all_transactions:
+            if tx.date:
+                try:
+                    parsed_dates.append(datetime.strptime(tx.date, "%Y-%m-%d").date())
+                except:
+                    pass
+
+        if not parsed_dates:
+            st.warning("⚠️ No valid dates found in transactions.")
+        else:
+            # Get actual min and max dates from ALL uploaded statements (bank + credit card)
+            min_date = min(parsed_dates)
+            max_date = max(parsed_dates)
+
+            # Calculate first day of starting month and last day of ending month
+            first_day_of_start_month = min_date.replace(day=1)
+            last_day_of_end_month = max_date.replace(day=monthrange(max_date.year, max_date.month)[1])
+
+            # Store coverage dates in session state for reference
+            st.session_state.statement_coverage_start = min_date
+            st.session_state.statement_coverage_end = max_date
+
+            # Display coverage information prominently
             st.info(
-                f"🔍 **Active Filters:**\n\n"
-                f"📅 Dates: {st.session_state.filter_start_date.strftime('%b %d, %Y')} - {st.session_state.filter_end_date.strftime('%b %d, %Y')}\n\n"
-                f" Amount: ${st.session_state.filter_min_amount:,.2f} - ${st.session_state.filter_max_amount:,.2f}" +
-                (f"\n\n🔎 Search: '{st.session_state.filter_search_text}'" if st.session_state.filter_search_text else "") +
-                (f"\n\n📊 Account: {account_code_filter}" if account_code_filter != "All Account Codes" else "") +
-                f"\n\n---\n\n"
-                f"**📈 Filtered Results:**\n\n"
-                f"💰 Total Deposits: ${summary_deposits:,.2f} ({summary_deposits_count} transactions)\n\n"
-                f"💸 Total Withdrawals: ${summary_withdrawals:,.2f} ({summary_withdrawals_count} transactions)\n\n"
-                f"📊 Net Income: ${summary_deposits - summary_withdrawals:,.2f}"
+                f"📊 **Statement Coverage:** {min_date.strftime('%b %d, %Y')} → {max_date.strftime('%b %d, %Y')} "
+                f"({(max_date - min_date).days} days, {len(all_transactions)} total transactions)"
             )
 
-        
-# Dashboard (same UI as before)
-if "transactions" in st.session_state and st.session_state.transactions:
-    # ============================================
-    # FILTER STATUS BANNER (Always visible at top)
-    # ============================================
-    if st.session_state.get('filter_active', False):
-        # Calculate filtered totals for banner
-        filtered_txs = st.session_state.get('filtered_transactions', [])
-        filtered_active = [t for t in filtered_txs if not getattr(t, "is_excluded", False)]
-        filtered_deposits = sum(t.amount for t in filtered_active if t.amount > 0)
-        filtered_withdrawals = sum(abs(t.amount) for t in filtered_active if t.amount < 0)
-        
-        filter_banner_cols = st.columns([4, 1])
-        with filter_banner_cols[0]:
-            lock_text = " | 🔒 LOCKED" if st.session_state.get('filter_locked', False) else ""
+            # Initialize filter state if not present
+            if 'filter_active' not in st.session_state:
+                st.session_state.filter_active = False
+                st.session_state.filter_locked = False
+
+            # Initialize reset counter for forcing widget refresh
+            if 'filter_reset_count' not in st.session_state:
+                st.session_state.filter_reset_count = 0
+
+            # Show lock status
+            lock_col1, lock_col2 = st.columns([3, 1])
+            with lock_col1:
+                if st.session_state.get('filter_locked', False):
+                    st.warning("🔒 **Filter is LOCKED** - Settings preserved for printing/exporting")
+            with lock_col2:
+                if st.session_state.get('filter_locked', False):
+                    if st.button("🔓 Unlock Filter"):
+                        st.session_state.filter_locked = False
+                        st.success("Filter unlocked! You can now adjust settings.")
+                        st.rerun()
+                else:
+                    if st.button("🔒 Lock Filter"):
+                        st.session_state.filter_locked = True
+                        st.success("Filter locked! Settings preserved for printing/exporting.")
+                        st.rerun()
+
+            # Disable filter controls if locked
+            filter_disabled = st.session_state.get('filter_locked', False)
+
+            # ===== DATE FILTER =====
+            st.subheader("📅 Date Range")
+            col_date1, col_date2 = st.columns(2)
+
+            # Use reset counter in widget keys to force recreation on reset
+            reset_suffix = f"_{st.session_state.filter_reset_count}"
+
+            with col_date1:
+                start_md = st.date_input(
+                    "Start Date",
+                    value=first_day_of_start_month,
+                    min_value=first_day_of_start_month,
+                    max_value=last_day_of_end_month,
+                    key=f"filter_start_md{reset_suffix}",
+                    disabled=filter_disabled
+                )
+
+            with col_date2:
+                end_md = st.date_input(
+                    "End Date",
+                    value=last_day_of_end_month,
+                    min_value=first_day_of_start_month,
+                    max_value=last_day_of_end_month,
+                    key=f"filter_end_md{reset_suffix}",
+                    disabled=filter_disabled
+                )
+
+            # ===== AMOUNT FILTER =====
+            st.subheader("💰 Amount Range")
+            col_amt1, col_amt2 = st.columns(2)
+
+            # Get min/max amounts from transactions
+            all_amounts = [abs(tx.amount) for tx in all_transactions if tx.amount]
+            min_amount_possible = min(all_amounts) if all_amounts else 0.0
+            max_amount_possible = max(all_amounts) if all_amounts else 10000.0
+
+            with col_amt1:
+                min_amount_filter = st.number_input(
+                    "Minimum Amount ($)",
+                    min_value=0.0,
+                    max_value=max_amount_possible,
+                    value=st.session_state.get('filter_min_amount', 0.0),
+                    step=10.0,
+                    key="filter_min_amt",
+                    disabled=filter_disabled
+                )
+
+            with col_amt2:
+                max_amount_filter = st.number_input(
+                    "Maximum Amount ($)",
+                    min_value=0.0,
+                    max_value=max_amount_possible * 2,  # Allow some overhead
+                    value=st.session_state.get('filter_max_amount', max_amount_possible),
+                    step=10.0,
+                    key="filter_max_amt",
+                    disabled=filter_disabled
+                )
+
+            # ===== VENDOR/KEYWORD SEARCH =====
+            st.subheader("🔎 Search by Vendor or Keyword")
+            search_text = st.text_input(
+                "Enter vendor name or keyword (searches in vendor, description, and transaction details)",
+                value=st.session_state.get('filter_search_text', ""),
+                placeholder="e.g., Amazon, Stripe, Check, etc.",
+                key="filter_search",
+                disabled=filter_disabled
+            )
+
+            # ===== ACCOUNT CODE FILTER =====
+            st.subheader("📊 Account Code Filter")
+
+            # Load all account codes
+            # (Imports moved to top level)
+            all_account_options = {"All Account Codes": "ALL"}
+            account_file = Path(__file__).parent / 'account_keywords.json'
+            try:
+                with open(account_file, 'r') as f:
+                    data = json.load(f)
+                    for acc_code, acc_details in sorted(data.items()):
+                        all_account_options[f"{acc_code} · {acc_details['name']}"] = acc_code
+            except Exception as e:
+                st.warning(f"⚠️ Could not load account codes: {e}")
+
+            account_code_filter = st.selectbox(
+                "Filter by Account Code:",
+                options=list(all_account_options.keys()),
+                index=st.session_state.get('filter_account_index', 0),
+                key="filter_account_code",
+                disabled=filter_disabled
+            )
+
+            # ===== APPLY FILTER BUTTON =====
+            st.markdown("---")
+            col_btn1, col_btn2, col_btn3 = st.columns([2, 2, 2])
+
+            with col_btn1:
+                if st.button("✅ Apply Filter", type="primary", disabled=filter_disabled, width='stretch'):
+                    # Store filter settings in session state
+                    st.session_state.filter_start_date = start_md
+                    st.session_state.filter_end_date = end_md
+                    st.session_state.filter_min_amount = min_amount_filter
+                    st.session_state.filter_max_amount = max_amount_filter
+                    st.session_state.filter_search_text = search_text
+                    st.session_state.filter_account_index = list(all_account_options.keys()).index(account_code_filter)
+
+                    # Apply all filters
+                    filtered = []
+                    filter_stats = {
+                        'date_filtered': 0,
+                        'amount_filtered': 0,
+                        'search_filtered': 0,
+                        'account_filtered': 0
+                    }
+
+                    for tx in all_transactions:
+                        # DATE FILTER
+                        if tx.date:
+                            try:
+                                tx_date = datetime.strptime(tx.date, "%Y-%m-%d").date()
+                                if not (start_md <= tx_date <= end_md):
+                                    filter_stats['date_filtered'] += 1
+                                    continue
+                            except:
+                                continue
+
+                        # AMOUNT FILTER
+                        tx_abs_amount = abs(tx.amount)
+                        if tx_abs_amount < min_amount_filter or tx_abs_amount > max_amount_filter:
+                            filter_stats['amount_filtered'] += 1
+                            continue
+
+                        # SEARCH FILTER
+                        if search_text.strip():
+                            search_lower = search_text.lower().strip()
+                            searchable_text = f"{tx.vendor} {tx.description} {tx.raw_line}".lower()
+                            if search_lower not in searchable_text:
+                                filter_stats['search_filtered'] += 1
+                                continue
+
+                        # ACCOUNT CODE FILTER
+                        if account_code_filter != "All Account Codes":
+                            selected_account_code = all_account_options[account_code_filter]
+                            tx_account_code = getattr(tx, 'account_code', None)
+                            if tx_account_code != selected_account_code:
+                                filter_stats['account_filtered'] += 1
+                                continue
+
+                        # Transaction passed all filters
+                        filtered.append(tx)
+
+                    st.session_state.filtered_transactions = filtered
+                    st.session_state.filter_active = True
+                    st.session_state.filter_stats = filter_stats
+
+                    # Calculate totals for success message
+                    filtered_active_msg = [t for t in filtered if not getattr(t, "is_excluded", False)]
+                    msg_deposits = sum(t.amount for t in filtered_active_msg if t.amount > 0)
+                    msg_withdrawals = sum(abs(t.amount) for t in filtered_active_msg if t.amount < 0)
+                    msg_deposits_count = len([t for t in filtered_active_msg if t.amount > 0])
+                    msg_withdrawals_count = len([t for t in filtered_active_msg if t.amount < 0])
+
+                    # Success message with details
+                    total_filtered_out = len(all_transactions) - len(filtered)
+                    st.success(
+                        f"✅ **Filter Applied Successfully!**\n\n"
+                        f"📊 Showing **{len(filtered)}** out of **{len(all_transactions)}** transactions\n\n"
+                        f"🗓️ Date Range: {start_md.strftime('%b %d, %Y')} → {end_md.strftime('%b %d, %Y')}\n\n"
+                        f"---\n\n"
+                        f"💰 Deposits: **${msg_deposits:,.2f}** ({msg_deposits_count} tx)\n\n"
+                        f"💸 Withdrawals: **${msg_withdrawals:,.2f}** ({msg_withdrawals_count} tx)\n\n"
+                        f"📊 Net Income: **${msg_deposits - msg_withdrawals:,.2f}**"
+                    )
+
+                    # Show filter breakdown
+                    if total_filtered_out > 0:
+                        with st.expander("📋 Filter Breakdown"):
+                            if filter_stats['date_filtered'] > 0:
+                                st.write(f"• Date filter removed: {filter_stats['date_filtered']} transactions")
+                            if filter_stats['amount_filtered'] > 0:
+                                st.write(f"• Amount filter removed: {filter_stats['amount_filtered']} transactions")
+                            if filter_stats['search_filtered'] > 0:
+                                st.write(f"• Search filter removed: {filter_stats['search_filtered']} transactions")
+                            if filter_stats['account_filtered'] > 0:
+                                st.write(f"• Account code filter removed: {filter_stats['account_filtered']} transactions")
+
+                    st.rerun()
+
+            with col_btn2:
+                if st.button("🔄 Reset Filter", disabled=filter_disabled, width='stretch'):
+                    st.session_state.filtered_transactions = all_transactions
+                    st.session_state.filter_active = False
+                    # Increment reset counter to force widget recreation with default values
+                    st.session_state.filter_reset_count += 1
+                    # Clear filter state keys
+                    if 'filter_start_date' in st.session_state:
+                        del st.session_state.filter_start_date
+                    if 'filter_end_date' in st.session_state:
+                        del st.session_state.filter_end_date
+                    if 'filter_min_amount' in st.session_state:
+                        del st.session_state.filter_min_amount
+                    if 'filter_max_amount' in st.session_state:
+                        del st.session_state.filter_max_amount
+                    if 'filter_search_text' in st.session_state:
+                        del st.session_state.filter_search_text
+                    if 'filter_account_index' in st.session_state:
+                        del st.session_state.filter_account_index
+                    if 'filter_stats' in st.session_state:
+                        del st.session_state.filter_stats
+                    st.info("🔄 Filter reset. Showing all transactions.")
+                    st.rerun()
+
+            with col_btn3:
+                if st.session_state.get('filter_active', False):
+                    st.metric("Filtered", f"{len(st.session_state.get('filtered_transactions', []))} tx")
+                else:
+                    st.metric("Total", f"{len(all_transactions)} tx")
+
+            # Show active filter summary
+            if st.session_state.get('filter_active', False):
+                st.markdown("---")
+
+                # Calculate totals for the summary
+                filtered_txs_sum = st.session_state.get('filtered_transactions', [])
+                filtered_active_sum = [t for t in filtered_txs_sum if not getattr(t, "is_excluded", False)]
+                summary_deposits = sum(t.amount for t in filtered_active_sum if t.amount > 0)
+                summary_withdrawals = sum(abs(t.amount) for t in filtered_active_sum if t.amount < 0)
+                summary_deposits_count = len([t for t in filtered_active_sum if t.amount > 0])
+                summary_withdrawals_count = len([t for t in filtered_active_sum if t.amount < 0])
+
+                st.info(
+                    f"🔍 **Active Filters:**\n\n"
+                    f"📅 Dates: {st.session_state.filter_start_date.strftime('%b %d, %Y')} - {st.session_state.filter_end_date.strftime('%b %d, %Y')}\n\n"
+                    f" Amount: ${st.session_state.filter_min_amount:,.2f} - ${st.session_state.filter_max_amount:,.2f}" +
+                    (f"\n\n🔎 Search: '{st.session_state.filter_search_text}'" if st.session_state.filter_search_text else "") +
+                    (f"\n\n📊 Account: {account_code_filter}" if account_code_filter != "All Account Codes" else "") +
+                    f"\n\n---\n\n"
+                    f"**📈 Filtered Results:**\n\n"
+                    f"💰 Total Deposits: ${summary_deposits:,.2f} ({summary_deposits_count} transactions)\n\n"
+                    f"💸 Total Withdrawals: ${summary_withdrawals:,.2f} ({summary_withdrawals_count} transactions)\n\n"
+                    f"📊 Net Income: ${summary_deposits - summary_withdrawals:,.2f}"
+                )
+
+
+    # Dashboard (same UI as before)
+    if "transactions" in st.session_state and st.session_state.transactions:
+        # ============================================
+        # FILTER STATUS BANNER (Always visible at top)
+        # ============================================
+        if st.session_state.get('filter_active', False):
+            # Calculate filtered totals for banner
+            filtered_txs = st.session_state.get('filtered_transactions', [])
+            filtered_active = [t for t in filtered_txs if not getattr(t, "is_excluded", False)]
+            filtered_deposits = sum(t.amount for t in filtered_active if t.amount > 0)
+            filtered_withdrawals = sum(abs(t.amount) for t in filtered_active if t.amount < 0)
+
+            filter_banner_cols = st.columns([4, 1])
+            with filter_banner_cols[0]:
+                lock_text = " | 🔒 LOCKED" if st.session_state.get('filter_locked', False) else ""
+                banner_html = f"""
+                    <div style="background-color: #4CAF50; color: white; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
+                        <h3 style="margin: 0; color: white;">🔍 FILTER ACTIVE</h3>
+                        <p style="margin: 5px 0 0 0; color: white;">
+                            Showing <strong>{len(st.session_state.get('filtered_transactions', []))}</strong> of <strong>{len(st.session_state.get('all_transactions', []))}</strong> transactions | 
+                            {st.session_state.get('filter_start_date', date.today()).strftime('%b %d, %Y')} to {st.session_state.get('filter_end_date', date.today()).strftime('%b %d, %Y')}{lock_text}
+                        </p>
+                        <p style="margin: 5px 0 0 0; color: white; font-size: 0.9em;">
+                            💰 Deposits: <strong>${filtered_deposits:,.2f}</strong> | 
+                            💸 Withdrawals: <strong>${filtered_withdrawals:,.2f}</strong> | 
+                            📊 Net: <strong>${filtered_deposits - filtered_withdrawals:,.2f}</strong>
+                        </p>
+                    </div>
+                """
+                st.markdown(banner_html, unsafe_allow_html=True)
+            with filter_banner_cols[1]:
+                if st.button("📊 View All", key="view_all_banner"):
+                    st.session_state.filter_active = False
+                    st.session_state.filtered_transactions = st.session_state.all_transactions
+                    st.rerun()
+        else:
+            # Calculate totals for all transactions
+            all_txs = st.session_state.get('all_transactions', [])
+            all_active = [t for t in all_txs if not getattr(t, "is_excluded", False)]
+            all_deposits = sum(t.amount for t in all_active if t.amount > 0)
+            all_withdrawals = sum(abs(t.amount) for t in all_active if t.amount < 0)
+
             banner_html = f"""
-                <div style="background-color: #4CAF50; color: white; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
-                    <h3 style="margin: 0; color: white;">🔍 FILTER ACTIVE</h3>
+                <div style="background-color: #2196F3; color: white; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
+                    <h3 style="margin: 0; color: white;">📊 ALL TRANSACTIONS</h3>
                     <p style="margin: 5px 0 0 0; color: white;">
-                        Showing <strong>{len(st.session_state.get('filtered_transactions', []))}</strong> of <strong>{len(st.session_state.get('all_transactions', []))}</strong> transactions | 
-                        {st.session_state.get('filter_start_date', date.today()).strftime('%b %d, %Y')} to {st.session_state.get('filter_end_date', date.today()).strftime('%b %d, %Y')}{lock_text}
+                        Showing all <strong>{len(all_txs)}</strong> transactions from uploaded statements
                     </p>
                     <p style="margin: 5px 0 0 0; color: white; font-size: 0.9em;">
-                        💰 Deposits: <strong>${filtered_deposits:,.2f}</strong> | 
-                        💸 Withdrawals: <strong>${filtered_withdrawals:,.2f}</strong> | 
-                        📊 Net: <strong>${filtered_deposits - filtered_withdrawals:,.2f}</strong>
+                        💰 Deposits: <strong>${all_deposits:,.2f}</strong> | 
+                        💸 Withdrawals: <strong>${all_withdrawals:,.2f}</strong> | 
+                        📊 Net: <strong>${all_deposits - all_withdrawals:,.2f}</strong>
                     </p>
                 </div>
             """
             st.markdown(banner_html, unsafe_allow_html=True)
-        with filter_banner_cols[1]:
-            if st.button("📊 View All", key="view_all_banner"):
-                st.session_state.filter_active = False
-                st.session_state.filtered_transactions = st.session_state.all_transactions
-                st.rerun()
-    else:
-        # Calculate totals for all transactions
-        all_txs = st.session_state.get('all_transactions', [])
-        all_active = [t for t in all_txs if not getattr(t, "is_excluded", False)]
-        all_deposits = sum(t.amount for t in all_active if t.amount > 0)
-        all_withdrawals = sum(abs(t.amount) for t in all_active if t.amount < 0)
-        
-        banner_html = f"""
-            <div style="background-color: #2196F3; color: white; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
-                <h3 style="margin: 0; color: white;">📊 ALL TRANSACTIONS</h3>
-                <p style="margin: 5px 0 0 0; color: white;">
-                    Showing all <strong>{len(all_txs)}</strong> transactions from uploaded statements
-                </p>
-                <p style="margin: 5px 0 0 0; color: white; font-size: 0.9em;">
-                    💰 Deposits: <strong>${all_deposits:,.2f}</strong> | 
-                    💸 Withdrawals: <strong>${all_withdrawals:,.2f}</strong> | 
-                    📊 Net: <strong>${all_deposits - all_withdrawals:,.2f}</strong>
-                </p>
-            </div>
-        """
-        st.markdown(banner_html, unsafe_allow_html=True)
-    
-    transactions: List[Transaction] = get_active_transactions()
+
+        transactions: List[Transaction] = get_active_transactions()
 
 
-    rg = ReportGenerator()
-    stats = rg.generate_summary_statistics(transactions)
-    cur = st.session_state.currency
+        rg = ReportGenerator()
+        stats = rg.generate_summary_statistics(transactions)
+        cur = st.session_state.currency
 
-    # Get the opening balance setting and value
-    # Note: include_opening_balance is a checkbox in the sidebar/upload area
-    # We should use st.session_state values if available
-    include_ob = st.session_state.get('include_opening_balance', False)
-    ob_val = st.session_state.get('opening_balance', 0.0) if include_ob else 0.0
+        # Get the opening balance setting and value
+        include_ob = st.session_state.get('include_opening_balance', False)
+        ob_val = st.session_state.get('opening_balance', 0.0) or 0.0
 
-    # ALWAYS calculate from filtered transactions to respect date filter
-    # This ensures metrics update based on active filter
-    computed_deposits = sum(t.amount for t in transactions if t.amount > 0 and not is_tx_excluded(t))
-    computed_withdrawals = sum(-t.amount for t in transactions if t.amount < 0 and not is_tx_excluded(t))
-    
-    # Update stats with filtered transaction data
-    stats['Total Deposit Amount'] = float(computed_deposits)
-    stats['Total Withdrawal Amount'] = float(computed_withdrawals)
-    stats['Net Income'] = float(computed_deposits - computed_withdrawals)
-    
-    # Count transactions from filtered set
-    stats['Total Deposits'] = len([t for t in transactions if t.amount > 0 and not is_tx_excluded(t)])
-    stats['Total Withdrawals'] = len([t for t in transactions if t.amount < 0 and not is_tx_excluded(t)])
-    stats['Total Transactions'] = len(transactions)
-    
-    # Now display metrics with the filtered stats
-    render_chase_header("SUMMARY")
-    
-    # Show filter status in header if active
-    if st.session_state.get('filter_active', False):
-        st.caption(f"📊 Statistics based on filtered data ({len(transactions)} transactions)")
-    else:
-        st.caption(f"📊 Statistics based on all transactions ({len(transactions)} transactions)")
-    
-    c1, c2, c3, c4 = st.columns(4)
+        # ALWAYS calculate from filtered transactions to respect date filter
+        computed_deposits = sum(t.amount for t in transactions if t.amount > 0 and not is_tx_excluded(t))
+        computed_withdrawals = sum(-t.amount for t in transactions if t.amount < 0 and not is_tx_excluded(t))
 
-    c1.metric(
-        "Total Deposits",
-        f"{cur} {stats['Total Deposit Amount']:,.2f}",
-        f"+{stats['Total Deposits']} tx"
-    )
-    c2.metric(
-        "Total Withdrawals",
-        f"{cur} {stats['Total Withdrawal Amount']:,.2f}",
-        f"+{stats['Total Withdrawals']} tx"
-    )
-    c3.metric(
-        "Net Income",
-        f"{cur} {stats['Net Income']:,.2f}"
-    )
-    c4.metric(
-        "Transactions",
-        stats['Total Transactions']
-    )
-    
+        # Include opening balance in deposits total if available
+        deposits_total_display = computed_deposits + ob_val
 
-    
+        # Update stats with filtered transaction data
+        stats['Total Deposit Amount'] = float(deposits_total_display)
+        stats['Total Withdrawal Amount'] = float(computed_withdrawals)
+        stats['Net Income'] = float(deposits_total_display - computed_withdrawals)
 
+        # Count transactions from filtered set
+        stats['Total Deposits'] = len([t for t in transactions if t.amount > 0 and not is_tx_excluded(t)])
+        stats['Total Withdrawals'] = len([t for t in transactions if t.amount < 0 and not is_tx_excluded(t)])
+        stats['Total Transactions'] = len(transactions)
 
-    # Toggle to hide the Schedule C tab from the frontend while keeping
-    # all Schedule C backend logic intact.
-    SHOW_SCHEDULE_C = False
+        # Now display metrics with the filtered stats
+        render_chase_header("SUMMARY")
 
-    base_labels = ["💰 Deposits", "💸 Withdrawals", "📈 P&L", "📋 All Transactions"]
-    # Insert Schedule C tab before the final P&L (Account Codes) tab when enabled
-    if SHOW_SCHEDULE_C:
-        labels = base_labels + ["📄 Schedule C", "📊 P&L (Account Codes)", "⚙️ Custom Rules"]
-    else:
-        labels = base_labels + ["📊 P&L (Account Codes)", "⚙️ Custom Rules"]
-
-    # Use query params to preserve active tab across reruns
-    try:
-        query_params = st.query_params
-        default_tab = int(query_params.get("tab", 0))
-    except:
-        default_tab = 0
-    
-    # Use selectbox instead of tabs for better state control
-    selected_tab = st.selectbox(
-        "Select View:",
-        range(len(labels)),
-        format_func=lambda x: labels[x],
-        index=default_tab,
-        key="active_tab_selector"
-    )
-    
-    # Update query param when tab changes
-    st.query_params["tab"] = str(selected_tab)
-    
-    rg = ReportGenerator()
-
-    if selected_tab == 0:  # Deposits tab
-        st.subheader("All Deposits Summary (by Source/Vendor)")
-        # Regenerate deposits summary with filtered transactions
-        df = rg.generate_deposits_summary(transactions)
-        if df is None or df.empty:
-            st.info("No deposits found.")
+        # Show filter status in header if active
+        if st.session_state.get('filter_active', False):
+            st.caption(f"📊 Statistics based on filtered data ({len(transactions)} transactions)")
         else:
-            st.dataframe(df, width='stretch', hide_index=True)
-            st.subheader("👉 Customer Transaction Details")
-            deps = [t for t in st.session_state.get(
-                "filtered_transactions", st.session_state.transactions
-            ) if t.amount > 0]
-            grouped = {}
-            for t in deps:
-                key = t.vendor or "UNKNOWN"
-                grouped.setdefault(key, []).append(t)
-            for vendor, items in sorted(grouped.items(), key=lambda x:(-len(x[1]), x[0])):
-                subtotal = sum(i.amount for i in items)
-                cnt = len(items)
-                with st.expander(f"{vendor}"):
-                    details = pd.DataFrame([{
-                        "Date": f"~~{it.date}~~" if is_tx_excluded(it) else it.date,
-                        "Amount": f"{cur} {it.amount:,.2f}",
-                        "Description": f"~~{it.description}~~" if is_tx_excluded(it) else it.description,
-                        "Needs Review": "⚠ Yes" if it.needs_review else "✅ No",
-                        "Status": "🚫 Excluded" if is_tx_excluded(it) else "✅ Active"
-                    } for it in items])
-                    st.dataframe(details, width='stretch', hide_index=True)
+            st.caption(f"📊 Statistics based on all transactions ({len(transactions)} transactions)")
 
-    elif selected_tab == 1:  # Withdrawals tab
-        st.subheader("All Withdrawals Summary (by Vendor)")
-        # Regenerate withdrawals summary with filtered transactions
-        df = rg.generate_withdrawals_summary(transactions)
-        if df is None or df.empty:
-            st.info("No withdrawals found.")
-        else:
-            st.dataframe(df, width='stretch', hide_index=True)
-            st.subheader("👉 Vendor Transaction Details")
-            wds = [t for t in st.session_state.get(
-                "filtered_transactions", st.session_state.transactions
-            ) if t.amount < 0]
-            grouped = {}
-            for t in wds:
-                key = t.vendor or "UNKNOWN"
-                grouped.setdefault(key, []).append(t)
-            for vendor, items in sorted(grouped.items(), key=lambda x:(-len(x[1]), x[0])):
-                subtotal = sum(abs(i.amount) for i in items)
-                cnt = len(items)
-                with st.expander(f"{vendor}"):
-                    details = pd.DataFrame([{
-                    "Date": f"~~{it.date}~~" if is_tx_excluded(it) else it.date,
-                    "Amount": f"{cur} {abs(it.amount):,.2f}",
-                    "Description": f"~~{it.description}~~" if is_tx_excluded(it) else it.description,
-                    "Needs Review": "⚠ Yes" if it.needs_review else "✅ No",
-                    "Status": "🚫 Excluded" if is_tx_excluded(it) else "✅ Active"
-                } for it in items])
-                    st.dataframe(details, width='stretch', hide_index=True)
+        c1, c2, c3, c4 = st.columns(4)
 
-    elif selected_tab == 2:  # P&L tab
-        st.subheader("Profit & Loss")
-        # Regenerate P&L with filtered transactions
-        filtered_pl_df = rg.generate_pl_report(get_active_transactions())
-        st.dataframe(filtered_pl_df, width='stretch', hide_index=True)
-
-    elif selected_tab == 3:  # All Transactions tab
-        st.subheader("All Transactions")
-        all_df = pd.DataFrame([{
-            "Date": f"~~{t.date}~~" if is_tx_excluded(t) else (t.date or ""),
-            "Type": t.transaction_type,
-            "Vendor": f"~~{t.vendor}~~" if is_tx_excluded(t) else t.vendor,
-            "Amount": f"{cur} {t.amount:,.2f}",
-            "Description": f"~~{t.description}~~" if is_tx_excluded(t) else t.description,
-            "Status": "🚫 Excluded" if is_tx_excluded(t) else "✅ Active"
-        } for t in transactions])
-        st.dataframe(all_df, width='stretch', hide_index=True)
-    
-    elif SHOW_SCHEDULE_C and selected_tab == 4:  # Schedule C tab
-            st.subheader("📄 Schedule C")
-
-            schedule_c_df = st.session_state.get("schedule_c_df")
-
-            if schedule_c_df is None or schedule_c_df.empty:
-                st.info("No Schedule C data available.")
-            else:
-                categorized_transactions = st.session_state.get("categorized_transactions", [])
-                transactions = st.session_state.get("transactions", [])
-
-                from datetime import datetime
-                import pandas as pd
-                import re
-
-                cur = "USD"
-
-                # ===============================
-                # IRS SCHEDULE C VIEW
-                # ===============================
-                from schedule_c_categorizer import ScheduleCCategorizer
-                sc_categorizer = ScheduleCCategorizer()
-
-                # ---- Generate Schedule C report
-                schedule_c_text = sc_categorizer.generate_schedule_c_report(categorized_transactions)
-                st.subheader("📄 IRS Schedule C Report")
-                st.code(schedule_c_text)
-
-                st.subheader("🧾 IRS Schedule C Summary")
-                st.dataframe(schedule_c_df, width='stretch', hide_index=True)
-
-                if not categorized_transactions:
-                    st.stop()
-
-                category_groups = {}
-
-                for tx, cat in categorized_transactions:
-                    if cat.is_excluded or not cat.line_number:
-                        continue
-                    key = (cat.line_number, cat.tax_code, cat.category_name)
-                    category_groups.setdefault(key, []).append((tx, cat))
-
-                for (line, code, name), items in sorted(
-                    category_groups.items(),
-                    key=lambda x: (
-                        float(re.search(r'(\d+)', x[0][0]).group(1))
-                        if re.search(r'(\d+)', x[0][0]) else 999
-                    )
-                ):
-                    subtotal = sum(abs(tx.amount) for tx, _ in items)
-                    count = len(items)
-
-                    label = f"{line} · {name} — {cur} {subtotal:,.2f} ({count} tx)"
-
-                    with st.expander(label):
-                        df = pd.DataFrame([{
-                            "Date": tx.date or "",
-                            "Vendor": tx.vendor or "",
-                            "Amount": f"{cur} {abs(tx.amount):,.2f}",
-                            "Description": tx.description,
-                            "Tax Code": cat.tax_code,
-                            "Needs Review": "⚠ Yes" if tx.needs_review else "✅ No"
-                        } for tx, cat in items])
-
-                        st.dataframe(df, width='stretch', hide_index=True)
-
-    elif selected_tab == (5 if SHOW_SCHEDULE_C else 4):  # P&L Account Codes tab
-        st.subheader("📊 Profit & Loss (Account Codes)")
-        reapply_custom_rules()
-        # Build categorized list that matches filtered transactions
-        all_categorized = st.session_state.categorized_transactions
-        filtered_transactions = st.session_state.get(
-            "filtered_transactions",
-            st.session_state.transactions
+        c1.metric(
+            "Total Deposits",
+            f"{cur} {stats['Total Deposit Amount']:,.2f}",
+            f"+{stats['Total Deposits']} tx"
+        )
+        c2.metric(
+            "Total Withdrawals",
+            f"{cur} {stats['Total Withdrawal Amount']:,.2f}",
+            f"+{stats['Total Withdrawals']} tx"
+        )
+        c3.metric(
+            "Net Income",
+            f"{cur} {stats['Net Income']:,.2f}"
+        )
+        c4.metric(
+            "Transactions",
+            stats['Total Transactions']
         )
 
-        # Use all transactions (including excluded ones)
-        # We'll handle excluded status in the display logic
-        # Build categorized list that matches date-filtered transactions
-        filtered_keys = {
-            (t.date, t.description, t.amount)
-            for t in filtered_transactions
-        }
-
-        categorized_transactions = [
-            (tx, cat)
-            for tx, cat in all_categorized
-            if (tx.date, tx.description, tx.amount) in filtered_keys
-        ]
 
 
 
-        if not categorized_transactions or not transactions:
-            st.info("No transaction data available for P&L report.")
+
+        # Toggle to hide the Schedule C tab from the frontend while keeping
+        # all Schedule C backend logic intact.
+        SHOW_SCHEDULE_C = False
+
+        base_labels = ["💰 Deposits", "💸 Withdrawals", "📈 P&L", "📋 All Transactions"]
+        # Insert Schedule C tab before the final P&L (Account Codes) tab when enabled
+        if SHOW_SCHEDULE_C:
+            labels = base_labels + ["📄 Schedule C", "📊 P&L (Account Codes)", "⚙️ Custom Rules"]
         else:
-            from datetime import datetime
-            import pandas as pd
-            from schedule_c_categorizer import ScheduleCCategorizer
+            labels = base_labels + ["📊 P&L (Account Codes)", "⚙️ Custom Rules"]
 
-            sc_categorizer = ScheduleCCategorizer()
-            cur = "USD"
+        # Use query params to preserve active tab across reruns
+        try:
+            query_params = st.query_params
+            default_tab = int(query_params.get("tab", 0))
+        except:
+            default_tab = 0
 
-            # ---- Robust period detection from date filter or min → max date
-            # Check if user has applied a date filter
-            if st.session_state.get('filter_active', False) and 'filter_start_date' in st.session_state and 'filter_end_date' in st.session_state:
-                # Use the EXACT filtered dates (don't expand to full months when filter is active)
-                start = st.session_state.filter_start_date
-                end = st.session_state.filter_end_date
-                # Format: "Jan 15, 2025 - Mar 20, 2025" (exact dates from filter)
-                period_input = f"{start.strftime('%b %d, %Y')} - {end.strftime('%b %d, %Y')}"
-            elif "filter_start_md" in st.session_state and "filter_end_md" in st.session_state:
-                # Use the date picker values (when filter UI is present but not applied)
-                start = st.session_state.filter_start_md
-                end = st.session_state.filter_end_md
-                # Get first day of starting month and last day of ending month
-                from calendar import monthrange
-                first_day_of_month = start.replace(day=1)
-                last_day_of_month = end.replace(day=monthrange(end.year, end.month)[1])
-                # Format: "Jan 01, 2025 - Dec 31, 2025"
-                period_input = f"{first_day_of_month.strftime('%b %d, %Y')} - {last_day_of_month.strftime('%b %d, %Y')}"
+        # Use selectbox instead of tabs for better state control
+        selected_tab = st.selectbox(
+            "Select View:",
+            range(len(labels)),
+            format_func=lambda x: labels[x],
+            index=default_tab,
+            key="active_tab_selector"
+        )
+
+        # Update query param when tab changes
+        st.query_params["tab"] = str(selected_tab)
+
+        def clean_vendor_display(name):
+            n = name.split('*')[0].split('.')[0].strip().upper()
+            # Common name maps
+            if "AMAZON" in n: return "AMAZON"
+            if "CHASE" in n: return "CHASE"
+            if "STRIPE" in n: return "STRIPE"
+            if "UPWORK" in n: return "UPWORK"
+            if "FIDELITY" in n: return "FIDELITY"
+            return n or name
+
+        rg = ReportGenerator()
+
+        if selected_tab == 0:  # Deposits tab
+            st.subheader("All Deposits Summary (by Source/Vendor)")
+            # Regenerate deposits summary with filtered transactions
+            df = rg.generate_deposits_summary(transactions)
+            if df is None or df.empty:
+                st.info("No deposits found.")
             else:
-                # Fall back to detecting from transactions
-                date_objs = []
-                for tx in transactions:
-                    if tx.date:
-                        try:
-                            date_objs.append(datetime.strptime(tx.date, "%Y-%m-%d"))
-                        except:
-                            pass
+                st.dataframe(df, width='stretch', hide_index=True)
+                st.subheader("👉 Customer Transaction Details")
 
-                if date_objs:
-                    start = min(date_objs)
-                    end = max(date_objs)
-                    # Get first day of starting month and last day of ending month
-                    from calendar import monthrange
-                    first_day_of_month = start.replace(day=1)
-                    last_day_of_month = end.replace(day=monthrange(end.year, end.month)[1])
-                    period_input = f"{first_day_of_month.strftime('%b %d, %Y')} - {last_day_of_month.strftime('%b %d, %Y')}"
+                # Show opening balance at the top if available
+                if ob_val and ob_val > 0:
+                    with st.expander(f"🏛️ Opening Balance — {cur} {ob_val:,.2f}", expanded=False):
+                        st.markdown(
+                            f"| Field | Value |\n"
+                            f"|---|---|\n"
+                            f"| **Opening Balance** | {cur} {ob_val:,.2f} |\n"
+                            f"| **Source** | Bank Statement Beginning Balance |"
+                        )
+
+                deps = [t for t in st.session_state.get(
+                    "filtered_transactions", st.session_state.transactions
+                ) if t.amount > 0]
+                grouped = {}
+                for t in deps:
+                    key = t.vendor or "UNKNOWN"
+                    grouped.setdefault(key, []).append(t)
+
+                for vendor, items in sorted(grouped.items(), key=lambda x:(-len(x[1]), x[0])):
+                    subtotal = sum(i.amount for i in items)
+                    cnt = len(items)
+                    display_vendor = clean_vendor_display(vendor)
+                    with st.expander(f"💰 {display_vendor}  ·  {cur} {subtotal:,.2f}  ({cnt} tx)"):
+                        details = pd.DataFrame([{
+                            "Date": f"~~{it.date}~~" if is_tx_excluded(it) else it.date,
+                            "Amount": f"{cur} {it.amount:,.2f}",
+                            "Description": f"~~{it.description}~~" if is_tx_excluded(it) else it.description,
+                            "Needs Review": "⚠ Yes" if it.needs_review else "✅ No",
+                            "Status": "🚫 Excluded" if is_tx_excluded(it) else "✅ Active"
+                        } for it in items])
+                        st.dataframe(details, width='stretch', hide_index=True)
+
+        elif selected_tab == 1:  # Withdrawals tab
+            st.subheader("All Withdrawals Summary (by Vendor)")
+            # Regenerate withdrawals summary with filtered transactions
+            df = rg.generate_withdrawals_summary(transactions)
+            if df is None or df.empty:
+                st.info("No withdrawals found.")
+            else:
+                st.dataframe(df, width='stretch', hide_index=True)
+                st.subheader("👉 Vendor Transaction Details")
+                wds = [t for t in st.session_state.get(
+                    "filtered_transactions", st.session_state.transactions
+                ) if t.amount < 0]
+                grouped = {}
+                for t in wds:
+                    key = t.vendor or "UNKNOWN"
+                    grouped.setdefault(key, []).append(t)
+
+                for vendor, items in sorted(grouped.items(), key=lambda x:(-len(x[1]), x[0])):
+                    subtotal = sum(abs(i.amount) for i in items)
+                    cnt = len(items)
+                    display_vendor = clean_vendor_display(vendor)
+                    with st.expander(f"💸 {display_vendor}  ·  {cur} {subtotal:,.2f}  ({cnt} tx)"):
+                        details = pd.DataFrame([{
+                            "Date": f"~~{it.date}~~" if is_tx_excluded(it) else it.date,
+                            "Amount": f"{cur} {abs(it.amount):,.2f}",
+                            "Description": f"~~{it.description}~~" if is_tx_excluded(it) else it.description,
+                            "Needs Review": "⚠ Yes" if it.needs_review else "✅ No",
+                            "Status": "🚫 Excluded" if is_tx_excluded(it) else "✅ Active"
+                        } for it in items])
+                        st.dataframe(details, width='stretch', hide_index=True)
+
+        elif selected_tab == 2:  # P&L tab
+            st.subheader("Profit & Loss")
+            # Regenerate P&L with filtered transactions
+            filtered_pl_df = rg.generate_pl_report(get_active_transactions())
+            st.dataframe(filtered_pl_df, width='stretch', hide_index=True)
+
+        elif selected_tab == 3:  # All Transactions tab
+            st.subheader("All Transactions")
+            all_df = pd.DataFrame([{
+                "Date": f"~~{t.date}~~" if is_tx_excluded(t) else (t.date or ""),
+                "Type": t.transaction_type,
+                "Vendor": f"~~{t.vendor}~~" if is_tx_excluded(t) else t.vendor,
+                "Amount": f"{cur} {t.amount:,.2f}",
+                "Description": f"~~{t.description}~~" if is_tx_excluded(t) else t.description,
+                "Status": "🚫 Excluded" if is_tx_excluded(t) else "✅ Active"
+            } for t in transactions])
+            st.dataframe(all_df, width='stretch', hide_index=True)
+
+        elif SHOW_SCHEDULE_C and selected_tab == 4:  # Schedule C tab
+                st.subheader("📄 Schedule C")
+
+                schedule_c_df = st.session_state.get("schedule_c_df")
+
+                if schedule_c_df is None or schedule_c_df.empty:
+                    st.info("No Schedule C data available.")
                 else:
-                    period_input = datetime.now().strftime("%B %Y")
+                    categorized_transactions = st.session_state.get("categorized_transactions", [])
+                    transactions = st.session_state.get("transactions", [])
 
-            # Get business name from active profile
-            business_name = st.session_state.get("active_business", "")
+                    # from datetime import datetime
+                    # import pandas as pd
+                    # import re
 
-            # ---- Filter out excluded transactions for P&L statement generation
-            from account_code_mapper import AccountCodeMapper
+                    cur = "USD"
 
-            # Ensure mapper exists
-            if "mapper" not in st.session_state:
-                st.session_state.mapper = AccountCodeMapper()
-            mapper = st.session_state.mapper
+                    # ===============================
+                    # IRS SCHEDULE C VIEW
+                    # ===============================
+                    # from schedule_c_categorizer import ScheduleCCategorizer
+                    sc_categorizer = ScheduleCCategorizer()
 
-            # Build active categorized transactions
-            active_categorized_transactions = [
+                    # ---- Generate Schedule C report
+                    schedule_c_text = sc_categorizer.generate_schedule_c_report(categorized_transactions)
+                    st.subheader("📄 IRS Schedule C Report")
+                    st.code(schedule_c_text)
+
+                    st.subheader("🧾 IRS Schedule C Summary")
+                    st.dataframe(schedule_c_df, width='stretch', hide_index=True)
+
+                    if not categorized_transactions:
+                        st.stop()
+
+                    category_groups = {}
+
+                    for tx, cat in categorized_transactions:
+                        if cat.is_excluded or not cat.line_number:
+                            continue
+                        key = (cat.line_number, cat.tax_code, cat.category_name)
+                        category_groups.setdefault(key, []).append((tx, cat))
+
+                    for (line, code, name), items in sorted(
+                        category_groups.items(),
+                        key=lambda x: (
+                            float(re.search(r'(\d+)', x[0][0]).group(1))
+                            if re.search(r'(\d+)', x[0][0]) else 999
+                        )
+                    ):
+                        subtotal = sum(abs(tx.amount) for tx, _ in items)
+                        count = len(items)
+
+                        label = f"{line} · {name} — {cur} {subtotal:,.2f} ({count} tx)"
+
+                        with st.expander(label):
+                            df = pd.DataFrame([{
+                                "Date": tx.date or "",
+                                "Vendor": tx.vendor or "",
+                                "Amount": f"{cur} {abs(tx.amount):,.2f}",
+                                "Description": tx.description,
+                                "Tax Code": cat.tax_code,
+                                "Needs Review": "⚠ Yes" if tx.needs_review else "✅ No"
+                            } for tx, cat in items])
+
+                            st.dataframe(df, width='stretch', hide_index=True)
+
+        elif selected_tab == (5 if SHOW_SCHEDULE_C else 4):  # P&L Account Codes tab
+            st.subheader("📊 Profit & Loss (Account Codes)")
+            reapply_custom_rules()
+            # Build categorized list that matches filtered transactions
+            all_categorized = st.session_state.categorized_transactions
+            filtered_transactions = st.session_state.get(
+                "filtered_transactions",
+                st.session_state.transactions
+            )
+
+            # Use all transactions (including excluded ones)
+            # We'll handle excluded status in the display logic
+            # Build categorized list that matches date-filtered transactions
+            filtered_keys = {
+                (t.date, t.description, t.amount)
+                for t in filtered_transactions
+            }
+
+            categorized_transactions = [
                 (tx, cat)
-                for tx, cat in categorized_transactions
-                if not (cat.is_excluded or is_tx_excluded(tx))
+                for tx, cat in all_categorized
+                if (tx.date, tx.description, tx.amount) in filtered_keys
             ]
 
-            synced_categorized = []
-            mapper.custom_rules = st.session_state.custom_rules 
 
-            for tx, cat in active_categorized_transactions:
-                # ✅ Use existing account_code if present (manual changes)
-                if hasattr(tx, "account_code") and tx.account_code:
-                    code = tx.account_code
-                    # Get name from mapper if available
-                    name = dict(mapper.account_code_map).get(code, (code, "UNKNOWN"))[1]
-                else:
-                    # Auto map for new/unmapped transactions
-                    code, name = mapper.get_account_code(
-                        vendor=getattr(tx, "vendor", None),
-                        description=getattr(tx, "description", None),
-                        is_income=(tx.amount >= 0),
-                        transaction_type=getattr(tx, "type", None)
-                    )
-                    # Save mapped code to transaction for persistence
-                    tx.account_code = code
 
-                # Assign to category for PL
-                cat.account_code = code
-                synced_categorized.append((tx, cat))
-            
-            # Persist for download and PL generation
-            st.session_state.synced_categorized = synced_categorized
-
-            # Generate PL report using persisted codes ONLY
-            pl_text = sc_categorizer.generate_pl_report_with_account_codes(
-                synced_categorized,
-                business_name=business_name or "",
-                period=period_input
-            )
-            st.session_state.pl_statement_text = pl_text
-            st.code(pl_text)
-
-            # 🔹 Validation & reconciliation (optional)
-            validation_result = sc_categorizer.validate_classifications(synced_categorized)
-            reconciliation_result = sc_categorizer.reconcile_totals(
-                get_active_transactions(),
-                synced_categorized
-            )
-            
-            # Display validation warnings
-            if validation_result["error_count"] > 0 or validation_result["warning_count"] > 0:
-                st.subheader("⚠️ Validation & Reconciliation")
-                
-                if validation_result["error_count"] > 0:
-                    st.error(f"❌ Found {validation_result['error_count']} classification error(s):")
-                    for error in validation_result["errors"]:
-                        st.error(error["message"])
-                
-                if validation_result["warning_count"] > 0:
-                    st.warning(f"⚠️ Found {validation_result['warning_count']} warning(s):")
-                    for warning in validation_result["warnings"]:
-                        st.warning(warning["message"])
-            
-            # Display reconciliation status
-            if not reconciliation_result["fully_reconciled"]:
-                st.warning("⚠️ Reconciliation Mismatch Detected:")
-                if not reconciliation_result["income_reconciled"]:
-                    st.warning(f"  Income: Raw deposits ${reconciliation_result['raw_deposits_total']:,.2f} vs Categorized ${reconciliation_result['categorized_income_total']:,.2f} (Diff: ${reconciliation_result['income_difference']:,.2f})")
-                if not reconciliation_result["expenses_reconciled"]:
-                    st.warning(f"  Expenses: Raw withdrawals ${reconciliation_result['raw_withdrawals_total']:,.2f} vs Categorized ${reconciliation_result['categorized_expenses_total']:,.2f} (Diff: ${reconciliation_result['expenses_difference']:,.2f})")
+            if not categorized_transactions or not transactions:
+                st.info("No transaction data available for P&L report.")
             else:
-                st.success("✅ Reconciliation: All totals match!")
-            
+                # from datetime import datetime
+                # import pandas as pd
+                # from schedule_c_categorizer import ScheduleCCategorizer
 
-            # ---- Build structured P&L dataframe
-            
-            
-            rows = []
-            for tx, cat in categorized_transactions:
-                # Keep excluded transactions but mark them
-                is_excluded_tx = cat.is_excluded or is_tx_excluded(tx)
+                sc_categorizer = ScheduleCCategorizer()
+                cur = "USD"
 
-                # DATA-DRIVEN CLASSIFICATION: Use transaction_type as source of truth
-                # Deposits → Income, Withdrawals → Expenses
-                is_income = tx.transaction_type == "deposit"
-                
-                # Check if account_code is already set on transaction (from manual reassignment)
-                if hasattr(tx, 'account_code') and tx.account_code:
-                    account_code = tx.account_code
-                    # Get the account name from JSON
-                    import json
-                    from pathlib import Path
-                    account_file = Path(__file__).parent / 'account_keywords.json'
-                    try:
-                        with open(account_file, 'r') as f:
-                            data = json.load(f)
-                            account_name = data.get(account_code, {}).get('name', 'UNKNOWN')
-                    except:
-                        account_name = 'UNKNOWN'
+                # ---- Robust period detection from date filter or min → max date
+                # Check if user has applied a date filter
+                if st.session_state.get('filter_active', False) and 'filter_start_date' in st.session_state and 'filter_end_date' in st.session_state:
+                    # Use the EXACT filtered dates (don't expand to full months when filter is active)
+                    start = st.session_state.filter_start_date
+                    end = st.session_state.filter_end_date
+                    # Format: "Jan 15, 2025 - Mar 20, 2025" (exact dates from filter)
+                    period_input = f"{start.strftime('%b %d, %Y')} - {end.strftime('%b %d, %Y')}"
+                elif "filter_start_md" in st.session_state and "filter_end_md" in st.session_state:
+                    # Use the date picker values (when filter UI is present but not applied)
+                    start = st.session_state.filter_start_md
+                    end = st.session_state.filter_end_md
+                    # Get first day of starting month and last day of ending month
+                    # from calendar import monthrange
+                    first_day_of_month = start.replace(day=1)
+                    last_day_of_month = end.replace(day=monthrange(end.year, end.month)[1])
+                    # Format: "Jan 01, 2025 - Dec 31, 2025"
+                    period_input = f"{first_day_of_month.strftime('%b %d, %Y')} - {last_day_of_month.strftime('%b %d, %Y')}"
                 else:
-                    # Get account code based on transaction type
-                    account_code, account_name = mapper.get_account_code(
-                        tx.vendor, 
-                        tx.description, 
-                        is_income=is_income,
-                        transaction_type=tx.transaction_type,
-                        custom_rules=st.session_state.get('custom_rules', [])
-                    )
-                    
-                    # Ensure account code matches transaction type
-                    # If withdrawal but got income code (600s), force to expense code
-                    if tx.transaction_type == "withdrawal" and account_code.startswith('6'):
-                        # Force to expense code (999 OTHER EXPENSES as fallback)
-                        account_code, account_name = mapper.get_account_code(
-                            tx.vendor,
-                            tx.description,
-                            is_income=False,
-                            transaction_type="withdrawal",
-                            custom_rules=st.session_state.get('custom_rules', [])
+                    # Fall back to detecting from transactions
+                    date_objs = []
+                    for tx in transactions:
+                        if tx.date:
+                            try:
+                                date_objs.append(datetime.strptime(tx.date, "%Y-%m-%d"))
+                            except:
+                                pass
+
+                    if date_objs:
+                        start = min(date_objs)
+                        end = max(date_objs)
+                        # Get first day of starting month and last day of ending month
+                        # (Imports moved to top level)
+                        first_day_of_month = start.replace(day=1)
+                        last_day_of_month = end.replace(day=monthrange(end.year, end.month)[1])
+                        period_input = f"{first_day_of_month.strftime('%b %d, %Y')} - {last_day_of_month.strftime('%b %d, %Y')}"
+                    else:
+                        period_input = datetime.now().strftime("%B %Y")
+
+                # Get business name from active profile
+                business_name = st.session_state.get("active_business", "")
+
+                # ---- Filter out excluded transactions for P&L statement generation
+                # from account_code_mapper import AccountCodeMapper
+
+                # Ensure mapper exists
+                if "mapper" not in st.session_state:
+                    st.session_state.mapper = AccountCodeMapper()
+                mapper = st.session_state.mapper
+
+                # Build active categorized transactions
+                active_categorized_transactions = [
+                    (tx, cat)
+                    for tx, cat in categorized_transactions
+                    if not (cat.is_excluded or is_tx_excluded(tx))
+                ]
+
+                synced_categorized = []
+                mapper.custom_rules = st.session_state.custom_rules 
+
+                for tx, cat in active_categorized_transactions:
+                    # ✅ Use existing account_code if present (manual changes)
+                    if hasattr(tx, "account_code") and tx.account_code:
+                        code = tx.account_code
+                        # Get name from mapper if available
+                        name = dict(mapper.account_code_map).get(code, (code, "UNKNOWN"))[1]
+                    else:
+                        # Auto map for new/unmapped transactions
+                        code, name = mapper.get_account_code(
+                            vendor=getattr(tx, "vendor", None),
+                            description=getattr(tx, "description", None),
+                            is_income=(tx.amount >= 0),
+                            transaction_type=getattr(tx, "type", None)
                         )
-                    
-                    # If deposit but got expense code, force to income code
-                    if tx.transaction_type == "deposit" and not account_code.startswith('6'):
-                        # Force to income code (601 SALES as default)
-                        account_code, account_name = ("601", "SALES")
+                        # Save mapped code to transaction for persistence
+                        tx.account_code = code
 
-                rows.append({
-                    "Account Code": account_code,
-                    "Account Name": account_name,
-                    "Date": f"~~{tx.date}~~" if is_excluded_tx else (tx.date or ""),
-                    "Vendor": f"~~{tx.vendor}~~" if is_excluded_tx else (tx.vendor or ""),
-                    "Amount": abs(tx.amount),
-                    "Type": "Income" if is_income else "Expense",
-                    "Transaction Type": tx.transaction_type.title(),
-                    "Needs Review": "⚠ Yes" if tx.needs_review else "✅ No",
-                    "Status": "🚫 Excluded" if is_excluded_tx else "✅ Active"
-                })
+                    # Assign to category for PL
+                    cat.account_code = code
+                    synced_categorized.append((tx, cat))
 
-            if rows:
-                summary_df = pd.DataFrame(rows)
-                
-                st.subheader("📋 Transaction Details")
-                st.dataframe(summary_df, width='stretch', hide_index=True)
+                # Persist for download and PL generation
+                st.session_state.synced_categorized = synced_categorized
 
-                # Group by account code
-                st.subheader("💼 By Account Code")
-                grouped = {}
+                # Generate PL report using persisted codes ONLY
+                pl_text = sc_categorizer.generate_pl_report_with_account_codes(
+                    synced_categorized,
+                    business_name=business_name or "",
+                    period=period_input
+                )
+                st.session_state.pl_statement_text = pl_text
+                st.code(pl_text)
+
+                # 🔹 Validation & reconciliation (optional)
+                validation_result = sc_categorizer.validate_classifications(synced_categorized)
+                reconciliation_result = sc_categorizer.reconcile_totals(
+                    get_active_transactions(),
+                    synced_categorized
+                )
+
+                # Display validation warnings
+                if validation_result["error_count"] > 0 or validation_result["warning_count"] > 0:
+                    st.subheader("⚠️ Validation & Reconciliation")
+
+                    if validation_result["error_count"] > 0:
+                        st.error(f"❌ Found {validation_result['error_count']} classification error(s):")
+                        for error in validation_result["errors"]:
+                            st.error(error["message"])
+
+                    if validation_result["warning_count"] > 0:
+                        st.warning(f"⚠️ Found {validation_result['warning_count']} warning(s):")
+                        for warning in validation_result["warnings"]:
+                            st.warning(warning["message"])
+
+                # Display reconciliation status
+                if not reconciliation_result["fully_reconciled"]:
+                    st.warning("⚠️ Reconciliation Mismatch Detected:")
+                    if not reconciliation_result["income_reconciled"]:
+                        st.warning(f"  Income: Raw deposits ${reconciliation_result['raw_deposits_total']:,.2f} vs Categorized ${reconciliation_result['categorized_income_total']:,.2f} (Diff: ${reconciliation_result['income_difference']:,.2f})")
+                    if not reconciliation_result["expenses_reconciled"]:
+                        st.warning(f"  Expenses: Raw withdrawals ${reconciliation_result['raw_withdrawals_total']:,.2f} vs Categorized ${reconciliation_result['categorized_expenses_total']:,.2f} (Diff: ${reconciliation_result['expenses_difference']:,.2f})")
+                else:
+                    st.success("✅ Reconciliation: All totals match!")
+
+
+                # ---- Build structured P&L dataframe
+
+
+                rows = []
                 for tx, cat in categorized_transactions:
-                    # Include all transactions in grouping
-                    
+                    # Keep excluded transactions but mark them
+                    is_excluded_tx = cat.is_excluded or is_tx_excluded(tx)
+
+                    # DATA-DRIVEN CLASSIFICATION: Use transaction_type as source of truth
+                    # Deposits → Income, Withdrawals → Expenses
+                    is_income = tx.transaction_type == "deposit"
+
                     # Check if account_code is already set on transaction (from manual reassignment)
                     if hasattr(tx, 'account_code') and tx.account_code:
                         account_code = tx.account_code
                         # Get the account name from JSON
-                        import json
-                        from pathlib import Path
-                        account_file = Path(__file__).parent / 'account_keywords.json'
+                        # (Imports moved to top level)
+                        # account_file = Path(__file__).parent / 'account_keywords.json'
                         try:
                             with open(account_file, 'r') as f:
                                 data = json.load(f)
@@ -4351,8 +4318,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
                         except:
                             account_name = 'UNKNOWN'
                     else:
-                        # DATA-DRIVEN: Use transaction_type as source of truth
-                        is_income = tx.transaction_type == "deposit"
+                        # Get account code based on transaction type
                         account_code, account_name = mapper.get_account_code(
                             tx.vendor, 
                             tx.description, 
@@ -4360,9 +4326,11 @@ if "transactions" in st.session_state and st.session_state.transactions:
                             transaction_type=tx.transaction_type,
                             custom_rules=st.session_state.get('custom_rules', [])
                         )
-                        
+
                         # Ensure account code matches transaction type
+                        # If withdrawal but got income code (600s), force to expense code
                         if tx.transaction_type == "withdrawal" and account_code.startswith('6'):
+                            # Force to expense code (999 OTHER EXPENSES as fallback)
                             account_code, account_name = mapper.get_account_code(
                                 tx.vendor,
                                 tx.description,
@@ -4370,417 +4338,481 @@ if "transactions" in st.session_state and st.session_state.transactions:
                                 transaction_type="withdrawal",
                                 custom_rules=st.session_state.get('custom_rules', [])
                             )
+
+                        # If deposit but got expense code, force to income code
                         if tx.transaction_type == "deposit" and not account_code.startswith('6'):
+                            # Force to income code (601 SALES as default)
                             account_code, account_name = ("601", "SALES")
-                    
-                    key = (account_code, account_name)
-                    grouped.setdefault(key, []).append(tx)
 
-                # Load all account codes for dropdown (do this once outside the loop)
-                import json
-                from pathlib import Path
-                all_account_options = {}
-                account_file = Path(__file__).parent / 'account_keywords.json'
-                try:
-                    with open(account_file, 'r') as f:
-                        data = json.load(f)
-                        for acc_code, acc_details in data.items():
-                            all_account_options[f"{acc_code} · {acc_details['name']}"] = acc_code
-                except Exception as e:
-                    st.error(f"Error loading account codes: {e}")
-                
-                for (code, name), txs in sorted(grouped.items()):
-                    # Calculate subtotal only for active (non-excluded) transactions
-                    active_txs = [t for t in txs if not is_tx_excluded(t)]
-                    excluded_txs = [t for t in txs if is_tx_excluded(t)]
-                    subtotal = sum(abs(t.amount) for t in active_txs)
-                    total_count = len(txs)
-                    active_count = len(active_txs)
-                    label = f"{code} · {name} — {cur} {subtotal:,.2f} ({active_count}/{total_count} tx)"
-                    if excluded_txs:
-                        label += f" [{len(excluded_txs)} excluded]"
+                    rows.append({
+                        "Account Code": account_code,
+                        "Account Name": account_name,
+                        "Date": f"~~{tx.date}~~" if is_excluded_tx else (tx.date or ""),
+                        "Vendor": f"~~{tx.vendor}~~" if is_excluded_tx else (tx.vendor or ""),
+                        "Amount": abs(tx.amount),
+                        "Type": "Income" if is_income else "Expense",
+                        "Transaction Type": tx.transaction_type.title(),
+                        "Needs Review": "⚠ Yes" if tx.needs_review else "✅ No",
+                        "Status": "🚫 Excluded" if is_excluded_tx else "✅ Active"
+                    })
 
-                    with st.expander(label):
-                        st.info("💡 Click 'Change Account Code' to reassign any transaction to a different account")
-                        
-                        for idx, t in enumerate(txs):
-                            col1, col2, col3, col4 = st.columns([2, 2, 1 , 1])
-                            with col1:
-                                st.text(f"{t.date or 'N/A'} | {t.vendor or 'Unknown'}")
-                            with col2:
-                                st.text(f"{cur} {abs(t.amount):,.2f} | {t.description[:40] if t.description else 'N/A'}")
-                            with col3:
-                                # Unique key for each transaction
-                                tx_key = f"change_{code}_{idx}_{t.date}_{abs(t.amount)}"
-                                if st.button("Change", key=tx_key):
-                                    st.session_state[f"editing_{tx_key}"] = True
-                            
-                            # Show dropdown if editing this transaction
-                            if st.session_state.get(f"editing_{tx_key}", False):
-                                # Filter out current account code from options
-                                available_options = {k: v for k, v in all_account_options.items() if v != code}
-                                
-                                selected_display = st.selectbox(
-                                    "Select new account code:",
-                                    options=list(available_options.keys()),
-                                    key=f"select_{tx_key}"
+                if rows:
+                    summary_df = pd.DataFrame(rows)
+
+                    st.subheader("📋 Transaction Details")
+                    st.dataframe(summary_df, width='stretch', hide_index=True)
+
+                    # Group by account code
+                    st.subheader("💼 By Account Code")
+                    grouped = {}
+                    for tx, cat in categorized_transactions:
+                        # Include all transactions in grouping
+
+                        # Check if account_code is already set on transaction (from manual reassignment)
+                        if hasattr(tx, 'account_code') and tx.account_code:
+                            account_code = tx.account_code
+                            # Get the account name from JSON
+                            # (Imports moved to top level)
+                            # account_file = Path(__file__).parent / 'account_keywords.json'
+                            try:
+                                with open(account_file, 'r') as f:
+                                    data = json.load(f)
+                                    account_name = data.get(account_code, {}).get('name', 'UNKNOWN')
+                            except:
+                                account_name = 'UNKNOWN'
+                        else:
+                            # DATA-DRIVEN: Use transaction_type as source of truth
+                            is_income = tx.transaction_type == "deposit"
+                            account_code, account_name = mapper.get_account_code(
+                                tx.vendor, 
+                                tx.description, 
+                                is_income=is_income,
+                                transaction_type=tx.transaction_type,
+                                custom_rules=st.session_state.get('custom_rules', [])
+                            )
+
+                            # Ensure account code matches transaction type
+                            if tx.transaction_type == "withdrawal" and account_code.startswith('6'):
+                                account_code, account_name = mapper.get_account_code(
+                                    tx.vendor,
+                                    tx.description,
+                                    is_income=False,
+                                    transaction_type="withdrawal",
+                                    custom_rules=st.session_state.get('custom_rules', [])
                                 )
-                                
-                                col_save, col_cancel = st.columns(2)
-                                with col_save:
-                                    if st.button("✅ Save", key=f"save_{tx_key}"):
-                                        new_code = available_options[selected_display]
-                                        for session_tx in st.session_state.transactions:
-                                            if (session_tx.date == t.date and 
-                                                session_tx.description == t.description and 
-                                                session_tx.amount == t.amount):
-                                                session_tx.account_code = new_code
-                                                # mark manual override so rules won't overwrite
-                                                session_tx._mapped_by_rule = False
+                            if tx.transaction_type == "deposit" and not account_code.startswith('6'):
+                                account_code, account_name = ("601", "SALES")
 
-                                        if "filtered_transactions" in st.session_state:
-                                            for session_tx in st.session_state.filtered_transactions:
+                        key = (account_code, account_name)
+                        grouped.setdefault(key, []).append(tx)
+
+                    # Load all account codes for dropdown (do this once outside the loop)
+                    # import json
+                    # from pathlib import Path
+                    all_account_options = {}
+                    account_file = Path(__file__).parent / 'account_keywords.json'
+                    try:
+                        with open(account_file, 'r') as f:
+                            data = json.load(f)
+                            for acc_code, acc_details in data.items():
+                                all_account_options[f"{acc_code} · {acc_details['name']}"] = acc_code
+                    except Exception as e:
+                        st.error(f"Error loading account codes: {e}")
+
+                    for (code, name), txs in sorted(grouped.items()):
+                        # Calculate subtotal only for active (non-excluded) transactions
+                        active_txs = [t for t in txs if not is_tx_excluded(t)]
+                        excluded_txs = [t for t in txs if is_tx_excluded(t)]
+                        subtotal = sum(abs(t.amount) for t in active_txs)
+                        total_count = len(txs)
+                        active_count = len(active_txs)
+                        label = f"{code} · {name} — {cur} {subtotal:,.2f} ({active_count}/{total_count} tx)"
+                        if excluded_txs:
+                            label += f" [{len(excluded_txs)} excluded]"
+
+                        with st.expander(label):
+                            st.info("💡 Click 'Change Account Code' to reassign any transaction to a different account")
+
+                            for idx, t in enumerate(txs):
+                                col1, col2, col3, col4 = st.columns([2, 2, 1 , 1])
+                                with col1:
+                                    st.text(f"{t.date or 'N/A'} | {t.vendor or 'Unknown'}")
+                                with col2:
+                                    st.text(f"{cur} {abs(t.amount):,.2f} | {t.description[:40] if t.description else 'N/A'}")
+                                with col3:
+                                    # Unique key for each transaction
+                                    tx_key = f"change_{code}_{idx}_{t.date}_{abs(t.amount)}"
+                                    if st.button("Change", key=tx_key):
+                                        st.session_state[f"editing_{tx_key}"] = True
+
+                                # Show dropdown if editing this transaction
+                                if st.session_state.get(f"editing_{tx_key}", False):
+                                    # Filter out current account code from options
+                                    available_options = {k: v for k, v in all_account_options.items() if v != code}
+
+                                    selected_display = st.selectbox(
+                                        "Select new account code:",
+                                        options=list(available_options.keys()),
+                                        key=f"select_{tx_key}"
+                                    )
+
+                                    col_save, col_cancel = st.columns(2)
+                                    with col_save:
+                                        if st.button("✅ Save", key=f"save_{tx_key}"):
+                                            new_code = available_options[selected_display]
+                                            for session_tx in st.session_state.transactions:
                                                 if (session_tx.date == t.date and 
                                                     session_tx.description == t.description and 
                                                     session_tx.amount == t.amount):
                                                     session_tx.account_code = new_code
+                                                    # mark manual override so rules won't overwrite
                                                     session_tx._mapped_by_rule = False
 
-                                        st.session_state[f"editing_{tx_key}"] = False
-                                        st.success(f"✅ Updated to {selected_display}")
-                                        st.rerun()
+                                            if "filtered_transactions" in st.session_state:
+                                                for session_tx in st.session_state.filtered_transactions:
+                                                    if (session_tx.date == t.date and 
+                                                        session_tx.description == t.description and 
+                                                        session_tx.amount == t.amount):
+                                                        session_tx.account_code = new_code
+                                                        session_tx._mapped_by_rule = False
 
-                                with col_cancel:
-                                    if st.button("❌ Cancel", key=f"cancel_{tx_key}"):
-                                        st.session_state[f"editing_{tx_key}"] = False
-                                        st.rerun()
-                            with col4:
-                                if not is_tx_excluded(t):
-                                    if st.button("🚫 Exclude", key=f"exclude_{code}_{idx}_{t.date}_{t.amount}"):
-                                        for master_tx in st.session_state.transactions:
-                                            if (
-                                                master_tx.date == t.date and
-                                                master_tx.description == t.description and
-                                                master_tx.amount == t.amount
-                                            ):
-                                                master_tx.is_excluded = True
-                                        st.rerun()
-                                else:
-                                    if st.button("↩ Include", key=f"include_{code}_{idx}_{t.date}_{t.amount}"):
-                                        for master_tx in st.session_state.transactions:
-                                            if (
-                                                master_tx.date == t.date and
-                                                master_tx.description == t.description and
-                                                master_tx.amount == t.amount
-                                            ):
-                                                master_tx.is_excluded = False
-                                        st.rerun()
+                                            st.session_state[f"editing_{tx_key}"] = False
+                                            st.success(f"✅ Updated to {selected_display}")
+                                            st.rerun()
 
-                # ---- CSV Export
-                csv_data = summary_df.to_csv(index=False)
-                st.download_button(
-                    "⬇️ Download P&L Account Codes (CSV)",
-                    csv_data,
-                    file_name=f"PL_Account_Codes_{period_input.replace(' ', '_')}.csv",
-                    mime="text/csv"
-                )
-    
-    elif selected_tab == (6 if SHOW_SCHEDULE_C else 5):  # Custom Rules tab
-        st.subheader("⚙️ Automatic Transaction Sorting & Categorization")
-        st.markdown("""
-        **Set up automatic filtering rules ONCE** - they'll automatically sort transactions into the right categories for all future uploads.
-        Configure your sorting parameters below and the system will remember them.
-        """)
-        
-        # Load all account codes for dropdown
-        import json
-        from pathlib import Path
-        all_account_options = {}
-        account_file = Path(__file__).parent / 'account_keywords.json'
-        try:
-            with open(account_file, 'r') as f:
-                data = json.load(f)
-                for acc_code, acc_details in data.items():
-                    all_account_options[f"{acc_code} · {acc_details['name']}"] = acc_code
-        except Exception as e:
-            st.error(f"Error loading account codes: {e}")
-        
-        # ==========================================
-        # MAIN RULE INPUT FORM
-        # ==========================================
-        st.subheader("➕ Setup New Rule")
-        
-        col_adv1, col_adv2 = st.columns([2, 2])
-        
-        with col_adv1:
-            rule_keyword_adv = st.text_input(
-                "Primary Keyword *",
-                placeholder="e.g., Check, Stripe",
-                key="keyword_adv"
-            )
-        
-        with col_adv2:
-            rule_account_adv = st.selectbox(
-                "Target Account Code *",
-                options=list(all_account_options.keys()),
-                    key="account_adv"
-                )
-            
-            st.markdown("**Filtering Parameters:**")
-            
-            col_adv_amt1, col_adv_amt2 = st.columns(2)
-            with col_adv_amt1:
-                min_amount_adv = st.number_input(
-                    "Min Amount", min_value=0.0, value=0.0, step=10.0, key="min_adv"
-                )
-            with col_adv_amt2:
-                max_amount_adv = st.number_input(
-                    "Max Amount", min_value=0.0, value=0.0, step=10.0, key="max_adv"
-                )
-            
-            st.markdown("**Pattern Matching:**")
-            
-            col_adv_pri, col_adv_add = st.columns(2)
-            with col_adv_pri:
-                priority_adv = st.number_input(
-                    "Priority (1=highest, 999=lowest)",
-                    min_value=1, max_value=999, value=999, step=1, key="priority_adv"
-                )
-            
-            with col_adv_add:
-                pass  # Placeholder for alignment
-            
-            additional_keywords_adv = st.text_input(
-                "Additional Keywords (ALL must match, comma-separated)",
-                placeholder="e.g., rent, payment",
-                key="additional_adv"
-            )
-            
-            exclude_keywords_adv = st.text_input(
-                "Exclusion Keywords (skip if ANY match, comma-separated)",
-                placeholder="e.g., refund, dispute",
-                key="exclude_adv"
-            )
-        
-        # ==========================================
-        # SUBMIT RULE
-        # ==========================================
-        st.markdown("---")
-        
-        if st.button("Create Rule", key="add_rule_btn", type="primary"):
-            # Use advanced form inputs
-            keyword = rule_keyword_adv.strip()
-            account = rule_account_adv
-            min_amt = min_amount_adv
-            max_amt = max_amount_adv
-            add_kws = additional_keywords_adv
-            excl_kws = exclude_keywords_adv
-            priority = priority_adv
-            
-            if keyword:
-                    account_code = all_account_options[account]
-                    
-                    # Build the new rule
-                    new_rule = {
-                        'keyword': keyword,
-                        'account_code': account_code,
-                        'account_display': account
-                    }
-                    
-                    # Add optional fields only if they have meaningful values
-                    if min_amt > 0:
-                        new_rule['min_amount'] = min_amt
-                    if max_amt > 0:
-                        new_rule['max_amount'] = max_amt
-                    if priority != 999:
-                        new_rule['priority'] = priority
-                    if add_kws.strip():
-                        new_rule['additional_keywords'] = [kw.strip() for kw in add_kws.split(',') if kw.strip()]
-                    if excl_kws.strip():
-                        new_rule['exclude_keywords'] = [kw.strip() for kw in excl_kws.split(',') if kw.strip()]
-                    
-                    st.session_state.custom_rules.append(new_rule)
-                    save_business_rules(
-                        st.session_state.user["id"],
-                        st.session_state.active_business,
-                        st.session_state.custom_rules
+                                    with col_cancel:
+                                        if st.button("❌ Cancel", key=f"cancel_{tx_key}"):
+                                            st.session_state[f"editing_{tx_key}"] = False
+                                            st.rerun()
+                                with col4:
+                                    if not is_tx_excluded(t):
+                                        if st.button("🚫 Exclude", key=f"exclude_{code}_{idx}_{t.date}_{t.amount}"):
+                                            for master_tx in st.session_state.transactions:
+                                                if (
+                                                    master_tx.date == t.date and
+                                                    master_tx.description == t.description and
+                                                    master_tx.amount == t.amount
+                                                ):
+                                                    master_tx.is_excluded = True
+                                            st.rerun()
+                                    else:
+                                        if st.button("↩ Include", key=f"include_{code}_{idx}_{t.date}_{t.amount}"):
+                                            for master_tx in st.session_state.transactions:
+                                                if (
+                                                    master_tx.date == t.date and
+                                                    master_tx.description == t.description and
+                                                    master_tx.amount == t.amount
+                                                ):
+                                                    master_tx.is_excluded = False
+                                            st.rerun()
+
+                    # ---- CSV Export
+                    csv_data = summary_df.to_csv(index=False)
+                    st.download_button(
+                        "⬇️ Download P&L Account Codes (CSV)",
+                        csv_data,
+                        file_name=f"PL_Account_Codes_{period_input.replace(' ', '_')}.csv",
+                        mime="text/csv"
                     )
 
-                    # Reapply rules to existing transactions
-                    reapply_custom_rules()
-                    
-                    # Create success message with rule details
-                    msg = f"✅ Rule created: '{keyword}' → {account}"
-                    if min_amt > 0 or max_amt > 0:
-                        amount_filter = []
+        elif selected_tab == (6 if SHOW_SCHEDULE_C else 5):  # Custom Rules tab
+            st.subheader("⚙️ Automatic Transaction Sorting & Categorization")
+            st.markdown("""
+            **Set up automatic filtering rules ONCE** - they'll automatically sort transactions into the right categories for all future uploads.
+            Configure your sorting parameters below and the system will remember them.
+            """)
+
+            # Load all account codes for dropdown
+            # (Imports moved to top level)
+            all_account_options = {}
+            account_file = Path(__file__).parent / 'account_keywords.json'
+            try:
+                with open(account_file, 'r') as f:
+                    data = json.load(f)
+                    for acc_code, acc_details in data.items():
+                        all_account_options[f"{acc_code} · {acc_details['name']}"] = acc_code
+            except Exception as e:
+                st.error(f"Error loading account codes: {e}")
+
+            # ==========================================
+            # MAIN RULE INPUT FORM
+            # ==========================================
+            st.subheader("➕ Setup New Rule")
+
+            col_adv1, col_adv2 = st.columns([2, 2])
+
+            with col_adv1:
+                rule_keyword_adv = st.text_input(
+                    "Primary Keyword *",
+                    placeholder="e.g., Check, Stripe",
+                    key="keyword_adv"
+                )
+
+            with col_adv2:
+                rule_account_adv = st.selectbox(
+                    "Target Account Code *",
+                    options=list(all_account_options.keys()),
+                        key="account_adv"
+                    )
+
+                st.markdown("**Filtering Parameters:**")
+
+                col_adv_amt1, col_adv_amt2 = st.columns(2)
+                with col_adv_amt1:
+                    min_amount_adv = st.number_input(
+                        "Min Amount", min_value=0.0, value=0.0, step=10.0, key="min_adv"
+                    )
+                with col_adv_amt2:
+                    max_amount_adv = st.number_input(
+                        "Max Amount", min_value=0.0, value=0.0, step=10.0, key="max_adv"
+                    )
+
+                st.markdown("**Pattern Matching:**")
+
+                col_adv_pri, col_adv_add = st.columns(2)
+                with col_adv_pri:
+                    priority_adv = st.number_input(
+                        "Priority (1=highest, 999=lowest)",
+                        min_value=1, max_value=999, value=999, step=1, key="priority_adv"
+                    )
+
+                with col_adv_add:
+                    pass  # Placeholder for alignment
+
+                additional_keywords_adv = st.text_input(
+                    "Additional Keywords (ALL must match, comma-separated)",
+                    placeholder="e.g., rent, payment",
+                    key="additional_adv"
+                )
+
+                exclude_keywords_adv = st.text_input(
+                    "Exclusion Keywords (skip if ANY match, comma-separated)",
+                    placeholder="e.g., refund, dispute",
+                    key="exclude_adv"
+                )
+
+            # ==========================================
+            # SUBMIT RULE
+            # ==========================================
+            st.markdown("---")
+
+            if st.button("Create Rule", key="add_rule_btn", type="primary"):
+                # Use advanced form inputs
+                keyword = rule_keyword_adv.strip()
+                account = rule_account_adv
+                min_amt = min_amount_adv
+                max_amt = max_amount_adv
+                add_kws = additional_keywords_adv
+                excl_kws = exclude_keywords_adv
+                priority = priority_adv
+
+                if keyword:
+                        account_code = all_account_options[account]
+
+                        # Build the new rule
+                        new_rule = {
+                            'keyword': keyword,
+                            'account_code': account_code,
+                            'account_display': account
+                        }
+
+                        # Add optional fields only if they have meaningful values
                         if min_amt > 0:
-                            amount_filter.append(f"${min_amt:.2f}+")
+                            new_rule['min_amount'] = min_amt
                         if max_amt > 0:
-                            amount_filter.append(f"up to ${max_amt:.2f}")
-                        msg += f" ({', '.join(amount_filter)})"
-                    
-                    st.success(msg)
-                    st.rerun()
-            else:
-                st.error("❌ Please enter a keyword to search for")
-        
-        # Display existing rules
-        st.subheader("📋 Active Rules")
-        if st.session_state.custom_rules:
-            # Sort rules by priority for display
-            sorted_rules = sorted(st.session_state.custom_rules, key=lambda r: r.get('priority', 999))
-            st.info(f"Total rules: {len(st.session_state.custom_rules)} (sorted by priority)")
-            
-            for idx, rule in enumerate(sorted_rules):
-                # Find original index for deletion
-                orig_idx = st.session_state.custom_rules.index(rule)
-                
-                # Build display label
-                label_parts = [f"🔍 {rule['keyword']}"]
-                
-                # Add amount range if present
-                if rule.get('min_amount') or rule.get('max_amount'):
-                    amount_range = []
-                    if rule.get('min_amount'):
-                        amount_range.append(f"≥ ${rule['min_amount']:.0f}")
-                    if rule.get('max_amount'):
-                        amount_range.append(f"≤ ${rule['max_amount']:.0f}")
-                    label_parts.append(f"[{' & '.join(amount_range)}]")
-                
-                # Add priority if not default
-                if rule.get('priority', 999) != 999:
-                    label_parts.append(f"[Priority: {rule['priority']}]")
-                
-                label = " ".join(label_parts)
-                
-                with st.expander(label):
-                    col1, col2 = st.columns([4, 1])
-                    
-                    with col1:
-                        st.markdown(f"**→ {rule['account_display']}**")
-                        
-                        # Show filters if present
-                        filters = []
+                            new_rule['max_amount'] = max_amt
+                        if priority != 999:
+                            new_rule['priority'] = priority
+                        if add_kws.strip():
+                            new_rule['additional_keywords'] = [kw.strip() for kw in add_kws.split(',') if kw.strip()]
+                        if excl_kws.strip():
+                            new_rule['exclude_keywords'] = [kw.strip() for kw in excl_kws.split(',') if kw.strip()]
+
+                        st.session_state.custom_rules.append(new_rule)
+                        save_business_rules(
+                            st.session_state.user["id"],
+                            st.session_state.active_business,
+                            st.session_state.custom_rules
+                        )
+
+                        # Reapply rules to existing transactions
+                        reapply_custom_rules()
+
+                        # Create success message with rule details
+                        msg = f"✅ Rule created: '{keyword}' → {account}"
+                        if min_amt > 0 or max_amt > 0:
+                            amount_filter = []
+                            if min_amt > 0:
+                                amount_filter.append(f"${min_amt:.2f}+")
+                            if max_amt > 0:
+                                amount_filter.append(f"up to ${max_amt:.2f}")
+                            msg += f" ({', '.join(amount_filter)})"
+
+                        st.success(msg)
+                        st.rerun()
+                else:
+                    st.error("❌ Please enter a keyword to search for")
+
+            # Display existing rules
+            st.subheader("📋 Active Rules")
+            if st.session_state.custom_rules:
+                # Sort rules by priority for display
+                sorted_rules = sorted(st.session_state.custom_rules, key=lambda r: r.get('priority', 999))
+                st.info(f"Total rules: {len(st.session_state.custom_rules)} (sorted by priority)")
+
+                for idx, rule in enumerate(sorted_rules):
+                    # Find original index for deletion
+                    orig_idx = st.session_state.custom_rules.index(rule)
+
+                    # Build display label
+                    label_parts = [f"🔍 {rule['keyword']}"]
+
+                    # Add amount range if present
+                    if rule.get('min_amount') or rule.get('max_amount'):
+                        amount_range = []
                         if rule.get('min_amount'):
-                            filters.append(f"Min Amount: ${rule['min_amount']:.2f}")
+                            amount_range.append(f"≥ ${rule['min_amount']:.0f}")
                         if rule.get('max_amount'):
-                            filters.append(f"Max Amount: ${rule['max_amount']:.2f}")
-                        if rule.get('priority', 999) != 999:
-                            filters.append(f"Priority: {rule['priority']}")
-                        if rule.get('additional_keywords'):
-                            filters.append(f"Additional Keywords: {', '.join(rule['additional_keywords'])}")
-                        if rule.get('exclude_keywords'):
-                            filters.append(f"Exclusion Keywords: {', '.join(rule['exclude_keywords'])}")
-                        
-                        if filters:
-                            st.markdown("**Filters:**")
-                            for f in filters:
-                                st.markdown(f"- {f}")
-                    
-                    with col2:
-                        if st.button("🗑️ Delete", key=f"delete_rule_{orig_idx}"):
-                            st.session_state.custom_rules.pop(orig_idx)
+                            amount_range.append(f"≤ ${rule['max_amount']:.0f}")
+                        label_parts.append(f"[{' & '.join(amount_range)}]")
 
-                            save_business_rules(
-                                st.session_state.user["id"],
-                                st.session_state.active_business,
-                                st.session_state.custom_rules
-                            )
+                    # Add priority if not default
+                    if rule.get('priority', 999) != 999:
+                        label_parts.append(f"[Priority: {rule['priority']}]")
 
-                            # Reapply remaining rules to existing transactions
-                            reapply_custom_rules()
+                    label = " ".join(label_parts)
 
-                            st.success("Rule deleted and transactions updated!")
-                            st.rerun()
+                    with st.expander(label):
+                        col1, col2 = st.columns([4, 1])
 
-        else:
-            st.info("No custom rules defined yet. Add rules above to automatically categorize transactions.")
-        
+                        with col1:
+                            st.markdown(f"**→ {rule['account_display']}**")
+
+                            # Show filters if present
+                            filters = []
+                            if rule.get('min_amount'):
+                                filters.append(f"Min Amount: ${rule['min_amount']:.2f}")
+                            if rule.get('max_amount'):
+                                filters.append(f"Max Amount: ${rule['max_amount']:.2f}")
+                            if rule.get('priority', 999) != 999:
+                                filters.append(f"Priority: {rule['priority']}")
+                            if rule.get('additional_keywords'):
+                                filters.append(f"Additional Keywords: {', '.join(rule['additional_keywords'])}")
+                            if rule.get('exclude_keywords'):
+                                filters.append(f"Exclusion Keywords: {', '.join(rule['exclude_keywords'])}")
+
+                            if filters:
+                                st.markdown("**Filters:**")
+                                for f in filters:
+                                    st.markdown(f"- {f}")
+
+                        with col2:
+                            if st.button("🗑️ Delete", key=f"delete_rule_{orig_idx}"):
+                                st.session_state.custom_rules.pop(orig_idx)
+
+                                save_business_rules(
+                                    st.session_state.user["id"],
+                                    st.session_state.active_business,
+                                    st.session_state.custom_rules
+                                )
+
+                                # Reapply remaining rules to existing transactions
+                                reapply_custom_rules()
+
+                                st.success("Rule deleted and transactions updated!")
+                                st.rerun()
+
+            else:
+                st.info("No custom rules defined yet. Add rules above to automatically categorize transactions.")
+
+            st.markdown("---")
+            st.markdown("**💡 Enhanced Features:**")
+            st.markdown("- **Amount Filters**: Categorize same transaction types differently based on amount")
+            st.markdown("- **Priority Control**: Lower priority numbers are processed first (1 is highest)")
+            st.markdown("- **Pattern Matching**: Require multiple keywords (additional) or exclude specific ones")
+            st.markdown("- **Auto-Apply**: Rules are applied immediately to all current and future transactions")
+            st.markdown("- **Persistent**: Rules are saved automatically and persist across sessions")
+
+            st.markdown("---")
+            st.markdown("**📖 Example Use Cases:**")
+            st.markdown("1. **ATM by Amount**: Large ATMs (≥$200) → Temp Help, Small ATMs (<$200) → Other Expenses")
+            st.markdown("2. **Check by Amount**: Checks ≥$1000 → Salaries, <$1000 → Supplies")
+            st.markdown("3. **Pattern Match**: 'payment' + 'rent' keywords → Rent category")
+            st.markdown("4. **Exclusions**: 'stripe' transactions except 'refund' → Sales")
+
+        # Downloads
         st.markdown("---")
-        st.markdown("**💡 Enhanced Features:**")
-        st.markdown("- **Amount Filters**: Categorize same transaction types differently based on amount")
-        st.markdown("- **Priority Control**: Lower priority numbers are processed first (1 is highest)")
-        st.markdown("- **Pattern Matching**: Require multiple keywords (additional) or exclude specific ones")
-        st.markdown("- **Auto-Apply**: Rules are applied immediately to all current and future transactions")
-        st.markdown("- **Persistent**: Rules are saved automatically and persist across sessions")
-        
-        st.markdown("---")
-        st.markdown("**📖 Example Use Cases:**")
-        st.markdown("1. **ATM by Amount**: Large ATMs (≥$200) → Temp Help, Small ATMs (<$200) → Other Expenses")
-        st.markdown("2. **Check by Amount**: Checks ≥$1000 → Salaries, <$1000 → Supplies")
-        st.markdown("3. **Pattern Match**: 'payment' + 'rent' keywords → Rent category")
-        st.markdown("4. **Exclusions**: 'stripe' transactions except 'refund' → Sales")
-    
-    # Downloads
-    st.markdown("---")
-    st.header("📥 Download & Print Reports")
-    
-    # Show filter status in download section
-    if st.session_state.get('filter_active', False):
-        filter_info = f"""
-        **🔍 Active Filter Applied to Exports:**
-        - Date Range: {st.session_state.get('filter_start_date', 'N/A').strftime('%b %d, %Y')} - {st.session_state.get('filter_end_date', 'N/A').strftime('%b %d, %Y')}
-        - Showing {len(st.session_state.get('filtered_transactions', []))} of {len(st.session_state.get('all_transactions', []))} transactions
-        """
-        st.info(filter_info)
-        if st.session_state.get('filter_locked', False):
-            st.success("🔒 Filter is LOCKED - All exports and prints will use these filtered results")
-    
-    # Print button
-    st.markdown("""
-        <style>
-        @media print {
-            .stButton, .stFileUploader, .stSelectbox, .stTextInput, .stNumberInput, .stDateInput {
-                display: none !important;
-            }
-            .filter-status {
-                border: 2px solid #4CAF50;
-                padding: 10px;
-                margin: 10px 0;
-                background-color: #f0f0f0;
-                page-break-inside: avoid;
-            }
-        }
-        </style>
-    """, unsafe_allow_html=True)
-    
-    if st.button("🖨️ Print Current View", type="secondary", width='stretch'):
-        st.markdown('<script>window.print();</script>', unsafe_allow_html=True)
-        st.info("💡 Print dialog should open. The current filter settings will be preserved in the printout.")
-    
-    st.markdown("---")
-    st.subheader("Download Files")
-    
-    c1,c2,c3,c4 = st.columns(4)
-    
-    # Get the appropriate transactions for export (filtered if active)
-    export_transactions = get_active_transactions()
-    rg_export = ReportGenerator()
-    
-    with c1:
-        # Regenerate deposits with current filter
-        export_deposits_df = rg_export.generate_deposits_summary(export_transactions)
-        dep_csv = export_deposits_df.to_csv(index=False) if (export_deposits_df is not None and not export_deposits_df.empty) else ""
-        filename_suffix = "_filtered" if st.session_state.get('filter_active', False) else ""
-        st.download_button("⬇ Deposits CSV", dep_csv, f"deposits{filename_suffix}.csv", mime="text/csv")
-    
-    with c2:
-        # Regenerate withdrawals with current filter
-        export_withdrawals_df = rg_export.generate_withdrawals_summary(export_transactions)
-        wd_csv = export_withdrawals_df.to_csv(index=False) if (export_withdrawals_df is not None and not export_withdrawals_df.empty) else ""
-        filename_suffix = "_filtered" if st.session_state.get('filter_active', False) else ""
-        st.download_button("⬇ Withdrawals CSV", wd_csv, f"withdrawals{filename_suffix}.csv", mime="text/csv")
-    
-    with c3:
-        # Regenerate P&L with current filter
-        export_pl_df = rg_export.generate_pl_report(export_transactions)
-        pnl_csv = export_pl_df.to_csv(index=False) if (export_pl_df is not None and not export_pl_df.empty) else ""
-        filename_suffix = "_filtered" if st.session_state.get('filter_active', False) else ""
-        st.download_button("⬇ P&L CSV", pnl_csv, f"pnl{filename_suffix}.csv", mime="text/csv")
-    
-    with c4:
-        pl_statement_text = st.session_state.get("pl_statement_text", "")
-        filename_suffix = "_filtered" if st.session_state.get('filter_active', False) else ""
-        st.download_button("⬇ P&L Statement", pl_statement_text, f"pl_statement{filename_suffix}.txt", mime="text/plain")
+        st.header("📥 Download & Print Reports")
 
-    st.success("✅ Report generated. Verify totals against your bank statement.")
+        # Show filter status in download section
+        if st.session_state.get('filter_active', False):
+            filter_info = f"""
+            **🔍 Active Filter Applied to Exports:**
+            - Date Range: {st.session_state.get('filter_start_date', 'N/A').strftime('%b %d, %Y')} - {st.session_state.get('filter_end_date', 'N/A').strftime('%b %d, %Y')}
+            - Showing {len(st.session_state.get('filtered_transactions', []))} of {len(st.session_state.get('all_transactions', []))} transactions
+            """
+            st.info(filter_info)
+            if st.session_state.get('filter_locked', False):
+                st.success("🔒 Filter is LOCKED - All exports and prints will use these filtered results")
+
+        # Print button
+        st.markdown("""
+            <style>
+            @media print {
+                .stButton, .stFileUploader, .stSelectbox, .stTextInput, .stNumberInput, .stDateInput {
+                    display: none !important;
+                }
+                .filter-status {
+                    border: 2px solid #4CAF50;
+                    padding: 10px;
+                    margin: 10px 0;
+                    background-color: #f0f0f0;
+                    page-break-inside: avoid;
+                }
+            }
+            </style>
+        """, unsafe_allow_html=True)
+
+        if st.button("🖨️ Print Current View", type="secondary", width='stretch'):
+            st.markdown('<script>window.print();</script>', unsafe_allow_html=True)
+            st.info("💡 Print dialog should open. The current filter settings will be preserved in the printout.")
+
+        st.markdown("---")
+        st.subheader("Download Files")
+
+        c1,c2,c3,c4 = st.columns(4)
+
+        # Get the appropriate transactions for export (filtered if active)
+        export_transactions = get_active_transactions()
+        rg_export = ReportGenerator()
+
+        with c1:
+            # Regenerate deposits with current filter
+            export_deposits_df = rg_export.generate_deposits_summary(export_transactions)
+            dep_csv = export_deposits_df.to_csv(index=False) if (export_deposits_df is not None and not export_deposits_df.empty) else ""
+            filename_suffix = "_filtered" if st.session_state.get('filter_active', False) else ""
+            st.download_button("⬇ Deposits CSV", dep_csv, f"deposits{filename_suffix}.csv", mime="text/csv")
+
+        with c2:
+            # Regenerate withdrawals with current filter
+            export_withdrawals_df = rg_export.generate_withdrawals_summary(export_transactions)
+            wd_csv = export_withdrawals_df.to_csv(index=False) if (export_withdrawals_df is not None and not export_withdrawals_df.empty) else ""
+            filename_suffix = "_filtered" if st.session_state.get('filter_active', False) else ""
+            st.download_button("⬇ Withdrawals CSV", wd_csv, f"withdrawals{filename_suffix}.csv", mime="text/csv")
+
+        with c3:
+            # Regenerate P&L with current filter
+            export_pl_df = rg_export.generate_pl_report(export_transactions)
+            pnl_csv = export_pl_df.to_csv(index=False) if (export_pl_df is not None and not export_pl_df.empty) else ""
+            filename_suffix = "_filtered" if st.session_state.get('filter_active', False) else ""
+            st.download_button("⬇ P&L CSV", pnl_csv, f"pnl{filename_suffix}.csv", mime="text/csv")
+
+        with c4:
+            pl_statement_text = st.session_state.get("pl_statement_text", "")
+            filename_suffix = "_filtered" if st.session_state.get('filter_active', False) else ""
+            st.download_button("⬇ P&L Statement", pl_statement_text, f"pl_statement{filename_suffix}.txt", mime="text/plain")
+
+        st.success("✅ Report generated. Verify totals against your bank statement.")
+
+if __name__ == "__main__":
+    main()

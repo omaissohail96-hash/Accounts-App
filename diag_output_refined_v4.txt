@@ -1,0 +1,286 @@
+﻿python : WARNING:docume
+nt_parser:Page 1: Low 
+text content, 
+attempting OCR...
+At line:1 char:1
++ python 
+diag_all_banks.py 2>&1 
+| Out-File -FilePath 
+diag_output_refine ...
++ ~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~
+    + CategoryInfo     
+         : NotSpecifi  
+  ed: (WARNING:docum   
+ en...tempting OCR.    
+..:String) [], Rem    
+oteException
+    + FullyQualifiedEr 
+   rorId : NativeComm  
+  andError
+ 
+WARNING:document_parser
+:Page 2: Low text 
+content, attempting 
+OCR...
+WARNING:document_parser
+:Page 3: Low text 
+content, attempting 
+OCR...
+WARNING:document_parser
+:Page 4: Low text 
+content, attempting 
+OCR...
+WARNING:document_parser
+:Page 1: Low text 
+content, attempting 
+OCR...
+WARNING:document_parser
+:Page 2: Low text 
+content, attempting 
+OCR...
+WARNING:document_parser
+:Page 3: Low text 
+content, attempting 
+OCR...
+WARNING:document_parser
+:Page 4: Low text 
+content, attempting 
+OCR...
+WARNING:document_parser
+:Page 5: Low text 
+content, attempting 
+OCR...
+WARNING:document_parser
+:Page 1: Low text 
+content, attempting 
+OCR...
+WARNING:document_parser
+:Page 2: Low text 
+content, attempting 
+OCR...
+WARNING:document_parser
+:Page 1: Low text 
+content, attempting 
+OCR...
+WARNING:document_parser
+:Page 2: Low text 
+content, attempting 
+OCR...
+WARNING:document_parser
+:Page 1: Low text 
+content, attempting 
+OCR...
+WARNING:document_parser
+:Page 2: Low text 
+content, attempting 
+OCR...
+WARNING:document_parser
+:Page 3: Low text 
+content, attempting 
+OCR...
+WARNING:document_parser
+:Page 4: Low text 
+content, attempting 
+OCR...
+WARNING:document_parser
+:Page 5: Low text 
+content, attempting 
+OCR...
+
+======================================================================
+BANK: Chase_Dec  |  file: 20 Dec Chase.pdf
+  Detected: chase
+  Lines: 415  |  Unreadable pages: []
+  Transactions: 64  (deposits: 43, debits: 21, zero: 0)
+  Needs-review: 0  |  No-date: 0
+  Beg Balance: 22508.75   End Balance: 23885.7
+
+  --- First 5 ---
+    11/03/2025 | deposit        |     949.58 | Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:25
+    11/03/2025 | deposit        |     654.41 | Orig CO Name:Shopify Orig ID:1800948598 Desc Date: CO E
+    11/04/2025 | deposit        |    1442.05 | Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:25
+    11/04/2025 | deposit        |    1045.16 | Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:25
+    11/04/2025 | deposit        |     921.32 | Orig CO Name:Shopify Orig ID:Shopifypmt Desc Date:25110
+  --- Last 5 ---
+    11/17/2025 | ach            |    -870.08 | 11/17 Online Payment 26990884955 To Credit Union of Tex
+    11/17/2025 | ach            |    -183.00 | 11/17 Online ACH Payment 11195905950 To Aubreystallion 
+    11/17/2025 | ach            |    -808.00 | Orig CO Name:Wise Inc Orig ID:9453233521 Desc Date:2511
+    11/17/2025 | ach            |    -644.00 | Orig CO Name:Wise Inc Orig ID:9453233521 Desc Date:2511
+    11/03/2025 | fee            |      -2.50 | Standard ACH Pmnts Initial Fee 11/03 Standard ACH Pmnts
+
+======================================================================
+BANK: Chase_List  |  file: 2CED020D-078D-423B-A7BE-CFE61B680C1D-list.pdf
+  Detected: chase
+  Lines: 453  |  Unreadable pages: []
+  Transactions: 80  (deposits: 52, debits: 28, zero: 0)
+  Needs-review: 0  |  No-date: 0
+  Beg Balance: 10783.06   End Balance: 2338.34
+
+  --- First 5 ---
+    12/02/2024 | deposit        |    1479.03 | Orig CO Name:Shopify Orig ID:1800948598 Desc Date: CO E
+    12/02/2024 | deposit        |      46.16 | Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:24
+    12/03/2024 | deposit        |    1156.99 | Orig CO Name:Shopify Orig ID:Shopifypmt Desc Date:24120
+    12/03/2024 | deposit        |     352.04 | Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:24
+    12/03/2024 | deposit        |       3.50 | Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:24
+  --- Last 5 ---
+    12/30/2024 | ach            |   -6000.00 | 12/30 Online Transfer To Chk ...7251 Transaction#: 2321
+    12/31/2024 | ach            |   -6345.00 | 12/31 Online Transfer To Chk ...8120 Transaction#: 2323
+    12/31/2024 | ach            |   -2620.00 | Orig CO Name:Wise Inc Orig ID:9453233521 Desc Date:2412
+    12/31/2024 | ach            |    -809.00 | Orig CO Name:Wise Inc Orig ID:9453233521 Desc Date:2412
+    12/02/2024 | fee            |      -2.50 | Standard ACH Pmnts Initial Fee 12/02 Standard ACH Pmnts
+
+======================================================================
+BANK: BMO  |  file: BMO.pdf
+  Detected: bmo
+  Lines: 134  |  Unreadable pages: []
+  Transactions: 54  (deposits: 31, debits: 23, zero: 0)
+  Needs-review: 0  |  No-date: 0
+  Beg Balance: 8248.15   End Balance: 34745.8
+
+  --- First 5 ---
+    12/01/2025 | other          |    2994.35 | EDI/EFT CCD+ CREDIT Dec 01 EDI/EFT CCD+ CREDIT $2,994.3
+    12/01/2025 | other          |      -1.55 | ACH DEBIT Dec 01 ACH DEBIT ($1.55) $11,240.95
+    12/02/2025 | other          |     662.15 | EDI/EFT CCD+ CREDIT Dec 02 EDI/EFT CCD+ CREDIT $662.15
+    12/02/2025 | other          |    6400.00 | EDI/EFT CCD+ CREDIT Dec 02 EDI/EFT CCD+ CREDIT $6,400.0
+    12/04/2025 | other          |      50.47 | EDI/EFT CCD+ CREDIT Dec 04 EDI/EFT CCD+ CREDIT $50.47
+  --- Last 5 ---
+    12/30/2025 | other          |     528.81 | EDI/EFT CCD+ CREDIT Dec 30 EDI/EFT CCD+ CREDIT $528.81
+    12/30/2025 | check          |  -63000.00 | Check 2397 Dec 30 Check 2397 (63,000.00) $1,236.27
+    12/31/2025 | other          |     515.83 | EDI/EFT CCD+ CREDIT Dec 31 EDI/EFT CCD+ CREDIT $515.83
+    12/31/2025 | other          |   32993.59 | TELLER DEPOSIT Dec 31 TELLER DEPOSIT $32,993.59
+    12/31/2025 | other          |       0.11 | INTEREST PAID Dec 31 INTEREST PAID $0.11 $34,745.80
+
+  --- All Deposits ---
+    12/31/2025 |   32993.59 | TELLER DEPOSIT Dec 31 TELLER DEPOSIT $32,993.59
+    12/18/2025 |    7073.90 | EDI/EFT CCD+ CREDIT Dec 18 EDI/EFT CCD+ CREDIT $7,073.90
+    12/02/2025 |    6400.00 | EDI/EFT CCD+ CREDIT Dec 02 EDI/EFT CCD+ CREDIT $6,400.00 $18
+    12/01/2025 |    2994.35 | EDI/EFT CCD+ CREDIT Dec 01 EDI/EFT CCD+ CREDIT $2,994.35
+    12/16/2025 |    2639.76 | EDI/EFT CCD+ CREDIT Dec 16 EDI/EFT CCD+ CREDIT $2,639.76
+    12/16/2025 |    1394.64 | EDI/EFT CCD+ CREDIT Dec 16 EDI/EFT CCD+ CREDIT $1,394.64
+    12/10/2025 |    1162.36 | EDI/EFT CCD+ CREDIT Dec 10 EDI/EFT CCD+ CREDIT $1,162.36
+    12/16/2025 |    1113.55 | EDI/EFT CCD+ CREDIT Dec 16 EDI/EFT CCD+ CREDIT $1,113.55
+    12/08/2025 |     964.44 | EDI/EFT CCD+ CREDIT Dec 08 EDI/EFT CCD+ CREDIT $964.44
+    12/09/2025 |     872.76 | EDI/EFT CCD+ CREDIT Dec 09 EDI/EFT CCD+ CREDIT $872.76 $11,5
+    12/15/2025 |     803.99 | EDI/EFT CCD+ CREDIT Dec 15 EDI/EFT CCD+ CREDIT $803.99
+    12/15/2025 |     803.99 | EDI/EFT CCD+ CREDIT Dec 15 EDI/EFT CCD+ CREDIT $803.99
+    12/15/2025 |     803.99 | EDI/EFT CCD+ CREDIT Dec 15 EDI/EFT CCD+ CREDIT $803.99
+    12/15/2025 |     803.99 | EDI/EFT CCD+ CREDIT Dec 15 EDI/EFT CCD+ CREDIT $803.99 $16,3
+    12/16/2025 |     803.99 | EDI/EFT CCD+ CREDIT Dec 16 EDI/EFT CCD+ CREDIT $803.99
+    12/16/2025 |     803.99 | EDI/EFT CCD+ CREDIT Dec 16 EDI/EFT CCD+ CREDIT $803.99
+    12/16/2025 |     803.99 | EDI/EFT CCD+ CREDIT Dec 16 EDI/EFT CCD+ CREDIT $803.99
+    12/16/2025 |     666.37 | EDI/EFT CCD+ CREDIT Dec 16 EDI/EFT CCD+ CREDIT $666.37
+    12/02/2025 |     662.15 | EDI/EFT CCD+ CREDIT Dec 02 EDI/EFT CCD+ CREDIT $662.15
+    12/10/2025 |     533.15 | EDI/EFT CCD+ CREDIT Dec 10 EDI/EFT CCD+ CREDIT $533.15
+
+======================================================================
+BANK: BOA  |  file: BoA.pdf
+  Detected: boa
+  Lines: 195  |  Unreadable pages: []
+  Transactions: 146  (deposits: 120, debits: 26, zero: 0)
+  Needs-review: 11  |  No-date: 0
+  Beg Balance: 226369.75   End Balance: 190309.3
+
+  --- First 5 ---
+    12/01/2025 | deposit        |    1003.54 | Transfer Merchant Services ; ôMID8018534944" 12/01/25 T
+    12/01/2025 | deposit        |     825.00 | Zelle payment from RICK SU Conf# eaeopxOw0 12/01/25 Zel
+    12/01/2025 | deposit        |     505.00 | Zelle payment from MOHAMMED A SIDDIQUI for ôMedicalö; C
+    12/01/2025 | deposit        |     377.88 | Square Inc DES:SQ251201 1D:T3MSV289EHXJPFW INDN-Aziz Fa
+    12/01/2025 | deposit        |     375.00 | Zelle payment from ALI EHTISHAM for æFor Medical ExamÆ;
+  --- Last 5 ---
+    12/24/2025 | check          |    -350.00 | CHECK __357*
+    12/03/2025 | check          |  -15000.00 | CHECK 440
+    12/30/2025 | check          |   -1000.00 | CHECK 358
+    12/11/2025 | check          |  -20000.00 | CHECK 511
+    12/30/2025 | fee            |   96757.05 | [REPAIRED] 1D:2360938600 PPD
+
+  --- All Deposits ---
+    12/30/2025 |   96757.05 | [REPAIRED] 1D:2360938600 PPD
+    12/02/2025 |   41583.12 | [REPAIRED] 1D:1841010148 CCD
+    12/15/2025 |    5020.00 | BKOFAMERICA ATM 12/14 #000005032 DEPOSIT VILLA PARK - ROOSE 
+    12/22/2025 |    4420.00 | BKOFAMERICA ATM 12/21 #000005346 DEPOSIT WESTMONT WESTMONT =
+    12/16/2025 |    4100.00 | [REPAIRED] 1D:9424300002 CCD
+    12/26/2025 |    2958.27 | [REPAIRED] 1D:2366001277 PPD
+    12/15/2025 |    2498.00 | BKOFAMERICA ATM 12/15 #000005234 DEPOSIT VILLA PARK - ROOSE 
+    12/08/2025 |    1930.00 | Zelle payment from CHARLES AMIN for ôimmigration physicals";
+    12/10/2025 |    1500.34 | Transfer Merchant Services ; "MID8018534944" 12/10/25 Transf
+    12/17/2025 |    1500.00 | Zelle payment from OLUSEGUN JIMOH Conf# AAOWeH91Q 12/17/25 Z
+    12/22/2025 |    1430.00 | Zelle payment from EDWIN FIGUEROA for ôimmigration blood wor
+    12/18/2025 |    1200.59 | Transfer Merchant Services ; "MID8018534944" 12/18/25 Transf
+    12/04/2025 |    1130.12 | [REPAIRED] Square Inc DES:SQ251204 ID:T3NONCVNBJDOJSP INDNAz
+    12/15/2025 |    1128.50 | Transfer Merchant Services ; "MID8018534944" 12/15/25 Transf
+    12/23/2025 |    1125.00 | Zelle payment from SARVAGHAN RATHINAM for ôUSCIS MEDICAL"; C
+    12/29/2025 |    1125.00 | Zelle payment from SHAIFALI BHATNAGAR for *i693░; Conf# 99cO
+    12/04/2025 |    1097.09 | Transfer Merchant Services ; "MID8018534944" 12/04/25 Transf
+    12/01/2025 |    1003.54 | Transfer Merchant Services ; ôMID8018534944" 12/01/25 Transf
+    12/22/2025 |    1000.00 | Zelle payment from FOLASHADE F ADEWOYE Conf# ypT1owiXr 12/22
+    12/22/2025 |     983.24 | Transfer Merchant Services ; "MID8018534944" 12/22/25 Transf
+
+======================================================================
+BANK: FifthThird  |  file: FifthThird 53.pdf
+  Detected: fifth_third
+  Lines: 102  |  Unreadable pages: []
+  Transactions: 64  (deposits: 5, debits: 59, zero: 0)
+  Needs-review: 0  |  No-date: 0
+  Beg Balance: 401.0   End Balance: 599.51
+
+  --- First 5 ---
+    11/03/2026 | withdrawal     |      -2.99 | WEB INITIATED PAYMENT AT PAYPAL INST XFER APPLE.COM BIL
+    11/03/2026 | withdrawal     |      -3.52 | WEB INITIATED PAYMENT AT PAYPAL INST XFER UBER EATS 110
+    11/03/2026 | withdrawal     |      -4.00 | WEB INITIATED PAYMENT AT PAYPAL INST XFER UBER EATS 110
+    11/03/2026 | withdrawal     |     -18.95 | WEB INITIATED PAYMENT AT PAYPAL INST XFER UBER EATS 110
+    11/03/2026 | withdrawal     |     -20.73 | WEB INITIATED PAYMENT AT PAYPAL INST XFER UBER EATS 110
+  --- Last 5 ---
+    11/03/2026 | deposit        |    5678.69 | DEPOSIT 11/03 5,678.69 DEPOSIT
+    11/03/2026 | deposit        |    5798.32 | DEPOSIT 11/03 5,798.32 DEPOSIT
+    11/04/2026 | deposit        |    5075.21 | DEPOSIT 11/04 5,075.21 DEPOSIT
+    11/06/2026 | deposit        |    6308.37 | PELICAN MEDICAL ONLNE TRNSFR88871070 SENDER 825008810 M
+    11/21/2026 | deposit        |   16447.12 | DEPOSIT 11/21 16,447.12 DEPOSIT
+
+======================================================================
+BANK: US_Bank  |  file: US Bank.pdf
+  Detected: us_bank
+  Lines: 82  |  Unreadable pages: []
+  Transactions: 6  (deposits: 2, debits: 4, zero: 0)
+  Needs-review: 0  |  No-date: 0
+  Beg Balance: None   End Balance: None
+
+  --- First 5 ---
+    11/04/2025 | deposit        |    6500.00 | Mobile
+    11/05/2025 | withdrawal     |   -1500.00 | Mobile Banking Transfer To Account 158205632041
+    11/13/2025 | withdrawal     |    -100.00 | Electronic Withdrawal To IL DEPT OF REVEN
+    11/13/2025 | withdrawal     |    -706.00 | Electronic Withdrawal To IRS
+    11/25/2025 | deposit        |    2000.00 | Mobile Check Deposit
+
+======================================================================
+BANK: AMEX  |  file: AMEX.pdf
+  Detected: amex
+  Lines: 206  |  Unreadable pages: []
+  Transactions: 61  (deposits: 0, debits: 61, zero: 0)
+  Needs-review: 0  |  No-date: 0
+  Beg Balance: None   End Balance: 0.0
+
+  --- First 5 ---
+    11/19/2025 | fee            |     -61.13 | MATARI COFFEE SKOKIE SKOKIE a 11/19/25 MATARI COFFEE SK
+    11/20/2025 | fee            |     -88.12 | MATARI COFFEE SKOKIE SKOKIE iL 11/20/25 MATARI COFFEE S
+    11/21/2025 | fee            |  -20187.00 | AILIFE DIAGNOSTICS INC PEARLAND Ö 11/21/25 AILIFE DIAGN
+    11/24/2025 | fee            |     -38.12 | MICROSOFT MSBILL.INFO 11/24/25 MICROSOFT MSBILL.INFO $3
+    11/26/2025 | fee            |     -10.00 | HUMBLEFAX RIDGEWOOD NJ 11/26/25 HUMBLEFAX RIDGEWOOD NJ 
+  --- Last 5 ---
+    12/04/2025 | fee            |     -40.65 | RINGCENTRAL INC 888-898-4591 CA 12/04/25 RINGCENTRAL IN
+    12/04/2025 | fee            |    -192.26 | MIRION TECHNOLOGIES OAK RIDGE TN 12/04/25 MIRION TECHNO
+    12/05/2025 | fee            |     -85.82 | TST* NASH BROS 00088351 NILES it 12/05/25 TST* NASH BRO
+    12/11/2025 | fee            |     -48.75 | FEDEX - EXPRESS 800-622-1147 TN 12/11/25 FEDEX - EXPRES
+    12/12/2025 | fee            |     -40.65 | RINGCENTRAL INC 888-898-4591 CA 12/12/25 RINGCENTRAL IN
+
+
+SUMMARY TABLE:
+Bank            Detected     Total TX   Deposits   Debits     No TX?
+----------------------------------------------------------------------
+Chase_Dec       chase        64         43         21         
+Chase_List      chase        80         52         28         
+BMO             bmo          54         31         23         
+BOA             boa          146        120        26         
+FifthThird      fifth_third  64         5          59         
+US_Bank         us_bank      6          2          4          
+AMEX            amex         61         0          61         

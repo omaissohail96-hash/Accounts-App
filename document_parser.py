@@ -13,10 +13,14 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Poppler path for pdf2image — adjust if Poppler is installed elsewhere
+POPPLER_PATH = r"C:\poppler\poppler-25.12.0\Library\bin"
+
 try:
-    from pdf2image import convert_from_path
+    from pdf2image import convert_from_path, convert_from_bytes
     import pytesseract
     from PIL import Image
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
     OCR_AVAILABLE = True
 except ImportError:
     OCR_AVAILABLE = False
@@ -46,7 +50,7 @@ class DocumentParser:
             with pdfplumber.open(file_path) as pdf:
                 for page_num, page in enumerate(pdf.pages, 1):
                     page_text = page.extract_text()
-                    if page_text and len(page_text.strip()) > 50:
+                    if page_text and len(page_text.strip()) > 20:
                         lines = [line.strip() for line in page_text.split('\n') if line.strip()]
                         all_lines.extend(lines)
                         logger.info(f"Page {page_num}: Extracted {len(lines)} lines via pdfplumber")
@@ -55,11 +59,18 @@ class DocumentParser:
                         if OCR_AVAILABLE:
                             logger.warning(f"Page {page_num}: Low text content, attempting OCR...")
                             try:
-                                # Convert PDF page to image for OCR
-                                images = convert_from_path(file_path, first_page=page_num, last_page=page_num)
+                                # Convert PDF page to image for OCR using poppler
+                                images = convert_from_path(
+                                    file_path,
+                                    first_page=page_num,
+                                    last_page=page_num,
+                                    poppler_path=POPPLER_PATH
+                                )
                                 if images:
-                                    ocr_text = pytesseract.image_to_string(images[0])
-                                    if len(ocr_text.strip()) > 50:
+                                    # Use --psm 6 to assume a single uniform block of text, 
+                                    # which helps preserve horizontal table layout
+                                    ocr_text = pytesseract.image_to_string(images[0], config="--psm 6")
+                                    if len(ocr_text.strip()) > 20:
                                         lines = [line.strip() for line in ocr_text.split('\n') if line.strip()]
                                         all_lines.extend(lines)
                                         logger.info(f"Page {page_num}: Extracted {len(lines)} lines via OCR")
@@ -151,6 +162,14 @@ class DocumentParser:
                 return self.parse_pdf(tmp_path)
             elif filename.lower().endswith(('.doc', '.docx')):
                 return self.parse_word(tmp_path)
+            elif filename.lower().endswith('.csv'):
+                try:
+                    txt = file_bytes.decode("utf-8", errors="ignore")
+                    lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
+                    return lines, True, []
+                except Exception as e:
+                    logger.error(f"CSV parsing error: {str(e)}")
+                    return [], False, []
             else:
                 logger.error(f"Unsupported file type: {filename}")
                 return [], False, []

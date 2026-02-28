@@ -1,0 +1,51 @@
+﻿11/03 Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251031 CO Entry $949.58
+11/03 Orig CO Name:Shopify Orig ID:1800948598 Desc Date: CO Entry 654.41
+11/04 Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251103 CO Entry 1,442.05
+11/04 Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251103 CO Entry 1,045.16
+11/04 Orig CO Name:Shopify Orig ID:Shopifypmt Desc Date:251104 CO Entry 921.32
+11/04 Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251103 CO Entry 246.67
+11/05 Orig CO Name:Ebay Comfz0F7Wav Orig ID:1618206000 Desc Date:251105 CO Entry 2,633.68
+11/05 Orig CO Name:Ebay Comy4Aaijxx Orig ID:1618206000 Desc Date:251105 CO Entry 2,522.26
+11/05 Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251104 CO Entry 1,588.62
+11/06 Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251105 CO Entry 3,047.71
+11/06 Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251105 CO Entry 2,275.29
+11/10 Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251107 CO Entry 1,646.36
+11/12 Orig CO Name:Ebay Comwm8CA2Hy Orig ID:1618206000 Desc Date:251112 CO 2,009.66
+11/12 Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251110 CO Entry 1,591.35
+11/12 Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251110 CO Entry 1,021.00
+11/12 Orig CO Name:Shopify Orig ID:Shopifypmt Desc Date:251111 CO Entry 366.24
+11/12 Orig CO Name:Amazon.Com.CA Ul Orig ID:9978170001 Desc Date: CO Entry 165.44
+11/12 Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251112 CO Entry 161.33
+11/12 Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251110 CO Entry 79.93
+11/13 Orig CO Name:Tiktok Shop Orig ID:1473892853 Desc Date:251113 CO Entry 570.66
+11/13 Orig CO Name:Amazon Mexico Se Orig ID:2110000247 Desc Date: CO Entry 1.33
+11/14 Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251113 CO Entry 862.15
+11/17 Orig CO Name:Shopify Orig ID:1800948598 Desc Date: CO Entry 2,130.65
+11/17 Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251114 CO Entry 1,086.45
+11/18 Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251117 CO Entry 1,029.58
+11/18 Orig CO Name:Tiktok Shop Orig ID:1473892853 Desc Date:251118 CO Entry 924.13
+11/18 Orig CO Name:Shopify Orig ID:Shopifypmt Desc Date:251118 CO Entry 66.30
+11/19 Orig CO Name:Ebay Comzh5Jzstr Orig ID:1618206000 Desc Date:251119 CO Entry 2,412.52
+11/19 Orig CO Name:Ebay Com8Jzyxuct Orig ID:1618206000 Desc Date:251119 CO Entry 2,069.18
+11/19 Orig CO Name:Tiktok Shop Orig ID:1473892853 Desc Date:251119 CO Entry 384.56
+11/20 Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251119 CO Entry 499.53
+11/21 Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251120 CO Entry 651.55
+11/21 Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251120 CO Entry 483.22
+11/24 Orig CO Name:Shopify Orig ID:4270465600 Desc Date: CO Entry 3,308.62
+11/25 Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251124 CO Entry 710.23
+11/25 Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251124 CO Entry 588.87
+11/25 Orig CO Name:Shopify Orig ID:Shopifypmt Desc Date:251125 CO Entry 273.75
+11/25 Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251124 CO Entry 88.04
+11/26 Orig CO Name:Ebay Comtssnwrni Orig ID:1618206000 Desc Date:251126 CO Entry 1,874.35
+11/26 Orig CO Name:Tiktok Shop Orig ID:1473892853 Desc Date:251126 CO Entry 595.48
+11/26 Orig CO Name:Amazon.Com.CA Ul Orig ID:9978170001 Desc Date: CO Entry 341.27
+11/28 Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251126 CO Entry 485.96
+11/28 Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251128 CO Entry 349.22
+11/07 Orig CO Name:Shopify Orig ID:Shopifypmt Desc Date:251107 CO Entry 94.30
+11/10 Orig CO Name:Wise Inc Orig ID:9453233521 Desc Date:251110 CO Entry 1,041.78
+11/10 Orig CO Name:Wise Inc Orig ID:9453233521 Desc Date:251110 CO Entry 300.00
+11/12 Orig CO Name:Wise Inc Orig ID:9453233521 Desc Date:251112 CO Entry 743.46
+11/13 Orig CO Name:Irs Orig ID:3387702000 Desc Date:111325 CO Entry 759.00
+11/17 Orig CO Name:Wise Inc Orig ID:9453233521 Desc Date:251117 CO Entry 808.00
+11/17 Orig CO Name:Wise Inc Orig ID:9453233521 Desc Date:251117 CO Entry 644.00
+11/03 Standard ACH Pmnts Initial Fee $2.50

@@ -1,0 +1,207 @@
+=== AMEX (AMEX.pdf) ===
+  1: . .
+  2: Payment Due Date 01/14/26 Account Summary
+  3: Pay In Full Portion
+  4: Late Payment Warning: You are currently enrolled in a payment plan. If you Previous Balance $695.00
+  5: complete or are removed from the plan for any reason, and we do not receive Payments/Credits -$695.00
+  6: ‘ee Minimum hy shee? Due by the Payment Due Date of 01/14/26, you may New Charges +$0.00
+  7: ve to pay a late fee of $39.00 and your Pay Over Time APR may be increased to Fees +$0.00
+  8: the Penalty APR of 29.99%. New Balance = $0.00
+  9: You are currently enrolled in a payment plan. Please pay the agreed upon Pay Over Time Portion
+ 10: amount of $313.00 by the Payment Due Date listed above to keep your Previous Balance $3,741.44
+ 11: account current. We encourage you to also pay any new charges, in addition to Payments/Credits $9,076.33
+ 12: your plan payment of $313.00 to lower your overall balance and enable New Charges +$22,995.32
+ 13: additional spending. Fees +$0.00
+ 14: a Interest Charged +$0.00
+ 15: Minimum Payment Warning: If you make only the minimum payment each period,
+ 16: has ge New Balance = $17,660.43
+ 17: bie lee enna it will take you longer to pay off your Pay Over Time Mink tiie $313.00
+ 18: If you make no additional You will pay off the balance And you will pay an Account Total
+ 19: charges and each month you shown on this statement in estimated total of... Previous Balance $4,436.44
+ 20: Pay... about... Payments/Credits $9,771.33
+ 21: Only the New Charges +$22,995.32
+ 22: 26 years $40,447 Fees +$0.00
+ 23: ci al aed Interest Charged +$0.00
+ 24: $21,268 a
+ 25: $591 3 years (Savings = $19,179) New Balance $17,660.43
+ 26: Minimum Payment Due $313.00)
+ 27: If you would like information about credit counseling services, call 1-888-733-4139.
+ 28: B) See page 2 for important information about your account. Days in Billing Period: 30
+ 29: 2) Please refer to the IMPORTANT NOTICES section.
+ 30: @ Please note, your preset spending limit is $18,000.00. You have spent
+ 31: ~ $17,660.43.
+ 32: mE
+ 33: 11/19/25 MATARI COFFEE SKOKIE SKOKIE a $61.13 ¢
+ 34: 847-779-3141
+ 35: 11/20/25 MATARI COFFEE SKOKIE SKOKIE iL $88.12 ¢
+ 36: 847-779-3141
+ 37: 11/21/25 AILIFE DIAGNOSTICS INC PEARLAND ™ $20,187.00 ©
+ 38: 832-646-1422
+ 39: Continued on reverse
+ 40: I
+ 41: 11/24/25 MICROSOFT MSBILL.INFO $38.12¢
+ 42: Z72WFWN84KY4 98052
+ 43: 11/26/25 HUMBLEFAX RIDGEWOOD NJ $10.00 #
+ 44: +12019774168
+ 45: 12/01/25 GOOGLE *WORKSPACE_LIFE CC@GOOGLE.COM CA $52.80 ¢
+ 46: DIGITAL GOODS: APPS
+ 47: 12/01/25 LifeTimeFitness.COM 888-430-6432 MN $51.25
+ 48: MONTHLY DUES
+ 49: 888-430-6432
+ 50: 12/01/25 GOOGLE *GSUITE_MEDRUSH CC@GOOGLE.COM CA $235.20
+ 51: COMPUTER NETWORK/INFO.
+ 52: 12/04/25 WATER COFFEE DELIVERY WATER COFFEE DE TAMPA FL $1245 ¢
+ 53: 800-728-5508
+ 54: 12/06/25 ‘VISTAPRINT WALTHAM MA $131.52
+ 55: VP_9BT43RRN 600163
+ 56: 12/10/25 PEACOCK NEW YORK CITY NY $16.99 ¢
+ 57: CABLE & PAY TV
+ 58: 12/12/25 GEICO COMMERCIAL 866-509-9444 VA $216.03 @
+ 59: INSURANCE
+ 60: 12/12/25 VZWRLSS APOCC VISB 800-922-0204 FL $67.20
+ 61: BILL PAYMENT
+ 62: 12/12/25 ADOBE Adobe Systems SAN JOSE CA $21.99¢
+ 63: ADOBE.LY/ENUS
+ 64: 12/14/25 APPLE.COM/BILL INTERNET CHARGE CA $0.99 ¢
+ 65: RECORD STORE
+ 66: a _
+ 67: 11/27/25 UBEREATS help.uber.com cA $144.79 @
+ 68: RESTAURANT
+ 69: 11/27/25 MATARI COFFEE SKOKIE SKOKIE iL $13.47
+ 70: 847-779-3141
+ 71: 11/28/25 7201 N CICERO AVE 57444091409 UNCOLNWOOD IL $38.74¢
+ 72: 8476744848
+ 73: 11/28/25 1200 NRIVER RD 10008957002 MOUNT PROSPECT IL $45.13
+ 74: 8476996420
+ 75: 12/02/25 7201 N CICERO AVE 57444091409 UNCOLNWOOD IL $36.45 ¢
+ 76: 8476744848
+ 77: 12/03/25 7201 N CICERO AVE 57444091409 LINCOLNWOOD: IL $31.44
+ 78: 8476744848
+ 79: 12/07/25 BT*LOU MALNATI'S PIZZERIA BUFFALO GROVE IL $101.64 ¢
+ 80: 8473134932
+ 81: 12/07/25 1200 N RIVER RD 10008957002 MOUNT PROSPECT IL $42.65¢
+ 82: 8476996420
+ 83: 12/10/25 7201 N CICERO AVE 57444091409 LINCOLNWOOD: It $35.99 @
+ 84: 8476744848 SEEN y->=+ yr ==
+ 85: 12/14/25 1200 N RIVER RD 10008957002 MOUNT PROSPECT iL $37.08 ¢
+ 86: 8476996420
+ 87: 12/14/25 7201 N CICERO AVE 57444091409 UNCOLNWOOD iL $31.60
+ 88: 8476744848
+ 89: 12/14/25 7201 N CICERO AVE 57444091409 LINCOLNWOOD iL $1741¢
+ 90: 8476744848 ——————
+ 91: 12/15/25 TST* KABUL HOUSE 00213610 EVANSTON iL $71.38¢
+ 92: RESTAURANT
+ 93: Continued on next page
+ 94: ie
+ 95: 11/19/25 DD/BR #341778 Q35 341778 DES PLAINES It $3.43
+ 96: 847-635-3342 ——
+ 97: 11/20/25 DD/BR #352355 Q35 352355 SKOKIE IL $7.26¢
+ 98: 847-588-1517
+ 99: 11/24/25 DD/BR #341778 Q35 341778 DES PLAINES it $3.43
+100: 847-635-3342
+101: 11/25/25 DD/BR #304563 Q35 304563 SKOKIE IL $3.47¢
+102: 847-982-0000
+103: 11/25/25 6941 DEMPSTER ST 10008955006 MORTON GROVE IL $80.10
+104: 8476797158
+105: 11/26/25 DD/BR #352355 Q35 352355 SKOKIE IL $6.74¢
+106: 847-588-1517
+107: 11/28/25 DD/BR #362660 362660 NILES. it $1231¢
+108: 847-338-2750
+109: 11/30/25 EXXONMOBIL DES PLAINES IL $25.00 #
+110: 847-967-8073
+111: 12/01/25 DD/BR #341778 Q35 341778 DES PLAINES IL $3.43
+112: 847-635-3342
+113: 12/02/25 DD/BR #362660 362660 NILES IL $3.44¢
+114: 847-338-2750
+115: 12/03/25 DD/BR #341778 Q35 341778 DES PLAINES IL $6.66
+116: 847-635-3342
+117: 12/04/25 DD/BR #341778 Q35 341778 DES PLAINES IL $3.43
+118: 847-635-3342
+119: 12/05/25 DD/BR #362660 362660 NILES IL $3.44¢
+120: 847-338-2750
+121: 12/07/25 BP#8937682ST MARY OIL CO MORTON GROVE IL $54.71¢
+122: 847-583-0744
+123: 12/08/25 DD/BR #341778. Q35 341778 DES PLAINES iL $3.43¢
+124: 847-635-3342
+125: 12/09/25 DD/BR #341778 Q35 341778 DES PLAINES IL $3.43
+126: 847-635-3342
+127: 12/09/25 DUNKIN #354035 354035 NILES IL $3.47¢
+128: 847-588-1213
+129: 12/10/25 DD/BR #341778 Q35 341778 DES PLAINES IL $3434
+130: 847-635-3342
+131: orsy3 9-331
+132: 12/11/25 PARKINGMETER1 8772427901 CHICAGO iL $1.25¢
+133: 877-242-7901
+134: 12/11/25 DD/BR #341778 Q35 341778 DES PLAINES IL $3434
+135: 847-635-3342
+136: 12/12/25 DD/BR #362660 362660 NILES IL $3.44¢
+137: 847-338-2750
+138: 12/13/25 BP#1287600EXPRESS STOP 4 JACKSON Mi $46.15¢
+139: 517-395-2288
+140: 12/16/25 DD/BR #362660 362660 NILES IL $6.68 ¢
+141: 847-338-2750
+142: 12/17/25 DD/BR #341778 Q35 341778 DES PLAINES iL $3.43¢
+143: 847-635-3342
+144: Continued on reverse
+145: Amount
+146: 11/20/25 3255 CENTRAL RD 57444168801 GLENVIEW iL $65.11¢
+147: 8477247007
+148: 11/20/25 3255 CENTRAL RD 57444168801 GLENVIEW IL $33.33¢
+149: 8477247007
+150: 11/23/25 3255 CENTRAL RD 57444168801 GLENVIEW IL $33.33¢
+151: 8477247007
+152: 11/27/25 3255 CENTRAL RD 57444168801 GLENVIEW IL $87.08 ¢
+153: 8477247007
+154: 11/27/25 3255 CENTRAL RD 57444168801 GLENVIEW IL $33.33¢
+155: 8477247007
+156: 11/29/25 BURGER KING #27832 27832 CHICAGO iL $51.90¢4
+157: 847-971-3247
+158: 11/30/25 SIX POINTS MKT @ORD 527 527 ORD CHICAGO IL $842¢
+159: 702-385-5233
+160: 11/30/25 DUFRY ST5017 5017 ELK GROVE VIL IL $65.50¢
+161: 1130181026 60191
+162: DUTY FREE STORE
+163: ee...
+164: 11/23/25 REMOTEPC 818-275-5909 CALABASAS CA $9.95¢
+165: +18182755909
+166: 11/26/25 RINGCENTRAL INC 888-898-4591 CA $62.26¢
+167: 13883870001 94002
+168: 12/04/25 RINGCENTRAL INC 888-898-4591 CA $40.65 ¢
+169: 14036326001 94002
+170: 12/04/25 MIRION TECHNOLOGIES OAK RIDGE TN $192.26 ¢
+171: DOSIMETRY
+172: 12/05/25 TST* NASH BROS 00088351 NILES it $85.82¢
+173: 847-220-8440
+174: 12/11/25 FEDEX - EXPRESS 800-622-1147 TN $48.75 ¢
+175: 508158203 38132
+176: MED RUSH CLINICAL LAB IL
+177: DIRECT BILLING TRANSACTION
+178: FEDEX INV# 000508158203
+179: ———_ FEDEX 1-800-622-1147
+180: 12/12/25 RINGCENTRAL INC 888-898-4591 CA $40.65 ¢
+181: 19498319002 94002
+182: ee __
+183: Total Fees for this Period $0.00
+184: Interest Charged
+185: ee _
+186: Total Interest Charged for this Period $0.00
+187: About Trailing Interest
+188: You may see interest on your next statement even if you pay the new balance in full and on time and make no new charges. This is called
+189: “trailing interest”. Trailing interest is the interest charged when, for example, you didn't pay your previous balance in full. When that
+190: happens, we charge interest from the first day of the billing period until we receive your payment in full. You can avoid paying interest
+191: on purchases by paying your balance in full and on time each month. Please see the "When we charge interest” sub-section in your
+192: ‘Cardmember Agreement for details.
+193: 2025 Fees and Interest Totals Year-to-Date
+194: A mnt
+195: Total Fees in 2025 $695.00
+196: Total Interest in 2025 $0.00
+197: Interest Charge Calculation
+198: Your Annual Percentage Rate (APR) is the annual interest rate on your account.
+199: Variable APRs will not exceed 29.99%.
+200: Annual Balance Subject Interest
+201: Percentage Rate to Interest Rate Charge
+202: Pay Over Time option 7.99% (v) $0.00 $0.00
+203: Promotional Pay Over Time 7.99% $0.00 $0.00
+204: Rate Expires 12/19/2025 then will go to 17.74% (v)
+205: Total $0.00
+206: (v) Variable Rate

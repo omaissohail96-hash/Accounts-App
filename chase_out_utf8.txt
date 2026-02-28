@@ -1,0 +1,58 @@
+﻿=== Reading PDF with DocumentParser ===
+Total chars: 21375
+
+=== First 1000 chars of OCR text ===
+000000830995566
+CUSTOMER SERVICE INFORMATION
+42000000010404519730
+November 01, 2025throughNovember 28, 2025
+JPMorgan Chase Bank, N.A.
+Account Number:
+P O Box 182051
+Columbus, OH 43218-2051
+Web site: Chase.com
+Service Center: 1-800-242-7338
+00379154DRE 201 219 33325 NNNNNNNNNNN 1 000000000 640000 Para Espanol: 1-888-622-4273
+EAST2WEST TRADING INC. International Calls: 1-713-262-1679
+4300 S HIGHWAY 377 BLDG 1 We accept operator relay calls
+AUBREY TX76227-4920
+*start*after address message area1
+IMPORTANT UPDATE: Some fees are changing on business account(s) effective January 1,
+2026
+Beginning January 1, applicable fees will change on your account, and will be reflected on your statement for January.
+ò
+« «
+Chasòe Performance Business Checking and Chase Performance Business Checking with Interest:
+Monthly Service Fee will increase from $30 to $40. To learn more about ways to waive this fee please
+review the Additional Banking Services and Fees for Business Accounts Deposit Account Agreement
+
+=== detect_bank result ===
+  -> BankName.CHASE  (chase)
+
+=== parse_bank_statement ===
+  bank_name  : chase
+  errors      : []
+
+  TOTAL transactions extracted: 51
+
+First 20 transactions detail:
+   1: Parsed=2025-11-03 00:00:00 | Amt=    949.58 | Desc=Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251031 
+   2: Parsed=2025-11-03 00:00:00 | Amt=    654.41 | Desc=Orig CO Name:Shopify Orig ID:1800948598 Desc Date: CO Entry
+   3: Parsed=2025-11-04 00:00:00 | Amt=   1442.05 | Desc=Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251103 
+   4: Parsed=2025-11-04 00:00:00 | Amt=   1045.16 | Desc=Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251103 
+   5: Parsed=2025-11-04 00:00:00 | Amt=    921.32 | Desc=Orig CO Name:Shopify Orig ID:Shopifypmt Desc Date:251104 CO 
+   6: Parsed=2025-11-04 00:00:00 | Amt=    246.67 | Desc=Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251103 
+   7: Parsed=2025-11-05 00:00:00 | Amt=   2633.68 | Desc=Orig CO Name:Ebay Comfz0F7Wav Orig ID:1618206000 Desc Date:2
+   8: Parsed=2025-11-05 00:00:00 | Amt=   2522.26 | Desc=Orig CO Name:Ebay Comy4Aaijxx Orig ID:1618206000 Desc Date:2
+   9: Parsed=2025-11-05 00:00:00 | Amt=   1588.62 | Desc=Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251104 
+  10: Parsed=2025-11-06 00:00:00 | Amt=   3047.71 | Desc=Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251105 
+  11: Parsed=2025-11-06 00:00:00 | Amt=   2275.29 | Desc=Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251105 
+  12: Parsed=2025-11-10 00:00:00 | Amt=   1646.36 | Desc=Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251107 
+  13: Parsed=2025-11-12 00:00:00 | Amt=   2009.66 | Desc=Orig CO Name:Ebay Comwm8CA2Hy Orig ID:1618206000 Desc Date:2
+  14: Parsed=2025-11-12 00:00:00 | Amt=   1591.35 | Desc=Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251110 
+  15: Parsed=2025-11-12 00:00:00 | Amt=   1021.00 | Desc=Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251110 
+  16: Parsed=2025-11-12 00:00:00 | Amt=    366.24 | Desc=Orig CO Name:Shopify Orig ID:Shopifypmt Desc Date:251111 CO 
+  17: Parsed=2025-11-12 00:00:00 | Amt=    165.44 | Desc=Orig CO Name:Amazon.Com.CA Ul Orig ID:9978170001 Desc Date: 
+  18: Parsed=2025-11-12 00:00:00 | Amt=    161.33 | Desc=Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251112 
+  19: Parsed=2025-11-12 00:00:00 | Amt=     79.93 | Desc=Orig CO Name:Tiktok Inc Orig ID:9872667522 Desc Date:251110 
+  20: Parsed=2025-11-13 00:00:00 | Amt=    570.66 | Desc=Orig CO Name:Tiktok Shop Orig ID:1473892853 Desc Date:251113

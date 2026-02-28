@@ -1,0 +1,84 @@
+# System Architecture
+
+The CyberGuard AI SaaS Platform utilizes a multi-layered security architecture designed for high-performance threat detection, intelligence correlation, and enterprise-grade auditing.
+
+## Architecture Overview
+
+```mermaid
+graph TD
+    subgraph "Frontend Layer (React + Vite)"
+        UI["Dashboard UI (Glassmorphism)"]
+        State["LocalStorage (JWT + Workspace ID)"]
+    end
+
+    subgraph "Public API Layer (FastAPI)"
+        GW["API Gateway / Router"]
+        Auth["Auth Service (JWT/bcrypt)"]
+        AuditMW["Audit Middleware (Auto-logging)"]
+    end
+
+    subgraph "Security Intelligence Pipeline"
+        SG["SaaSGuard (Quotas & Rate Limits)"]
+        Agent["SecurityAgent (Orchestrator)"]
+        
+        subgraph "Intelligence Services"
+            TI["ThreatIntelService (Blacklist Lookups)"]
+            CE["CorrelationEngine (Pattern Discovery)"]
+        end
+
+        subgraph "ML Detection Layer"
+            URLD["URL Phishing Model (Random Forest)"]
+            EmailD["Email Detector (NLP/Naive Bayes)"]
+            NetD["Network IDS (Anomaly Detection)"]
+            WebD["Web Attack Detector (SQLi/XSS)"]
+        end
+    end
+
+    subgraph "Data Layer (SQLAlchemy + SQLite/PostgreSQL)"
+        DB[(CyberGuard Database)]
+        T1["Users & Workspaces"]
+        T2["Scan History (Indexed Entities)"]
+        T3["Threat Intelligence Cache"]
+        T4["Audit Logs"]
+    end
+
+    %% Flow Connections
+    UI -->|REST API + Bearer Token| GW
+    GW --> Auth
+    GW --> AuditMW
+    AuditMW --> SG
+    SG --> Agent
+    
+    Agent --> TI
+    Agent --> URLD
+    Agent --> EmailD
+    Agent --> NetD
+    Agent --> WebD
+    
+    TI <-->|Entity Check| T3
+    Agent --> CE
+    CE <-->|24h Lookups| T2
+    
+    Auth <--> T1
+    Agent -->|Record Results| T2
+    AuditMW -->|Compliance Logs| T4
+```
+
+## Component Breakdown
+
+### 1. Frontend Layer
+- **Dashboard UI**: A premium React-based interface using modern CSS (Glassmorphism) and Lucide icons.
+- **Session Management**: Uses JWT stored in local storage and workspace context to ensure multi-tenant isolation.
+
+### 2. Security Intelligence Pipeline
+- **SaaSGuard**: Enforces business logic (monthly quotas) and platform stability (rate limiting).
+- **SecurityAgent**: The central orchestrator that manages the flow of a scan request.
+- **ThreatIntelService**: Performs sub-millisecond lookups against blacklisted domains and IPs with TTL-based caching.
+- **CorrelationEngine**: Discovers relationships across different vectors (e.g., if a URL in an email matches a previously scanned network entity) and adjusts risk scores dynamically.
+
+### 3. ML Detection Layer
+- **Vector-Specific Models**: Dedicated machine learning models for different threat surfaces. Each model provides a confidence score and severity label which is then normalized by the [ScoringEngine](file:///c:/Users/Farooq/Desktop/Final_Year_Project/src/utils/scoring.py#3-75).
+
+### 4. Data Layer
+- **Multi-Tenant Isolation**: Every record is tied to a `workspace_id`.
+- **Indexed Entities**: The [entity](file:///c:/Users/Farooq/Desktop/Final_Year_Project/src/services/threat_intel.py#15-41) column in scan history is indexed to enable rapid cross-vector correlation across thousands of historical events.

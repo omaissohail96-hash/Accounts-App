@@ -1,0 +1,44 @@
+﻿python : Traceback 
+(most recent call 
+last):
+At line:1 char:1
++ python 
+diag_all_banks.py 2>&1 
+| Out-File -FilePath 
+diag_output_v5.txt ...
++ ~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~
+    + CategoryInfo     
+         : NotSpecifi  
+  ed: (Traceback (mo   
+ st recent call las    
+t)::String) [], Re    
+moteException
+    + FullyQualifiedEr 
+   rorId : NativeComm  
+  andError
+ 
+  File "C:\Users\Farooq
+\Desktop\New Folder (4)
+\Accounts-App\diag_all_
+banks.py", line 9, in 
+<module>
+    from 
+bank_statement_parser 
+import 
+parse_bank_statement, 
+BankName, detect_bank
+  File "C:\Users\Farooq
+\Desktop\New Folder (4)
+\Accounts-App\bank_stat
+ement_parser.py", line 
+1112
+    BANK_PARSERS: 
+Dict[BankName, 
+BankStatementParser] = 
+{
+                       
+                       
+          ^
+SyntaxError: '{' was 
+never closed

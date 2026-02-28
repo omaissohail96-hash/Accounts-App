@@ -1,14 +1,16 @@
 {
-  "users": [
-    {
-      "id": "36307feb-19e4-43e1-9da8-b6e4cbb99028",
-      "name": "Farooq Azam",
-      "email": "azamfarooq891@gmail.com",
-      "password": "123456"
-    },
-    {
-      "id": "330c8174-b3eb-40b1-9684-39fe63f94194",
-      "name": "omais ",
-      "email": "omaissohail96@gmail.com",
-      "password": "omais123"
-    }]}
+    "users": [
+        {
+            "id": "36307feb-19e4-43e1-9da8-b6e4cbb99028",
+            "name": "Farooq Azam",
+            "email": "azamfarooq891@gmail.com",
+            "password": "123456"
+        },
+        {
+            "id": "330c8174-b3eb-40b1-9684-39fe63f94194",
+            "name": "omais ",
+            "email": "omaissohail96@gmail.com",
+            "password": "omais123"
+        }
+    ]
+}
