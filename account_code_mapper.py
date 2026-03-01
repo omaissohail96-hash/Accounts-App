@@ -266,8 +266,9 @@ class AccountCodeMapper:
                 return keyword_match
             # matched expense code - ignore because direction wins
 
-        logger.debug(f"get_account_code: text='{text[:80]}', fallback income -> 601")
-        return ("601", "SALES")
+        logger.debug(f"get_account_code: text='{text[:80]}', no income keyword match -> fallback 603 OTHER INCOME")
+        return ("603", "OTHER INCOME")
+
 
 
     def get_account_name_display(self, account_code: str, account_name: str) -> str:
