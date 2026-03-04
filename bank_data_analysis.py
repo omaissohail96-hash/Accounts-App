@@ -1568,32 +1568,53 @@ class ReportGenerator:
         }
 
     def generate_deposits_summary(self, transactions: List[Transaction]) -> pd.DataFrame:
-        # Filter out balance entries before processing
-        deps = [t for t in transactions if t.amount > 0 and not self._is_balance_entry(t)]
+        # Include all deposits (including balance entries) in the summary
+        deps = [t for t in transactions if t.amount > 0]
         if not deps:
             return pd.DataFrame()
         df = pd.DataFrame([asdict(t) for t in deps])
         df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0.0)
+        
+        # Group by vendor
         grp = df.groupby('vendor').agg({'amount': 'sum', 'raw_line': 'count'}).reset_index()
         grp.columns = ['Source/Vendor', 'Subtotal ($)', 'Transaction Count']
         grp['Subtotal ($)'] = grp['Subtotal ($)'].astype(float)
+        
+        # Adjust transaction counts to exclude balance entries
+        for idx, row in grp.iterrows():
+            vendor = row['Source/Vendor']
+            vendor_txs = [t for t in deps if (t.vendor or 'Unknown Source') == vendor]
+            actual_count = len([t for t in vendor_txs if not self._is_balance_entry(t)])
+            grp.at[idx, 'Transaction Count'] = actual_count
+        
         total = grp['Subtotal ($)'].sum()
-        total_row = pd.DataFrame([{'Source/Vendor': 'TOTAL DEPOSITS', 'Subtotal ($)': total, 'Transaction Count': grp['Transaction Count'].sum()}])
+        total_count = grp['Transaction Count'].sum()
+        total_row = pd.DataFrame([{'Source/Vendor': 'TOTAL DEPOSITS', 'Subtotal ($)': total, 'Transaction Count': total_count}])
         out = pd.concat([grp, total_row], ignore_index=True)
         return out[['Source/Vendor', 'Transaction Count', 'Subtotal ($)']]
 
     def generate_withdrawals_summary(self, transactions: List[Transaction]) -> pd.DataFrame:
-        # Filter out balance entries before processing
-        wds = [t for t in transactions if t.amount < 0 and not self._is_balance_entry(t)]
+        # Include all withdrawals (including balance entries) in the summary
+        wds = [t for t in transactions if t.amount < 0]
         if not wds:
             return pd.DataFrame()
         df = pd.DataFrame([asdict(t) for t in wds])
         df['amount'] = df['amount'].abs()
         df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0.0)
+        
         grp = df.groupby('vendor').agg({'amount': 'sum', 'raw_line': 'count'}).reset_index()
         grp.columns = ['Vendor', 'Subtotal ($)', 'Transaction Count']
+        
+        # Adjust transaction counts to exclude balance entries
+        for idx, row in grp.iterrows():
+            vendor = row['Vendor']
+            vendor_txs = [t for t in wds if (t.vendor or 'Unknown Vendor') == vendor]
+            actual_count = len([t for t in vendor_txs if not self._is_balance_entry(t)])
+            grp.at[idx, 'Transaction Count'] = actual_count
+        
         total = grp['Subtotal ($)'].sum()
-        total_row = pd.DataFrame([{'Vendor': 'TOTAL WITHDRAWALS', 'Subtotal ($)': total, 'Transaction Count': grp['Transaction Count'].sum()}])
+        total_count = grp['Transaction Count'].sum()
+        total_row = pd.DataFrame([{'Vendor': 'TOTAL WITHDRAWALS', 'Subtotal ($)': total, 'Transaction Count': total_count}])
         out = pd.concat([grp, total_row], ignore_index=True)
         return out[['Vendor', 'Transaction Count', 'Subtotal ($)']]
 
@@ -3045,6 +3066,15 @@ from calendar import monthrange
 
 all_transactions = st.session_state.get("all_transactions", [])
 
+# Helper to check if transaction is a balance entry (should not be counted)
+def _is_balance_entry(tx):
+    if not tx.description:
+        return False
+    desc_lower = tx.description.lower()
+    return any(keyword in desc_lower for keyword in [
+        'beginning balance', 'opening balance', 'starting balance'
+    ])
+
 if all_transactions:
     # Always show sub-summary if transactions exist
     st.markdown("---")
@@ -3352,9 +3382,11 @@ if all_transactions:
         
         with col_btn3:
             if st.session_state.get('filter_active', False):
-                st.metric("Filtered", f"{len(st.session_state.get('filtered_transactions', []))} tx")
+                filtered_count = len([t for t in st.session_state.get('filtered_transactions', []) if not _is_balance_entry(t)])
+                st.metric("Filtered", f"{filtered_count} tx")
             else:
-                st.metric("Total", f"{len(all_transactions)} tx")
+                total_count = len([t for t in all_transactions if not _is_balance_entry(t)])
+                st.metric("Total", f"{total_count} tx")
         
         # Show active filter summary
         if st.session_state.get('filter_active', False):
@@ -3397,11 +3429,13 @@ if "transactions" in st.session_state and st.session_state.transactions:
         filter_banner_cols = st.columns([4, 1])
         with filter_banner_cols[0]:
             lock_text = " | 🔒 LOCKED" if st.session_state.get('filter_locked', False) else ""
+            filtered_count = len([t for t in st.session_state.get('filtered_transactions', []) if not _is_balance_entry(t)])
+            total_count = len([t for t in st.session_state.get('all_transactions', []) if not _is_balance_entry(t)])
             banner_html = f"""
                 <div style="background-color: #4CAF50; color: white; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
                     <h3 style="margin: 0; color: white;">🔍 FILTER ACTIVE</h3>
                     <p style="margin: 5px 0 0 0; color: white;">
-                        Showing <strong>{len(st.session_state.get('filtered_transactions', []))}</strong> of <strong>{len(st.session_state.get('all_transactions', []))}</strong> transactions | 
+                        Showing <strong>{filtered_count}</strong> of <strong>{total_count}</strong> transactions | 
                         {st.session_state.get('filter_start_date', date.today()).strftime('%b %d, %Y')} to {st.session_state.get('filter_end_date', date.today()).strftime('%b %d, %Y')}{lock_text}
                     </p>
                     <p style="margin: 5px 0 0 0; color: white; font-size: 0.9em;">
@@ -3423,12 +3457,13 @@ if "transactions" in st.session_state and st.session_state.transactions:
         all_active = [t for t in all_txs if not getattr(t, "is_excluded", False)]
         all_deposits = sum(t.amount for t in all_active if t.amount > 0)
         all_withdrawals = sum(abs(t.amount) for t in all_active if t.amount < 0)
+        all_txs_count = len([t for t in all_txs if not _is_balance_entry(t)])
         
         banner_html = f"""
             <div style="background-color: #2196F3; color: white; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
                 <h3 style="margin: 0; color: white;">📊 ALL TRANSACTIONS</h3>
                 <p style="margin: 5px 0 0 0; color: white;">
-                    Showing all <strong>{len(all_txs)}</strong> transactions from uploaded statements
+                    Showing all <strong>{all_txs_count}</strong> transactions from uploaded statements
                 </p>
                 <p style="margin: 5px 0 0 0; color: white; font-size: 0.9em;">
                     💰 Deposits: <strong>${all_deposits:,.2f}</strong> | 
@@ -3457,24 +3492,33 @@ if "transactions" in st.session_state and st.session_state.transactions:
     computed_deposits = sum(t.amount for t in transactions if t.amount > 0 and not is_tx_excluded(t))
     computed_withdrawals = sum(-t.amount for t in transactions if t.amount < 0 and not is_tx_excluded(t))
     
+    # Helper to check if transaction is a balance entry
+    def is_balance_entry(tx):
+        if not tx.description:
+            return False
+        desc_lower = tx.description.lower()
+        return any(keyword in desc_lower for keyword in [
+            'beginning balance', 'opening balance', 'starting balance'
+        ])
+    
     # Update stats with filtered transaction data
     stats['Total Deposit Amount'] = float(computed_deposits)
     stats['Total Withdrawal Amount'] = float(computed_withdrawals)
     stats['Net Income'] = float(computed_deposits - computed_withdrawals)
     
-    # Count transactions from filtered set
-    stats['Total Deposits'] = len([t for t in transactions if t.amount > 0 and not is_tx_excluded(t)])
-    stats['Total Withdrawals'] = len([t for t in transactions if t.amount < 0 and not is_tx_excluded(t)])
-    stats['Total Transactions'] = len(transactions)
+    # Count transactions from filtered set (excluding balance entries)
+    stats['Total Deposits'] = len([t for t in transactions if t.amount > 0 and not is_tx_excluded(t) and not is_balance_entry(t)])
+    stats['Total Withdrawals'] = len([t for t in transactions if t.amount < 0 and not is_tx_excluded(t) and not is_balance_entry(t)])
+    stats['Total Transactions'] = len([t for t in transactions if not is_balance_entry(t)])
     
     # Now display metrics with the filtered stats
     render_chase_header("SUMMARY")
     
     # Show filter status in header if active
     if st.session_state.get('filter_active', False):
-        st.caption(f"📊 Statistics based on filtered data ({len(transactions)} transactions)")
+        st.caption(f"📊 Statistics based on filtered data ({stats['Total Transactions']} transactions)")
     else:
-        st.caption(f"📊 Statistics based on all transactions ({len(transactions)} transactions)")
+        st.caption(f"📊 Statistics based on all transactions ({stats['Total Transactions']} transactions)")
     
     c1, c2, c3, c4 = st.columns(4)
 

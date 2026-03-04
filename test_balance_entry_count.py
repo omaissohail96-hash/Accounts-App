@@ -116,11 +116,32 @@ def test_balance_entry_exclusion():
     # Count rows (excluding TOTAL row)
     data_rows = len(deps_df) - 1
     print(f"   Vendors in summary: {data_rows}")
-    print(f"   Expected vendors: 1 (Client A only, excluding balance entries)")
-    if data_rows == 1:
-        print(f"   ✅ Correct - balance entries excluded from summary")
+    print(f"   Expected vendors: 3 (Client A, Opening Balance, Bank - all should appear)")
+    
+    # Check if Opening Balance appears with count = 0
+    opening_balance_rows = deps_df[deps_df['Source/Vendor'].str.contains('Opening Balance', na=False)]
+    if not opening_balance_rows.empty:
+        ob_count = opening_balance_rows.iloc[0]['Transaction Count']
+        ob_amount = opening_balance_rows.iloc[0]['Subtotal ($)']
+        print(f"   Opening Balance row found:")
+        print(f"     - Transaction Count: {ob_count} (should be 0)")
+        print(f"     - Subtotal: ${ob_amount:.2f} (should be $1000.00)")
+        if ob_count == 0 and abs(ob_amount - 1000.00) < 0.01:
+            print(f"   ✅ Correct - Opening Balance shows with amount but count = 0")
+        else:
+            print(f"   ❌ Incorrect - Expected count=0, amount=$1000.00")
     else:
-        print(f"   ❌ Incorrect - expected 1 vendor row")
+        print(f"   ⚠️  Opening Balance row not found in summary")
+    
+    # Check total count
+    total_row = deps_df[deps_df['Source/Vendor'] == 'TOTAL DEPOSITS']
+    if not total_row.empty:
+        total_count = total_row.iloc[0]['Transaction Count']
+        print(f"   Total Deposits Count: {total_count} (should be 1 - only Client A)")
+        if total_count == 1:
+            print(f"   ✅ Correct - Total count excludes balance entries")
+        else:
+            print(f"   ❌ Incorrect - Expected total count = 1")
     
     print()
     

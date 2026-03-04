@@ -62,14 +62,16 @@ class ReportGenerator:
         
         # Create summary rows
         summary_rows = []
-        for vendor, trans_list in sorted(vendor_groups.items()):
+        # Sort with balance entries first, then alphabetically
+        def sort_key(item):
+            vendor = item[0]
+            is_balance = any(keyword in vendor.lower() for keyword in ['opening balance', 'beginning balance', 'starting balance'])
+            return (0 if is_balance else 1, vendor)
+        
+        for vendor, trans_list in sorted(vendor_groups.items(), key=sort_key):
             subtotal = sum(t.amount for t in trans_list)
             # Exclude balance entries from count
             count = len([t for t in trans_list if not self._is_balance_entry(t)])
-            
-            # Skip vendors that only have balance entries
-            if count == 0:
-                continue
             
             # Create detailed transaction list
             trans_details = []
@@ -80,16 +82,18 @@ class ReportGenerator:
             
             summary_rows.append({
                 'Source/Vendor': vendor,
-                'Transaction Count': count,
+                'Transaction Count': None if count == 0 else count,
                 'Subtotal ($)': round(subtotal, 2),
                 'Transactions': '; '.join(trans_details)
             })
         
         df = pd.DataFrame(summary_rows)
+        # Format Transaction Count column to replace NaN with empty string for display
+        df['Transaction Count'] = df['Transaction Count'].apply(lambda x: '' if pd.isna(x) else int(x))
         # Add total row
         total_row = pd.DataFrame([{
             'Source/Vendor': 'TOTAL DEPOSITS',
-            'Transaction Count': df['Transaction Count'].sum(),  # Already excludes balance entries
+            'Transaction Count': len([t for t in deposits if not self._is_balance_entry(t)]),  # Count excluding balance entries
             'Subtotal ($)': df['Subtotal ($)'].sum(),
             'Transactions': ''
         }])
@@ -122,16 +126,17 @@ class ReportGenerator:
             category_total = 0
             first_in_category = True
             
-            for vendor in sorted(category_groups[category].keys()):
+            # Sort vendors with balance entries first
+            def vendor_sort_key(vendor):
+                is_balance = any(keyword in vendor.lower() for keyword in ['opening balance', 'beginning balance', 'starting balance'])
+                return (0 if is_balance else 1, vendor)
+            
+            for vendor in sorted(category_groups[category].keys(), key=vendor_sort_key):
                 trans_list = category_groups[category][vendor]
                 subtotal = abs(sum(t.amount for t in trans_list))
                 category_total += subtotal
                 # Exclude balance entries from count
                 count = len([t for t in trans_list if not self._is_balance_entry(t)])
-                
-                # Skip vendors that only have balance entries
-                if count == 0:
-                    continue
                 
                 # Create detailed transaction list
                 trans_details = []
@@ -143,7 +148,7 @@ class ReportGenerator:
                 summary_rows.append({
                     'Category': category if first_in_category else '',
                     'Vendor': vendor,
-                    'Transaction Count': count,  # Already filtered in loop
+                    'Transaction Count': None if count == 0 else count,
                     'Subtotal ($)': round(subtotal, 2),
                     'Transactions': '; '.join(trans_details)
                 })
@@ -159,6 +164,9 @@ class ReportGenerator:
             })
         
         df = pd.DataFrame(summary_rows)
+        # Format Transaction Count column to replace NaN with empty string for display
+        df['Transaction Count'] = df['Transaction Count'].apply(lambda x: '' if pd.isna(x) else int(x))
+        
         # Add grand total row
         total_withdrawals = abs(sum(t.amount for t in withdrawals))
         total_row = pd.DataFrame([{
