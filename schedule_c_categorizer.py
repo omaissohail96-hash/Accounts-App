@@ -18,6 +18,7 @@ import re
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass, field
 from bank_statement_parser import Transaction
+from bank_fee_parser import BankFeeParser
 import logging
 
 try:
@@ -49,6 +50,8 @@ class ScheduleCCategorizer:
     def __init__(self):
         # Build keyword rules for each category
         self._build_categorization_rules()
+        # Initialize robust bank fee parser
+        self.bank_fee_parser = BankFeeParser()
     
     def _build_categorization_rules(self):
         """Build comprehensive keyword-based categorization rules"""
@@ -469,8 +472,30 @@ class ScheduleCCategorizer:
                 tax_code="ADVERTISING"
             )
         
-        # Bank & platform fees
-        if any(keyword in combined_text for keyword in self.expense_bank_fees):
+        # Bank & platform fees - Use robust fee parser
+        fee_result = self.bank_fee_parser.parse_bank_fee(
+            transaction.description, 
+            transaction.amount
+        )
+        if fee_result.is_bank_fee:
+            # Update transaction with accurate fee amount and review flag
+            if fee_result.fee_amount is not None:
+                # Store original amount for reference
+                if not hasattr(transaction, 'original_amount'):
+                    transaction.original_amount = transaction.amount
+                # Update with extracted fee amount
+                transaction.amount = -abs(fee_result.fee_amount)  # Ensure negative (expense)
+            
+            # Set needs_review flag if fee parsing was uncertain
+            transaction.needs_review = fee_result.needs_review
+            
+            # Log if review needed
+            if fee_result.needs_review:
+                logger.warning(
+                    f"Bank fee needs review: {transaction.description} | "
+                    f"Reason: {fee_result.reason}"
+                )
+            
             return ScheduleCCategory(
                 part="Part II",
                 line_number="Line 18",

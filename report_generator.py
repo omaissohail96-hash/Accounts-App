@@ -18,6 +18,15 @@ class ReportGenerator:
     def __init__(self):
         self.account_codes = self._load_account_codes()
     
+    def _is_balance_entry(self, transaction: Transaction) -> bool:
+        """Check if transaction is a balance entry (should not be counted)"""
+        if not transaction.description:
+            return False
+        desc_lower = transaction.description.lower()
+        return any(keyword in desc_lower for keyword in [
+            'beginning balance', 'opening balance', 'starting balance'
+        ])
+    
     def _load_account_codes(self) -> Dict:
         """Load all account codes from account_keywords.json"""
         account_file = Path(__file__).parent / 'account_keywords.json'
@@ -55,7 +64,13 @@ class ReportGenerator:
         summary_rows = []
         for vendor, trans_list in sorted(vendor_groups.items()):
             subtotal = sum(t.amount for t in trans_list)
-            count = len(trans_list)
+            # Exclude balance entries from count
+            count = len([t for t in trans_list if not self._is_balance_entry(t)])
+            
+            # Skip vendors that only have balance entries
+            if count == 0:
+                continue
+            
             # Create detailed transaction list
             trans_details = []
             for t in sorted(trans_list, key=lambda x: x.date or ''):
@@ -74,7 +89,7 @@ class ReportGenerator:
         # Add total row
         total_row = pd.DataFrame([{
             'Source/Vendor': 'TOTAL DEPOSITS',
-            'Transaction Count': df['Transaction Count'].sum(),
+            'Transaction Count': df['Transaction Count'].sum(),  # Already excludes balance entries
             'Subtotal ($)': df['Subtotal ($)'].sum(),
             'Transactions': ''
         }])
@@ -111,7 +126,12 @@ class ReportGenerator:
                 trans_list = category_groups[category][vendor]
                 subtotal = abs(sum(t.amount for t in trans_list))
                 category_total += subtotal
-                count = len(trans_list)
+                # Exclude balance entries from count
+                count = len([t for t in trans_list if not self._is_balance_entry(t)])
+                
+                # Skip vendors that only have balance entries
+                if count == 0:
+                    continue
                 
                 # Create detailed transaction list
                 trans_details = []
@@ -123,7 +143,7 @@ class ReportGenerator:
                 summary_rows.append({
                     'Category': category if first_in_category else '',
                     'Vendor': vendor,
-                    'Transaction Count': count,
+                    'Transaction Count': count,  # Already filtered in loop
                     'Subtotal ($)': round(subtotal, 2),
                     'Transactions': '; '.join(trans_details)
                 })
@@ -133,7 +153,7 @@ class ReportGenerator:
             summary_rows.append({
                 'Category': f"{category} Subtotal",
                 'Vendor': '',
-                'Transaction Count': sum(len(category_groups[category][v]) for v in category_groups[category]),
+                'Transaction Count': sum(len([t for t in category_groups[category][v] if not self._is_balance_entry(t)]) for v in category_groups[category]),
                 'Subtotal ($)': round(category_total, 2),
                 'Transactions': ''
             })
@@ -144,7 +164,7 @@ class ReportGenerator:
         total_row = pd.DataFrame([{
             'Category': 'TOTAL WITHDRAWALS',
             'Vendor': '',
-            'Transaction Count': len(withdrawals),
+            'Transaction Count': len([t for t in withdrawals if not self._is_balance_entry(t)]),
             'Subtotal ($)': round(total_withdrawals, 2),
             'Transactions': ''
         }])
@@ -270,13 +290,13 @@ class ReportGenerator:
         needs_review = [t for t in transactions if t.needs_review]
         
         return {
-            'Total Deposits': len(deposits),
-            'Total Withdrawals': len(withdrawals),
+            'Total Deposits': len([t for t in deposits if not self._is_balance_entry(t)]),
+            'Total Withdrawals': len([t for t in withdrawals if not self._is_balance_entry(t)]),
             'Total Deposit Amount': sum(t.amount for t in deposits),
             'Total Withdrawal Amount': abs(sum(t.amount for t in withdrawals)),
             'Net Income': sum(t.amount for t in deposits) - abs(sum(t.amount for t in withdrawals)),
             'Transactions Needing Review': len(needs_review),
-            'Total Transactions': len(transactions)
+            'Total Transactions': len([t for t in transactions if not self._is_balance_entry(t)])
         }
     
     def export_to_excel(self, transactions: List[Transaction], filename: str = "bank_statement_report.xlsx"):

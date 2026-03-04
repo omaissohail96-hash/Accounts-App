@@ -17,6 +17,7 @@ from pathlib import Path
 import pdfplumber
 import pandas as pd
 import streamlit as st
+from bank_fee_parser import BankFeeParser
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 # ============================
 # Schedule C Keyword Rules
@@ -499,6 +500,8 @@ class FallbackStatementParser:
         self.opening_balance: Optional[float] = None
         self.statement_start_date: Optional[str] = None
         self.statement_year: Optional[int] = None
+        # Initialize robust bank fee parser
+        self.bank_fee_parser = BankFeeParser()
 
     SECTION_PATTERNS = {
         "DEPOSITS": re.compile(r'\bdeposits\s+and\s+additions\b', re.I),
@@ -908,10 +911,26 @@ class FallbackStatementParser:
 
             elif section == "ATM":
                 signed_amount = -abs(amt_val)
-            # --- FORCE BANK FEES ---
+            # --- ROBUST BANK FEE PARSING ---
             elif re.search(r'\bfee\b', block_text, re.I):
-                signed_amount = -abs(amt_val)
-                vendor = "Bank Fees"
+                # Use robust fee parser to extract actual fee amount
+                fee_result = self.bank_fee_parser.parse_bank_fee(block_text, amt_val)
+                if fee_result.is_bank_fee and fee_result.fee_amount is not None:
+                    # Use extracted fee amount (not transaction total)
+                    signed_amount = -abs(fee_result.fee_amount)
+                    vendor = "Bank Fees"
+                    # Set needs_review if parser flagged it
+                    needs_review = fee_result.needs_review
+                    if fee_result.needs_review:
+                        logger.warning(
+                            f"Bank fee needs review: {block_text[:100]} | "
+                            f"Reason: {fee_result.reason}"
+                        )
+                else:
+                    # Fallback to original logic if parser fails
+                    signed_amount = -abs(amt_val)
+                    vendor = "Bank Fees"
+                    needs_review = False
 
             elif section in ("CHECKS", "ELECTRONIC_WITHDRAWALS"):
                 signed_amount = -abs(amt_val)
@@ -923,20 +942,20 @@ class FallbackStatementParser:
                 else:
                     signed_amount = abs(amt_val)
 
-
-
-
-            vendor = self.extract_vendor(block_text, date_raw, amount_raw)
-            if section == "CHECKS":
-                pass
-            if section == "FEES":
-                vendor = "Bank Fees"
-            else:
-                vendor = self.extract_vendor(block_text, date_raw, amount_raw)
-
-            if section == "ATM":
-                vendor = "ATM Withdrawal"
-            needs_review = abs(signed_amount) >= 20000.0
+            # Vendor extraction - avoid overwriting fee vendor if already set
+            if section == "FEES" or 'vendor' not in locals() or vendor != "Bank Fees":
+                if section == "CHECKS":
+                    vendor = self.extract_vendor(block_text, date_raw, amount_raw)
+                elif section == "FEES":
+                    vendor = "Bank Fees"
+                elif section == "ATM":
+                    vendor = "ATM Withdrawal"
+                else:
+                    vendor = self.extract_vendor(block_text, date_raw, amount_raw)
+            
+            # Set needs_review for large transactions (if not already set by fee parser)
+            if 'needs_review' not in locals():
+                needs_review = abs(signed_amount) >= 20000.0
 
             # final safety: skip transactions that have UNKNOWN vendor and appear to be balance-only rows
             if vendor == "UNKNOWN":
@@ -1526,21 +1545,31 @@ class ScheduleCMapper:
 # Report generator
 # ----------------------------
 class ReportGenerator:
+    def _is_balance_entry(self, transaction: Transaction) -> bool:
+        """Check if transaction is a balance entry (should not be counted)"""
+        if not transaction.description:
+            return False
+        desc_lower = transaction.description.lower()
+        return any(keyword in desc_lower for keyword in [
+            'beginning balance', 'opening balance', 'starting balance'
+        ])
+    
     def generate_summary_statistics(self, transactions: List[Transaction]) -> Dict[str, Any]:
         total_deposits = sum(t.amount for t in transactions if t.amount > 0)
         total_withdrawals = sum(-t.amount for t in transactions if t.amount < 0)
         return {
             'Total Deposit Amount': float(total_deposits),
             'Total Withdrawal Amount': float(total_withdrawals),
-            'Total Deposits': int(sum(1 for t in transactions if t.amount > 0)),
-            'Total Withdrawals': int(sum(1 for t in transactions if t.amount < 0)),
-            'Total Transactions': len(transactions),
+            'Total Deposits': int(sum(1 for t in transactions if t.amount > 0 and not self._is_balance_entry(t))),
+            'Total Withdrawals': int(sum(1 for t in transactions if t.amount < 0 and not self._is_balance_entry(t))),
+            'Total Transactions': len([t for t in transactions if not self._is_balance_entry(t)]),
             'Net Income': float(total_deposits - total_withdrawals),
             'Transactions Needing Review': int(sum(1 for t in transactions if t.needs_review))
         }
 
     def generate_deposits_summary(self, transactions: List[Transaction]) -> pd.DataFrame:
-        deps = [t for t in transactions if t.amount > 0]
+        # Filter out balance entries before processing
+        deps = [t for t in transactions if t.amount > 0 and not self._is_balance_entry(t)]
         if not deps:
             return pd.DataFrame()
         df = pd.DataFrame([asdict(t) for t in deps])
@@ -1554,7 +1583,8 @@ class ReportGenerator:
         return out[['Source/Vendor', 'Transaction Count', 'Subtotal ($)']]
 
     def generate_withdrawals_summary(self, transactions: List[Transaction]) -> pd.DataFrame:
-        wds = [t for t in transactions if t.amount < 0]
+        # Filter out balance entries before processing
+        wds = [t for t in transactions if t.amount < 0 and not self._is_balance_entry(t)]
         if not wds:
             return pd.DataFrame()
         df = pd.DataFrame([asdict(t) for t in wds])
