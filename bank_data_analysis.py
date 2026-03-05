@@ -3069,50 +3069,50 @@ if uploaded or credit_card_files:
     if credit_card_files:
         st.info(f"Credit Card Statements: {len(credit_card_files)} files uploaded")
     
-    # Year selection for uploaded files
-    st.markdown("---")
-    st.subheader("📅 Statement Year Selection")
-    st.markdown("**Optional:** Manually specify the year for your statement(s) if automatic detection fails")
+    # # Year selection for uploaded files
+    # st.markdown("---")
+    # st.subheader("📅 Statement Year Selection")
+    # st.markdown("**Optional:** Manually specify the year for your statement(s) if automatic detection fails")
     
-    # Generate year options (last 10 years)
-    current_year = datetime.now().year
-    year_options = ["Auto-detect"] + [str(y) for y in range(current_year, current_year - 10, -1)]
+    # # Generate year options (last 10 years)
+    # current_year = datetime.now().year
+    # year_options = ["Auto-detect"] + [str(y) for y in range(current_year, current_year - 10, -1)]
     
     # Store selected years in a dictionary
     selected_years = {}
     
-    if uploaded:
-        uploaded_list = uploaded if isinstance(uploaded, list) else [uploaded]
-        st.markdown("**Bank Statement(s):**")
-        for idx, file in enumerate(uploaded_list):
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.text(f"📄 {file.name}")
-            with col2:
-                year_choice = st.selectbox(
-                    "Year",
-                    year_options,
-                    key=f"year_bank_{idx}_{file.name}",
-                    label_visibility="collapsed"
-                )
-                if year_choice != "Auto-detect":
-                    selected_years[file.name] = int(year_choice)
+    # if uploaded:
+    #     uploaded_list = uploaded if isinstance(uploaded, list) else [uploaded]
+    #     st.markdown("**Bank Statement(s):**")
+    #     for idx, file in enumerate(uploaded_list):
+    #         col1, col2 = st.columns([3, 1])
+    #         with col1:
+    #             st.text(f"📄 {file.name}")
+    #         with col2:
+    #             year_choice = st.selectbox(
+    #                 "Year",
+    #                 year_options,
+    #                 key=f"year_bank_{idx}_{file.name}",
+    #                 label_visibility="collapsed"
+    #             )
+    #             if year_choice != "Auto-detect":
+    #                 selected_years[file.name] = int(year_choice)
     
-    if credit_card_files:
-        st.markdown("**Credit Card Statement(s):**")
-        for idx, file in enumerate(credit_card_files):
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.text(f"💳 {file.name}")
-            with col2:
-                year_choice = st.selectbox(
-                    "Year",
-                    year_options,
-                    key=f"year_cc_{idx}_{file.name}",
-                    label_visibility="collapsed"
-                )
-                if year_choice != "Auto-detect":
-                    selected_years[file.name] = int(year_choice)
+    # if credit_card_files:
+    #     st.markdown("**Credit Card Statement(s):**")
+    #     for idx, file in enumerate(credit_card_files):
+    #         col1, col2 = st.columns([3, 1])
+    #         with col1:
+    #             st.text(f"💳 {file.name}")
+    #         with col2:
+    #             year_choice = st.selectbox(
+    #                 "Year",
+    #                 year_options,
+    #                 key=f"year_cc_{idx}_{file.name}",
+    #                 label_visibility="collapsed"
+    #             )
+    #             if year_choice != "Auto-detect":
+    #                 selected_years[file.name] = int(year_choice)
     
     st.markdown("---")
     
@@ -3155,6 +3155,11 @@ if uploaded or credit_card_files:
             if uploaded:
                 uploaded_list = uploaded if isinstance(uploaded, list) else [uploaded]
                 dp = DocumentParser()
+                
+                # FIRST: Extract all text from all files and their individual statement periods
+                all_files_data = []
+                all_statement_periods = []
+                
                 for up_file in uploaded_list:
                     file_bytes = up_file.read()
                     lines, ok, unreadable = dp.parse_document(file_bytes, up_file.name)
@@ -3163,53 +3168,89 @@ if uploaded or credit_card_files:
                         if unreadable:
                             st.warning(f"Unreadable pages in {up_file.name}: {unreadable}")
                     else:
-                        # Store raw text for Chase summary extraction
                         file_raw_text = "\n".join(lines)
                         all_raw_text += file_raw_text + "\n"
                         
-                        # Check if user manually selected year for this file
-                        manual_year = selected_years.get(up_file.name)
-                        if manual_year:
-                            st.info(f"✅ Using manually selected year for {up_file.name}: **{manual_year}**")
+                        # Extract statement period from THIS file
+                        file_period = extract_statement_period(file_raw_text)
                         
-                        # Use FallbackStatementParser for each file
-                        fb_parser = FallbackStatementParser(
-                            include_opening_balance=include_opening_balance,
-                            extract_check_memos=extract_check_memos
-                        )
-                        bank_txs, b_meta = fb_parser.parse_statement(lines, manual_year=manual_year)
-                        all_txs.extend(bank_txs)
-
-                        # Generate summary for THIS file
-                        file_summary_df = get_sub_summary(
-                            transactions=bank_txs,
-                            opening_balance=fb_parser.opening_balance if include_opening_balance else 0.0,
-                            raw_text=file_raw_text
-                        )
-                        st.session_state.statement_summaries.append({
-                            "filename": up_file.name,
-                            "df": file_summary_df
+                        all_files_data.append({
+                            'file': up_file,
+                            'lines': lines,
+                            'raw_text': file_raw_text,
+                            'period': file_period
                         })
                         
-                        # Store meta from the first file or merge?
-                        if not meta:
-                            meta = b_meta
-                            st.session_state.opening_balance = fb_parser.opening_balance
-                st.session_state.meta = meta
-                st.session_state.raw_text = all_raw_text  # Save for summary extraction
+                        if file_period:
+                            all_statement_periods.append(file_period)
+                            st.success(f"✅ **{up_file.name}:** {file_period[0].strftime('%b %d, %Y')} → {file_period[1].strftime('%b %d, %Y')} (from header)")
                 
-                # Extract statement period dates from header
-                statement_period = extract_statement_period(all_raw_text)
-                if statement_period:
-                    st.session_state.statement_period_start, st.session_state.statement_period_end = statement_period
-                    st.success(f"✅ **Statement Period extracted from header:** {statement_period[0].strftime('%B %d, %Y')} through {statement_period[1].strftime('%B %d, %Y')}")
+                # Determine the overall date range from all statement periods
+                if all_statement_periods:
+                    # Get the earliest start date and latest end date across all files
+                    all_start_dates = [period[0] for period in all_statement_periods]
+                    all_end_dates = [period[1] for period in all_statement_periods]
+                    
+                    overall_start = min(all_start_dates)
+                    overall_end = max(all_end_dates)
+                    
+                    st.session_state.statement_period_start = overall_start
+                    st.session_state.statement_period_end = overall_end
+                    
+                    st.info(f"📅 **Filter will use combined period:** {overall_start.strftime('%B %d, %Y')} → {overall_end.strftime('%B %d, %Y')}")
                 else:
-                    st.warning("⚠️ Could not extract statement period from header - will use transaction dates as fallback")
+                    st.warning("⚠️ Could not extract statement periods from headers - will use transaction dates as fallback")
                     # Clear any previous statement period if not found
                     if 'statement_period_start' in st.session_state:
                         del st.session_state.statement_period_start
                     if 'statement_period_end' in st.session_state:
                         del st.session_state.statement_period_end
+                
+                # NOW parse transactions with the correct year for EACH file
+                for file_data in all_files_data:
+                    up_file = file_data['file']
+                    lines = file_data['lines']
+                    file_raw_text = file_data['raw_text']
+                    file_period = file_data.get('period')
+                    
+                    # Priority: 1) Manual selection, 2) Extracted from this file's header, 3) Auto-detect
+                    # manual_year = selected_years.get(up_file.name)
+                    # if manual_year:
+                    #     st.info(f"✅ Using manually selected year for {up_file.name}: **{manual_year}**")
+                    #     year_to_use = manual_year
+                    # elif file_period:
+                    if file_period:
+                        # Use year from THIS file's statement header
+                        year_to_use = file_period[0].year
+                    else:
+                        # Let parser auto-detect
+                        year_to_use = None
+                    
+                    # Use FallbackStatementParser for each file
+                    fb_parser = FallbackStatementParser(
+                        include_opening_balance=include_opening_balance,
+                        extract_check_memos=extract_check_memos
+                    )
+                    bank_txs, b_meta = fb_parser.parse_statement(lines, manual_year=year_to_use)
+                    all_txs.extend(bank_txs)
+
+                    # Generate summary for THIS file
+                    file_summary_df = get_sub_summary(
+                        transactions=bank_txs,
+                        opening_balance=fb_parser.opening_balance if include_opening_balance else 0.0,
+                        raw_text=file_raw_text
+                    )
+                    st.session_state.statement_summaries.append({
+                        "filename": up_file.name,
+                        "df": file_summary_df
+                    })
+                    
+                    # Store meta from the first file or merge?
+                    if not meta:
+                        meta = b_meta
+                        st.session_state.opening_balance = fb_parser.opening_balance
+                st.session_state.meta = meta
+                st.session_state.raw_text = all_raw_text  # Save for summary extraction
             # Process credit card statements if uploaded
             if credit_card_files:
                 for cc_file in credit_card_files:
@@ -3231,27 +3272,50 @@ if uploaded or credit_card_files:
                             "summary": extracted_summary
                         })
                         
-                        # Extract and store credit card period dates from summary
+                        # Extract credit card period dates from summary
                         cc_date_range = extracted_summary.get("Opening/Closing Date", "N/A")
                         cc_period = parse_cc_period_dates(cc_date_range)
+                        
+                        # Determine correct year BEFORE storing period dates
+                        correct_year = None
+                        # cc_manual_year = selected_years.get(cc_file.name)
+                        
+                        # if cc_manual_year:
+                        #     correct_year = cc_manual_year
+                        #     st.info(f"✅ Using manually selected year for {cc_file.name}: **{cc_manual_year}**")
+                        # else:
+                        # Try to extract year from CC statement
+                        fb_temp = FallbackStatementParser()
+                        extracted_year = fb_temp._extract_statement_year(cc_lines)
+                        if extracted_year:
+                            correct_year = extracted_year
+                        
+                        # Correct the period dates if we have a different year
+                        if cc_period and correct_year:
+                            start_date, end_date = cc_period
+                            
+                            # If the parsed year doesn't match the correct year, adjust
+                            if start_date.year != correct_year:
+                                # Replace the year in both dates
+                                start_date = start_date.replace(year=correct_year)
+                                
+                                # End date might be in the next year (e.g., Dec 2024 → Jan 2025)
+                                if end_date.month < start_date.month:
+                                    end_date = end_date.replace(year=correct_year + 1)
+                                else:
+                                    end_date = end_date.replace(year=correct_year)
+                                
+                                cc_period = (start_date, end_date)
+                        
+                        # Now store the corrected period in session state
                         if cc_period:
-                            # Store CC period in session state (will be used for filter if no bank statement)
                             st.session_state.cc_period_start = cc_period[0]
                             st.session_state.cc_period_end = cc_period[1]
-                            st.success(f"✅ **Credit Card Period from summary:** {cc_period[0].strftime('%m/%d/%y')} to {cc_period[1].strftime('%m/%d/%y')}")
+                            st.success(f"✅ **{cc_file.name}:** {cc_period[0].strftime('%m/%d/%y')} → {cc_period[1].strftime('%m/%d/%y')} (from summary)")
                         
-                        # Check if user manually selected year for this credit card file
-                        cc_manual_year = selected_years.get(cc_file.name)
-                        if cc_manual_year:
-                            st.info(f"✅ Using manually selected year for {cc_file.name}: **{cc_manual_year}**")
-                            # Apply the manually selected year BEFORE parsing
-                            _STATEMENT_YEAR = cc_manual_year
-                        elif not uploaded:
-                            # If no bank statement was uploaded and no manual year, try to extract year from CC statement
-                            fb_temp = FallbackStatementParser()
-                            extracted_year = fb_temp._extract_statement_year(cc_lines)
-                            if extracted_year:
-                                _STATEMENT_YEAR = extracted_year
+                        # Apply the year for transaction parsing
+                        if correct_year:
+                            _STATEMENT_YEAR = correct_year
                     
                     cc_txs = CreditCardParser().parse(cc_lines)
 
@@ -3331,12 +3395,6 @@ if uploaded or credit_card_files:
 
             st.success(f"Processed {len(all_txs)} transactions ({parsed_from}).")
             
-            # Show detected statement year if available
-            if _STATEMENT_YEAR:
-                st.info(f"📅 Detected statement year: **{_STATEMENT_YEAR}** (automatically extracted from statement)")
-            else:
-                st.warning("⚠️ Could not detect year from statement - using current year for dates without year")
-            
             st.session_state.all_transactions = transactions
             st.session_state.filtered_transactions = transactions 
             
@@ -3358,6 +3416,39 @@ if uploaded or credit_card_files:
                 del st.session_state.filter_account_index
             if 'filter_stats' in st.session_state:
                 del st.session_state.filter_stats
+else:
+    # Clear all session state when files are removed
+    if 'transactions' in st.session_state:
+        del st.session_state.transactions
+    if 'all_transactions' in st.session_state:
+        del st.session_state.all_transactions
+    if 'filtered_transactions' in st.session_state:
+        del st.session_state.filtered_transactions
+    if 'cc_summaries' in st.session_state:
+        del st.session_state.cc_summaries
+    if 'statement_summaries' in st.session_state:
+        del st.session_state.statement_summaries
+    if 'statement_period_start' in st.session_state:
+        del st.session_state.statement_period_start
+    if 'statement_period_end' in st.session_state:
+        del st.session_state.statement_period_end
+    if 'cc_period_start' in st.session_state:
+        del st.session_state.cc_period_start
+    if 'cc_period_end' in st.session_state:
+        del st.session_state.cc_period_end
+    if 'stats' in st.session_state:
+        del st.session_state.stats
+    if 'deposit_df' in st.session_state:
+        del st.session_state.deposit_df
+    if 'withdrawal_df' in st.session_state:
+        del st.session_state.withdrawal_df
+    if 'pl_df' in st.session_state:
+        del st.session_state.pl_df
+    if 'filter_active' in st.session_state:
+        del st.session_state.filter_active
+    if 'filter_locked' in st.session_state:
+        del st.session_state.filter_locked
+
 # =========================================================================
 # PROFESSIONAL COMPREHENSIVE FILTER SYSTEM
 # =========================================================================
@@ -3449,72 +3540,48 @@ if all_transactions:
     if not parsed_dates:
         st.warning("⚠️ No valid dates found in transactions.")
     else:
-        # PRIORITY 1: Use statement period from header if extracted (bank statement)
+        # PRIORITY: Use exact dates from statement headers/summaries
+        # This shows the "official" statement period, even if some transactions fall outside it
+        
+        # Check if we have bank statement header dates
         if 'statement_period_start' in st.session_state and 'statement_period_end' in st.session_state:
             min_date = st.session_state.statement_period_start
             max_date = st.session_state.statement_period_end
-            st.success(f"✅ **Using statement header dates:** {min_date.strftime('%B %d, %Y')} through {max_date.strftime('%B %d, %Y')}")
-        # PRIORITY 2: Use bank statement transaction dates (ignore credit card if bank statement exists)
-        elif bank_statement_dates:
-            min_date = min(bank_statement_dates)
-            max_date = max(bank_statement_dates)
-            st.success(f"✅ **Using bank statement dates:** {min_date.strftime('%b %d, %Y')} → {max_date.strftime('%b %d, %Y')}")
-        # PRIORITY 3: Use credit card period dates from summary (if only CC uploaded and dates extracted)
-        elif 'cc_period_start' in st.session_state and 'cc_period_end' in st.session_state and cc_tx_count > 0 and bank_tx_count == 0:
+            st.success(f"✅ **Using statement header dates:** {min_date.strftime('%B %d, %Y')} → {max_date.strftime('%B %d, %Y')}")
+        # Check if we have credit card summary dates (only if no bank statement)
+        elif 'cc_period_start' in st.session_state and 'cc_period_end' in st.session_state and bank_tx_count == 0:
             min_date = st.session_state.cc_period_start
             max_date = st.session_state.cc_period_end
-            st.success(f"✅ **Using credit card summary dates:** {min_date.strftime('%m/%d/%y')} to {max_date.strftime('%m/%d/%y')}")
+            st.success(f"✅ **Using credit card summary dates:** {min_date.strftime('%B %d, %Y')} → {max_date.strftime('%B %d, %Y')}")
         else:
-            # PRIORITY 4: Fall back to all transaction dates (computed)
+            # Fallback: compute from actual transaction dates
             min_date = min(parsed_dates)
             max_date = max(parsed_dates)
-            st.info(f"ℹ️ **Filter range:** {min_date.strftime('%b %d, %Y')} → {max_date.strftime('%b %d, %Y')}")
+            st.info(f"ℹ️ **Computed from transactions:** {min_date.strftime('%B %d, %Y')} → {max_date.strftime('%B %d, %Y')}")
         
-        # Use EXACT dates from statement (not month-extended)
-        first_day_of_start_month = min_date  # Changed: use exact min date
-        last_day_of_end_month = max_date     # Changed: use exact max date
+        # Use EXACT dates from statements for filter
+        first_day_of_start_month = min_date
+        last_day_of_end_month = max_date
         
         # Store coverage dates in session state for reference
         st.session_state.statement_coverage_start = min_date
         st.session_state.statement_coverage_end = max_date
         
-        # AUTO-FILTER: Only apply when bank + credit card uploaded together
-        # Skip auto-filtering if user has already applied a manual filter
-        # Skip auto-filtering if only credit cards (all transactions already in range)
-        if bank_tx_count > 0 and cc_tx_count > 0 and not st.session_state.get('filter_active', False):
-            # Filter to show only transactions within bank statement period
-            date_filtered_transactions = []
-            excluded_count = 0
-            excluded_cc_count = 0
-            
-            for tx in all_transactions:
-                if tx.date:
-                    try:
-                        tx_date = datetime.strptime(tx.date, "%Y-%m-%d").date()
-                        if min_date <= tx_date <= max_date:
-                            date_filtered_transactions.append(tx)
-                        else:
-                            excluded_count += 1
-                            if getattr(tx, 'source', '') == 'CREDIT_CARD':
-                                excluded_cc_count += 1
-                    except:
-                        date_filtered_transactions.append(tx)  # Include if date parsing fails
-                else:
-                    date_filtered_transactions.append(tx)  # Include if no date
-            
-            # Update filtered transactions
-            all_transactions = date_filtered_transactions
-            st.session_state.all_transactions = date_filtered_transactions
-            st.session_state.filtered_transactions = date_filtered_transactions
-            
-            if excluded_count > 0:
-                if excluded_cc_count > 0:
-                    st.success(f"✅ **Auto-filtered to bank statement period:** {excluded_cc_count} credit card transaction(s) outside the bank period were excluded")
-                else:
-                    st.info(f"🔍 Filtered to statement period: {excluded_count} transaction(s) excluded")
-        elif not st.session_state.get('filter_active', False):
-            # No auto-filtering needed - just use all transactions (only if manual filter not active)
+        # Show all transactions from all uploaded files by default
+        # Some transactions may fall outside the official statement period - that's OK
+        if not st.session_state.get('filter_active', False):
             st.session_state.filtered_transactions = all_transactions
+        
+        # Check if any transactions fall outside the statement period
+        transactions_outside_period = []
+        for tx in all_transactions:
+            if tx.date:
+                try:
+                    tx_date = datetime.strptime(tx.date, "%Y-%m-%d").date()
+                    if tx_date < min_date or tx_date > max_date:
+                        transactions_outside_period.append(tx)
+                except:
+                    pass
         
         # Display coverage information
         days_count = (max_date - min_date).days
@@ -3522,6 +3589,21 @@ if all_transactions:
             f"📊 **Statement Period:** {min_date.strftime('%b %d, %Y')} → {max_date.strftime('%b %d, %Y')} "
             f"({days_count} days, {len(all_transactions)} transactions)"
         )
+        
+        # Show notice if transactions exist outside the statement period
+        if transactions_outside_period:
+            with st.expander(f"ℹ️ {len(transactions_outside_period)} transaction(s) fall outside the statement period", expanded=False):
+                st.markdown(f"""
+                **Note:** The statement header specifies the period **{min_date.strftime('%b %d, %Y')} - {max_date.strftime('%b %d, %Y')}**, 
+                but {len(transactions_outside_period)} transaction(s) have dates outside this range.
+                
+                This can happen when:
+                - Pending transactions from previous periods are included
+                - Statement includes transactions that posted after the period end
+                - Multiple statements with different periods are uploaded
+                
+                **All transactions are included in the data.** Use the filter below to narrow the date range if needed.
+                """)
 
         # Initialize filter state if not present
         if 'filter_active' not in st.session_state:
