@@ -40,6 +40,11 @@
           "account_display": "703 \u00b7 DIRECT MATERIALS",
           "max_amount": 50.0,
           "priority": 1
+        },
+        {
+          "keyword": "Amber Jpm99Bzx4Jak",
+          "account_code": "807",
+          "account_display": "807 \u00b7 TEMPORARY HELP"
         }
       ]
     }

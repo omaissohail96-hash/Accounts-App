@@ -1660,6 +1660,165 @@ def generate_pl_report_with_account_codes(self, categorized_transactions: List[t
 # ----------------------------
 # Custom Rules Management
 # ----------------------------
+
+@st.dialog("Create Custom Rule", width="large")
+def show_custom_rule_modal(prefill_keyword="", prefill_account_code=""):
+    """
+    Modal dialog for creating custom rules with pre-filled transaction details.
+    """
+    import json
+    from pathlib import Path
+    
+    st.markdown("""
+    **Set up an automatic rule** to categorize future transactions matching this pattern.
+    """)
+    
+    # Load all account codes for dropdown
+    all_account_options = {}
+    account_file = Path(__file__).parent / 'account_keywords.json'
+    try:
+        with open(account_file, 'r') as f:
+            data = json.load(f)
+            for acc_code, acc_details in data.items():
+                all_account_options[f"{acc_code} · {acc_details['name']}"] = acc_code
+    except Exception as e:
+        st.error(f"Error loading account codes: {e}")
+        return
+    
+    # Find matching account display for pre-filled code
+    prefill_account_display = None
+    if prefill_account_code:
+        for display, code in all_account_options.items():
+            if code == prefill_account_code:
+                prefill_account_display = display
+                break
+    
+    # Pre-fill the default index if we have a match
+    default_index = 0
+    if prefill_account_display:
+        account_list = list(all_account_options.keys())
+        try:
+            default_index = account_list.index(prefill_account_display)
+        except ValueError:
+            default_index = 0
+    
+    # Main rule inputs
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        rule_keyword = st.text_input(
+            "Primary Keyword *",
+            value=prefill_keyword,
+            placeholder="e.g., Check, Stripe",
+            key="modal_keyword",
+            help="Transactions containing this keyword will be automatically categorized"
+        )
+    
+    with col2:
+        rule_account = st.selectbox(
+            "Target Account Code *",
+            options=list(all_account_options.keys()),
+            index=default_index,
+            key="modal_account"
+        )
+    
+    # Optional filters in expander
+    with st.expander("🔧 Advanced Filters (Optional)", expanded=False):
+        st.markdown("**Amount Range:**")
+        col_amt1, col_amt2 = st.columns(2)
+        with col_amt1:
+            min_amount = st.number_input(
+                "Min Amount", min_value=0.0, value=0.0, step=10.0, key="modal_min"
+            )
+        with col_amt2:
+            max_amount = st.number_input(
+                "Max Amount", min_value=0.0, value=0.0, step=10.0, key="modal_max"
+            )
+        
+        st.markdown("**Pattern Matching:**")
+        priority = st.number_input(
+            "Priority (1=highest, 999=lowest)",
+            min_value=1, max_value=999, value=999, step=1, key="modal_priority"
+        )
+        
+        additional_keywords = st.text_input(
+            "Additional Keywords (ALL must match, comma-separated)",
+            placeholder="e.g., rent, payment",
+            key="modal_additional"
+        )
+        
+        exclude_keywords = st.text_input(
+            "Exclusion Keywords (skip if ANY match, comma-separated)",
+            placeholder="e.g., refund, dispute",
+            key="modal_exclude"
+        )
+    
+    # Action buttons
+    col_btn1, col_btn2 = st.columns(2)
+    
+    with col_btn1:
+        if st.button("✅ Create Rule", type="primary", use_container_width=True):
+            keyword = rule_keyword.strip()
+            
+            if not keyword:
+                st.error("❌ Please enter a keyword")
+                return
+            
+            account_code = all_account_options[rule_account]
+            
+            # Build the new rule
+            new_rule = {
+                'keyword': keyword,
+                'account_code': account_code,
+                'account_display': rule_account
+            }
+            
+            # Add optional fields only if they have meaningful values
+            if min_amount > 0:
+                new_rule['min_amount'] = min_amount
+            if max_amount > 0:
+                new_rule['max_amount'] = max_amount
+            if priority != 999:
+                new_rule['priority'] = priority
+            if additional_keywords.strip():
+                new_rule['additional_keywords'] = [kw.strip() for kw in additional_keywords.split(',') if kw.strip()]
+            if exclude_keywords.strip():
+                new_rule['exclude_keywords'] = [kw.strip() for kw in exclude_keywords.split(',') if kw.strip()]
+            
+            # Add rule to session state
+            if 'custom_rules' not in st.session_state:
+                st.session_state.custom_rules = []
+            
+            st.session_state.custom_rules.append(new_rule)
+            
+            # Save to file
+            save_business_rules(
+                st.session_state.user["id"],
+                st.session_state.active_business,
+                st.session_state.custom_rules
+            )
+            
+            # Reapply rules to existing transactions
+            reapply_custom_rules()
+            
+            # Success message
+            msg = f"✅ Rule created: '{keyword}' → {rule_account}"
+            if min_amount > 0 or max_amount > 0:
+                amount_filter = []
+                if min_amount > 0:
+                    amount_filter.append(f"${min_amount:.2f}+")
+                if max_amount > 0:
+                    amount_filter.append(f"up to ${max_amount:.2f}")
+                msg += f" ({', '.join(amount_filter)})"
+            
+            st.success(msg)
+            st.rerun()
+    
+    with col_btn2:
+        if st.button("❌ Cancel", use_container_width=True):
+            st.rerun()
+
+
 def reapply_custom_rules():
     import json
     from pathlib import Path
@@ -1962,8 +2121,109 @@ def extract_chase_summary(raw_text):
     return result
 
 # ----------------------------
+# Bank Statement Period Extraction
+# ----------------------------
+
+def extract_statement_period(raw_text: str) -> Optional[Tuple[date, date]]:
+    """
+    Extract statement period dates from bank statement header.
+    Returns tuple of (start_date, end_date) or None if not found.
+    
+    Handles formats like:
+    - "Statement Period: 11/29/2025 - 12/31/2025"
+    - "November 29, 2025 through December 31, 2025"
+    - "Period: 11/29/25 to 12/31/25"
+    """
+    import re
+    from datetime import datetime
+    
+    # Pattern 1: MM/DD/YYYY or MM/DD/YY format with various separators
+    # Matches: "11/29/2025 - 12/31/2025", "11/29/25 to 12/31/25", etc.
+    pattern1 = r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\s*(?:[-–to]+|through)\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})'
+    match1 = re.search(pattern1, raw_text, re.I)
+    
+    if match1:
+        start_str = match1.group(1)
+        end_str = match1.group(2)
+        
+        try:
+            # Try parsing with different formats
+            for fmt in ['%m/%d/%Y', '%m-%d-%Y', '%m/%d/%y', '%m-%d-%y']:
+                try:
+                    start_date = datetime.strptime(start_str, fmt).date()
+                    end_date = datetime.strptime(end_str, fmt).date()
+                    return (start_date, end_date)
+                except ValueError:
+                    continue
+        except Exception:
+            pass
+    
+    # Pattern 2: "Month DD, YYYY through Month DD, YYYY"
+    # Matches: "November 29, 2025 through December 31, 2025"
+    # Also handles OCR issues where spaces are missing: "November 29, 2025throughDecember 31, 2025"
+    pattern2 = r'([A-Z][a-z]+\s+\d{1,2},\s+\d{4})\s*(?:through|to|-)\s*([A-Z][a-z]+\s+\d{1,2},\s+\d{4})'
+    match2 = re.search(pattern2, raw_text, re.I)
+    
+    if match2:
+        start_str = match2.group(1)
+        end_str = match2.group(2)
+        
+        try:
+            start_date = datetime.strptime(start_str, '%B %d, %Y').date()
+            end_date = datetime.strptime(end_str, '%B %d, %Y').date()
+            return (start_date, end_date)
+        except ValueError:
+            try:
+                start_date = datetime.strptime(start_str, '%b %d, %Y').date()
+                end_date = datetime.strptime(end_str, '%b %d, %Y').date()
+                return (start_date, end_date)
+            except ValueError:
+                pass
+    
+    return None
+
+# ----------------------------
 # Credit Card Summary Extraction & Rendering
 # ----------------------------
+
+def parse_cc_period_dates(date_string: str) -> Optional[Tuple[date, date]]:
+    """
+    Parse credit card Opening/Closing Date string to extract start and end dates.
+    
+    Handles formats like:
+    - "03/14/24 - 05/13/24"
+    - "03/14/2024 to 05/13/2024"
+    - "3/14/24 – 5/13/24"
+    
+    Returns tuple of (start_date, end_date) or None if parsing fails.
+    """
+    import re
+    from datetime import datetime
+    
+    if not date_string or date_string == "N/A":
+        return None
+    
+    # Pattern: MM/DD/YY or MM/DD/YYYY with various separators
+    pattern = r'(\d{1,2}/\d{1,2}/\d{2,4})\s*(?:[-–to]+)\s*(\d{1,2}/\d{1,2}/\d{2,4})'
+    match = re.search(pattern, date_string, re.I)
+    
+    if match:
+        start_str = match.group(1)
+        end_str = match.group(2)
+        
+        try:
+            # Try parsing with different formats
+            for fmt in ['%m/%d/%Y', '%m/%d/%y']:
+                try:
+                    start_date = datetime.strptime(start_str, fmt).date()
+                    end_date = datetime.strptime(end_str, fmt).date()
+                    return (start_date, end_date)
+                except ValueError:
+                    continue
+        except Exception:
+            pass
+    
+    return None
 
 def extract_cc_summary(raw_text: str) -> Dict[str, Any]:
     """
@@ -2879,6 +3139,16 @@ if uploaded or credit_card_files:
             st.session_state.statement_summaries = [] # Store individual summaries
             st.session_state.cc_summaries = [] # Store list of credit card summaries
             
+            # Clear previous period dates
+            if 'statement_period_start' in st.session_state:
+                del st.session_state.statement_period_start
+            if 'statement_period_end' in st.session_state:
+                del st.session_state.statement_period_end
+            if 'cc_period_start' in st.session_state:
+                del st.session_state.cc_period_start
+            if 'cc_period_end' in st.session_state:
+                del st.session_state.cc_period_end
+            
             # Process main bank statements if uploaded
             if uploaded:
                 uploaded_list = uploaded if isinstance(uploaded, list) else [uploaded]
@@ -2925,6 +3195,19 @@ if uploaded or credit_card_files:
                             st.session_state.opening_balance = fb_parser.opening_balance
                 st.session_state.meta = meta
                 st.session_state.raw_text = all_raw_text  # Save for summary extraction
+                
+                # Extract statement period dates from header
+                statement_period = extract_statement_period(all_raw_text)
+                if statement_period:
+                    st.session_state.statement_period_start, st.session_state.statement_period_end = statement_period
+                    st.success(f"✅ **Statement Period extracted from header:** {statement_period[0].strftime('%B %d, %Y')} through {statement_period[1].strftime('%B %d, %Y')}")
+                else:
+                    st.warning("⚠️ Could not extract statement period from header - will use transaction dates as fallback")
+                    # Clear any previous statement period if not found
+                    if 'statement_period_start' in st.session_state:
+                        del st.session_state.statement_period_start
+                    if 'statement_period_end' in st.session_state:
+                        del st.session_state.statement_period_end
             # Process credit card statements if uploaded
             if credit_card_files:
                 for cc_file in credit_card_files:
@@ -2946,10 +3229,21 @@ if uploaded or credit_card_files:
                             "summary": extracted_summary
                         })
                         
+                        # Extract and store credit card period dates from summary
+                        cc_date_range = extracted_summary.get("Opening/Closing Date", "N/A")
+                        cc_period = parse_cc_period_dates(cc_date_range)
+                        if cc_period:
+                            # Store CC period in session state (will be used for filter if no bank statement)
+                            st.session_state.cc_period_start = cc_period[0]
+                            st.session_state.cc_period_end = cc_period[1]
+                            st.success(f"✅ **Credit Card Period from summary:** {cc_period[0].strftime('%m/%d/%y')} to {cc_period[1].strftime('%m/%d/%y')}")
+                        
                         # Check if user manually selected year for this credit card file
                         cc_manual_year = selected_years.get(cc_file.name)
                         if cc_manual_year:
                             st.info(f"✅ Using manually selected year for {cc_file.name}: **{cc_manual_year}**")
+                            # Apply the manually selected year BEFORE parsing
+                            _STATEMENT_YEAR = cc_manual_year
                         elif not uploaded:
                             # If no bank statement was uploaded and no manual year, try to extract year from CC statement
                             fb_temp = FallbackStatementParser()
@@ -3019,6 +3313,10 @@ if uploaded or credit_card_files:
                 else:
                     withdrawals_df = withdrawals_df.sort_values("Transaction Count", ascending=False).reset_index(drop=True)
 
+            # Sort transactions: Bank statement transactions first, then credit card transactions
+            # This ensures bank statement data is prioritized in displays
+            all_txs.sort(key=lambda tx: (0 if getattr(tx, 'source', '') != 'CREDIT_CARD' else 1, tx.date or ''))
+            
             # store in session
             st.session_state.transactions = all_txs
             st.session_state.stats = stats
@@ -3110,33 +3408,117 @@ if all_transactions:
     st.markdown("**Professional filtering system** - All filters work together to give you precise control")
     
     # Extract all valid dates with full date information
+    # PRIORITIZE bank statement dates over credit card dates
     parsed_dates = []
+    bank_statement_dates = []
+    bank_tx_count = 0
+    cc_tx_count = 0
+    
     for tx in all_transactions:
+        # Count transaction types
+        if getattr(tx, 'source', '') == 'CREDIT_CARD':
+            cc_tx_count += 1
+        else:
+            bank_tx_count += 1
+            
         if tx.date:
             try:
-                parsed_dates.append(datetime.strptime(tx.date, "%Y-%m-%d").date())
+                date_obj = datetime.strptime(tx.date, "%Y-%m-%d").date()
+                parsed_dates.append(date_obj)
+                # Separate bank statement dates from credit card dates
+                if getattr(tx, 'source', '') != 'CREDIT_CARD':
+                    bank_statement_dates.append(date_obj)
             except:
                 pass
+    
+    # Debug info: Show what was uploaded
+    if bank_tx_count > 0 and cc_tx_count > 0:
+        st.success(f"✅ **{bank_tx_count} bank transactions** + **{cc_tx_count} credit card transactions** uploaded - Prioritizing bank statement dates")
+    elif bank_tx_count > 0:
+        st.info(f"📁 **{bank_tx_count} bank transactions** uploaded")
+    elif cc_tx_count > 0:
+        st.info(f"💳 **{cc_tx_count} credit card transactions** uploaded")
+        if cc_tx_count > 100:  # Show helpful tip for large credit card uploads
+            with st.expander("💡 Tip: Upload bank statement for date prioritization", expanded=False):
+                st.markdown("If you also have a bank statement for this period, upload it together with credit cards to:\n"
+                           "- Prioritize bank statement dates in the filter\n"
+                           "- Auto-exclude credit card transactions outside the bank statement period")
 
     if not parsed_dates:
         st.warning("⚠️ No valid dates found in transactions.")
     else:
-        # Get actual min and max dates from ALL uploaded statements (bank + credit card)
-        min_date = min(parsed_dates)
-        max_date = max(parsed_dates)
+        # PRIORITY 1: Use statement period from header if extracted (bank statement)
+        if 'statement_period_start' in st.session_state and 'statement_period_end' in st.session_state:
+            min_date = st.session_state.statement_period_start
+            max_date = st.session_state.statement_period_end
+            st.success(f"✅ **Using statement header dates:** {min_date.strftime('%B %d, %Y')} through {max_date.strftime('%B %d, %Y')}")
+        # PRIORITY 2: Use bank statement transaction dates (ignore credit card if bank statement exists)
+        elif bank_statement_dates:
+            min_date = min(bank_statement_dates)
+            max_date = max(bank_statement_dates)
+            st.success(f"✅ **Using bank statement dates:** {min_date.strftime('%b %d, %Y')} → {max_date.strftime('%b %d, %Y')}")
+        # PRIORITY 3: Use credit card period dates from summary (if only CC uploaded and dates extracted)
+        elif 'cc_period_start' in st.session_state and 'cc_period_end' in st.session_state and cc_tx_count > 0 and bank_tx_count == 0:
+            min_date = st.session_state.cc_period_start
+            max_date = st.session_state.cc_period_end
+            st.success(f"✅ **Using credit card summary dates:** {min_date.strftime('%m/%d/%y')} to {max_date.strftime('%m/%d/%y')}")
+        else:
+            # PRIORITY 4: Fall back to all transaction dates (computed)
+            min_date = min(parsed_dates)
+            max_date = max(parsed_dates)
+            st.info(f"ℹ️ **Filter range:** {min_date.strftime('%b %d, %Y')} → {max_date.strftime('%b %d, %Y')}")
         
-        # Calculate first day of starting month and last day of ending month
-        first_day_of_start_month = min_date.replace(day=1)
-        last_day_of_end_month = max_date.replace(day=monthrange(max_date.year, max_date.month)[1])
+        # Use EXACT dates from statement (not month-extended)
+        first_day_of_start_month = min_date  # Changed: use exact min date
+        last_day_of_end_month = max_date     # Changed: use exact max date
         
         # Store coverage dates in session state for reference
         st.session_state.statement_coverage_start = min_date
         st.session_state.statement_coverage_end = max_date
         
-        # Display coverage information prominently
+        # AUTO-FILTER: Only apply when bank + credit card uploaded together
+        # Skip auto-filtering if user has already applied a manual filter
+        # Skip auto-filtering if only credit cards (all transactions already in range)
+        if bank_tx_count > 0 and cc_tx_count > 0 and not st.session_state.get('filter_active', False):
+            # Filter to show only transactions within bank statement period
+            date_filtered_transactions = []
+            excluded_count = 0
+            excluded_cc_count = 0
+            
+            for tx in all_transactions:
+                if tx.date:
+                    try:
+                        tx_date = datetime.strptime(tx.date, "%Y-%m-%d").date()
+                        if min_date <= tx_date <= max_date:
+                            date_filtered_transactions.append(tx)
+                        else:
+                            excluded_count += 1
+                            if getattr(tx, 'source', '') == 'CREDIT_CARD':
+                                excluded_cc_count += 1
+                    except:
+                        date_filtered_transactions.append(tx)  # Include if date parsing fails
+                else:
+                    date_filtered_transactions.append(tx)  # Include if no date
+            
+            # Update filtered transactions
+            all_transactions = date_filtered_transactions
+            st.session_state.all_transactions = date_filtered_transactions
+            st.session_state.filtered_transactions = date_filtered_transactions
+            
+            if excluded_count > 0:
+                if excluded_cc_count > 0:
+                    st.success(f"✅ **Auto-filtered to bank statement period:** {excluded_cc_count} credit card transaction(s) outside the bank period were excluded")
+                else:
+                    st.info(f"🔍 Filtered to statement period: {excluded_count} transaction(s) excluded")
+        elif not st.session_state.get('filter_active', False):
+            # No auto-filtering needed - just use all transactions (only if manual filter not active)
+            st.session_state.filtered_transactions = all_transactions
+        
+        # Display coverage information
+        days_count = (max_date - min_date).days
         st.info(
-            f"📊 **Statement Coverage:** {min_date.strftime('%b %d, %Y')} → {max_date.strftime('%b %d, %Y')} "
-            f"({(max_date - min_date).days} days, {len(all_transactions)} total transactions)"
+            f"📊 **Statement Period:** {min_date.strftime('%b %d, %Y')} → {max_date.strftime('%b %d, %Y')} "
+            f"({days_count} days, {len(all_transactions)} transactions)"
         )
 
         # Initialize filter state if not present
@@ -3170,6 +3552,7 @@ if all_transactions:
         
         # ===== DATE FILTER =====
         st.subheader("📅 Date Range")
+        st.caption(f"💡 Allowed range: {min_date.strftime('%b %d, %Y')} to {max_date.strftime('%b %d, %Y')} - Use arrows (◄ ►) in calendar to navigate months, or type date manually")
         col_date1, col_date2 = st.columns(2)
         
         # Use reset counter in widget keys to force recreation on reset
@@ -3179,21 +3562,27 @@ if all_transactions:
             start_md = st.date_input(
                 "Start Date",
                 value=first_day_of_start_month,
-                min_value=first_day_of_start_month,
-                max_value=last_day_of_end_month,
+                min_value=min_date,
+                max_value=max_date,
                 key=f"filter_start_md{reset_suffix}",
-                disabled=filter_disabled
+                disabled=filter_disabled,
+                help=f"Click calendar or type date in YYYY/MM/DD format. Range: {min_date.strftime('%Y/%m/%d')} to {max_date.strftime('%Y/%m/%d')}"
             )
 
         with col_date2:
             end_md = st.date_input(
                 "End Date",
                 value=last_day_of_end_month,
-                min_value=first_day_of_start_month,
-                max_value=last_day_of_end_month,
+                min_value=min_date,
+                max_value=max_date,
                 key=f"filter_end_md{reset_suffix}",
-                disabled=filter_disabled
+                disabled=filter_disabled,
+                help=f"Click calendar or type date in YYYY/MM/DD format. Range: {min_date.strftime('%Y/%m/%d')} to {max_date.strftime('%Y/%m/%d')}"
             )
+        
+        # Validate date range
+        if start_md > end_md:
+            st.warning("⚠️ Start Date cannot be after End Date. Please adjust your selection.")
         
         # ===== AMOUNT FILTER =====
         st.subheader("💰 Amount Range")
@@ -3721,6 +4110,53 @@ if "transactions" in st.session_state and st.session_state.transactions:
 
     elif selected_tab == (5 if SHOW_SCHEDULE_C else 4):  # P&L Account Codes tab
         st.subheader("📊 Profit & Loss (Account Codes)")
+        
+        # Display active custom rules in an expander
+        if st.session_state.get('custom_rules', []):
+            with st.expander(f"⚙️ Active Custom Rules ({len(st.session_state.custom_rules)})", expanded=False):
+                sorted_rules = sorted(st.session_state.custom_rules, key=lambda r: r.get('priority', 999))
+                
+                for idx, rule in enumerate(sorted_rules):
+                    orig_idx = st.session_state.custom_rules.index(rule)
+                    
+                    # Build display label
+                    label_parts = [f"🔍 **{rule['keyword']}** → {rule['account_display']}"]
+                    
+                    # Add filters inline
+                    filters = []
+                    if rule.get('min_amount'):
+                        filters.append(f"≥${rule['min_amount']:.0f}")
+                    if rule.get('max_amount'):
+                        filters.append(f"≤${rule['max_amount']:.0f}")
+                    if rule.get('priority', 999) != 999:
+                        filters.append(f"Priority:{rule['priority']}")
+                    if rule.get('additional_keywords'):
+                        filters.append(f"+{','.join(rule['additional_keywords'])}")
+                    if rule.get('exclude_keywords'):
+                        filters.append(f"-{','.join(rule['exclude_keywords'])}")
+                    
+                    if filters:
+                        label = " ".join(label_parts) + f" [{' | '.join(filters)}]"
+                    else:
+                        label = " ".join(label_parts)
+                    
+                    col1, col2 = st.columns([5, 1])
+                    with col1:
+                        st.markdown(label)
+                    with col2:
+                        if st.button("🗑️", key=f"delete_rule_pl_{orig_idx}", help="Delete this rule"):
+                            st.session_state.custom_rules.pop(orig_idx)
+                            save_business_rules(
+                                st.session_state.user["id"],
+                                st.session_state.active_business,
+                                st.session_state.custom_rules
+                            )
+                            reapply_custom_rules()
+                            st.success("Rule deleted!")
+                            st.rerun()
+                
+                st.caption("💡 Create new rules by clicking 'Change' on any transaction below")
+        
         reapply_custom_rules()
         # Build categorized list that matches filtered transactions
         all_categorized = st.session_state.categorized_transactions
@@ -3767,32 +4203,32 @@ if "transactions" in st.session_state and st.session_state.transactions:
                 # Use the date picker values (when filter UI is present but not applied)
                 start = st.session_state.filter_start_md
                 end = st.session_state.filter_end_md
-                # Get first day of starting month and last day of ending month
-                from calendar import monthrange
-                first_day_of_month = start.replace(day=1)
-                last_day_of_month = end.replace(day=monthrange(end.year, end.month)[1])
-                # Format: "Jan 01, 2025 - Dec 31, 2025"
-                period_input = f"{first_day_of_month.strftime('%b %d, %Y')} - {last_day_of_month.strftime('%b %d, %Y')}"
+                # Use EXACT dates from filter UI (not month-extended)
+                period_input = f"{start.strftime('%b %d, %Y')} - {end.strftime('%b %d, %Y')}"
             else:
-                # Fall back to detecting from transactions
-                date_objs = []
-                for tx in transactions:
-                    if tx.date:
-                        try:
-                            date_objs.append(datetime.strptime(tx.date, "%Y-%m-%d"))
-                        except:
-                            pass
-
-                if date_objs:
-                    start = min(date_objs)
-                    end = max(date_objs)
-                    # Get first day of starting month and last day of ending month
-                    from calendar import monthrange
-                    first_day_of_month = start.replace(day=1)
-                    last_day_of_month = end.replace(day=monthrange(end.year, end.month)[1])
-                    period_input = f"{first_day_of_month.strftime('%b %d, %Y')} - {last_day_of_month.strftime('%b %d, %Y')}"
+                # Fall back to statement coverage dates (exact dates from statement header)
+                if 'statement_coverage_start' in st.session_state and 'statement_coverage_end' in st.session_state:
+                    start = st.session_state.statement_coverage_start
+                    end = st.session_state.statement_coverage_end
+                    # Use EXACT dates from statement (not month-extended)
+                    period_input = f"{start.strftime('%b %d, %Y')} - {end.strftime('%b %d, %Y')}"
                 else:
-                    period_input = datetime.now().strftime("%B %Y")
+                    # Last resort: detect from transactions
+                    date_objs = []
+                    for tx in transactions:
+                        if tx.date:
+                            try:
+                                date_objs.append(datetime.strptime(tx.date, "%Y-%m-%d"))
+                            except:
+                                pass
+
+                    if date_objs:
+                        start = min(date_objs)
+                        end = max(date_objs)
+                        # Use EXACT dates (not month-extended)
+                        period_input = f"{start.strftime('%b %d, %Y')} - {end.strftime('%b %d, %Y')}"
+                    else:
+                        period_input = datetime.now().strftime("%B %Y")
 
             # Get business name from active profile
             business_name = st.session_state.get("active_business", "")
@@ -4020,7 +4456,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
                         label += f" [{len(excluded_txs)} excluded]"
 
                     with st.expander(label):
-                        st.info("💡 Click 'Change Account Code' to reassign any transaction to a different account")
+                        st.info("💡 Click 'Change' to create an automatic rule or reassign any transaction to a different account")
                         
                         for idx, t in enumerate(txs):
                             col1, col2, col3, col4 = st.columns([2, 2, 1 , 1])
@@ -4032,47 +4468,18 @@ if "transactions" in st.session_state and st.session_state.transactions:
                                 # Unique key for each transaction
                                 tx_key = f"change_{code}_{idx}_{t.date}_{abs(t.amount)}"
                                 if st.button("Change", key=tx_key):
-                                    st.session_state[f"editing_{tx_key}"] = True
-                            
-                            # Show dropdown if editing this transaction
-                            if st.session_state.get(f"editing_{tx_key}", False):
-                                # Filter out current account code from options
-                                available_options = {k: v for k, v in all_account_options.items() if v != code}
-                                
-                                selected_display = st.selectbox(
-                                    "Select new account code:",
-                                    options=list(available_options.keys()),
-                                    key=f"select_{tx_key}"
-                                )
-                                
-                                col_save, col_cancel = st.columns(2)
-                                with col_save:
-                                    if st.button("✅ Save", key=f"save_{tx_key}"):
-                                        new_code = available_options[selected_display]
-                                        for session_tx in st.session_state.transactions:
-                                            if (session_tx.date == t.date and 
-                                                session_tx.description == t.description and 
-                                                session_tx.amount == t.amount):
-                                                session_tx.account_code = new_code
-                                                # mark manual override so rules won't overwrite
-                                                session_tx._mapped_by_rule = False
-
-                                        if "filtered_transactions" in st.session_state:
-                                            for session_tx in st.session_state.filtered_transactions:
-                                                if (session_tx.date == t.date and 
-                                                    session_tx.description == t.description and 
-                                                    session_tx.amount == t.amount):
-                                                    session_tx.account_code = new_code
-                                                    session_tx._mapped_by_rule = False
-
-                                        st.session_state[f"editing_{tx_key}"] = False
-                                        st.success(f"✅ Updated to {selected_display}")
-                                        st.rerun()
-
-                                with col_cancel:
-                                    if st.button("❌ Cancel", key=f"cancel_{tx_key}"):
-                                        st.session_state[f"editing_{tx_key}"] = False
-                                        st.rerun()
+                                    # Open modal dialog with pre-filled transaction details
+                                    prefill_keyword = t.vendor or t.description or ""
+                                    # Clean up the keyword - remove extra info
+                                    if prefill_keyword:
+                                        # Take vendor name or first part of description
+                                        prefill_keyword = prefill_keyword.split('-')[0].strip()
+                                        prefill_keyword = prefill_keyword.split('|')[0].strip()
+                                    
+                                    show_custom_rule_modal(
+                                        prefill_keyword=prefill_keyword,
+                                        prefill_account_code=code
+                                    )
                             with col4:
                                 if not is_tx_excluded(t):
                                     if st.button("🚫 Exclude", key=f"exclude_{code}_{idx}_{t.date}_{t.amount}"):
@@ -4108,142 +4515,10 @@ if "transactions" in st.session_state and st.session_state.transactions:
         st.subheader("⚙️ Automatic Transaction Sorting & Categorization")
         st.markdown("""
         **Set up automatic filtering rules ONCE** - they'll automatically sort transactions into the right categories for all future uploads.
-        Configure your sorting parameters below and the system will remember them.
+        You can also create rules by clicking the 'Change' button on any transaction.
         """)
         
-        # Load all account codes for dropdown
-        import json
-        from pathlib import Path
-        all_account_options = {}
-        account_file = Path(__file__).parent / 'account_keywords.json'
-        try:
-            with open(account_file, 'r') as f:
-                data = json.load(f)
-                for acc_code, acc_details in data.items():
-                    all_account_options[f"{acc_code} · {acc_details['name']}"] = acc_code
-        except Exception as e:
-            st.error(f"Error loading account codes: {e}")
-        
-        # ==========================================
-        # MAIN RULE INPUT FORM
-        # ==========================================
-        st.subheader("➕ Setup New Rule")
-        
-        col_adv1, col_adv2 = st.columns([2, 2])
-        
-        with col_adv1:
-            rule_keyword_adv = st.text_input(
-                "Primary Keyword *",
-                placeholder="e.g., Check, Stripe",
-                key="keyword_adv"
-            )
-        
-        with col_adv2:
-            rule_account_adv = st.selectbox(
-                "Target Account Code *",
-                options=list(all_account_options.keys()),
-                    key="account_adv"
-                )
-            
-            st.markdown("**Filtering Parameters:**")
-            
-            col_adv_amt1, col_adv_amt2 = st.columns(2)
-            with col_adv_amt1:
-                min_amount_adv = st.number_input(
-                    "Min Amount", min_value=0.0, value=0.0, step=10.0, key="min_adv"
-                )
-            with col_adv_amt2:
-                max_amount_adv = st.number_input(
-                    "Max Amount", min_value=0.0, value=0.0, step=10.0, key="max_adv"
-                )
-            
-            st.markdown("**Pattern Matching:**")
-            
-            col_adv_pri, col_adv_add = st.columns(2)
-            with col_adv_pri:
-                priority_adv = st.number_input(
-                    "Priority (1=highest, 999=lowest)",
-                    min_value=1, max_value=999, value=999, step=1, key="priority_adv"
-                )
-            
-            with col_adv_add:
-                pass  # Placeholder for alignment
-            
-            additional_keywords_adv = st.text_input(
-                "Additional Keywords (ALL must match, comma-separated)",
-                placeholder="e.g., rent, payment",
-                key="additional_adv"
-            )
-            
-            exclude_keywords_adv = st.text_input(
-                "Exclusion Keywords (skip if ANY match, comma-separated)",
-                placeholder="e.g., refund, dispute",
-                key="exclude_adv"
-            )
-        
-        # ==========================================
-        # SUBMIT RULE
-        # ==========================================
-        st.markdown("---")
-        
-        if st.button("Create Rule", key="add_rule_btn", type="primary"):
-            # Use advanced form inputs
-            keyword = rule_keyword_adv.strip()
-            account = rule_account_adv
-            min_amt = min_amount_adv
-            max_amt = max_amount_adv
-            add_kws = additional_keywords_adv
-            excl_kws = exclude_keywords_adv
-            priority = priority_adv
-            
-            if keyword:
-                    account_code = all_account_options[account]
-                    
-                    # Build the new rule
-                    new_rule = {
-                        'keyword': keyword,
-                        'account_code': account_code,
-                        'account_display': account
-                    }
-                    
-                    # Add optional fields only if they have meaningful values
-                    if min_amt > 0:
-                        new_rule['min_amount'] = min_amt
-                    if max_amt > 0:
-                        new_rule['max_amount'] = max_amt
-                    if priority != 999:
-                        new_rule['priority'] = priority
-                    if add_kws.strip():
-                        new_rule['additional_keywords'] = [kw.strip() for kw in add_kws.split(',') if kw.strip()]
-                    if excl_kws.strip():
-                        new_rule['exclude_keywords'] = [kw.strip() for kw in excl_kws.split(',') if kw.strip()]
-                    
-                    st.session_state.custom_rules.append(new_rule)
-                    save_business_rules(
-                        st.session_state.user["id"],
-                        st.session_state.active_business,
-                        st.session_state.custom_rules
-                    )
-
-                    # Reapply rules to existing transactions
-                    reapply_custom_rules()
-                    
-                    # Create success message with rule details
-                    msg = f"✅ Rule created: '{keyword}' → {account}"
-                    if min_amt > 0 or max_amt > 0:
-                        amount_filter = []
-                        if min_amt > 0:
-                            amount_filter.append(f"${min_amt:.2f}+")
-                        if max_amt > 0:
-                            amount_filter.append(f"up to ${max_amt:.2f}")
-                        msg += f" ({', '.join(amount_filter)})"
-                    
-                    st.success(msg)
-                    st.rerun()
-            else:
-                st.error("❌ Please enter a keyword to search for")
-        
-        # Display existing rules
+        # Display existing rules first
         st.subheader("📋 Active Rules")
         if st.session_state.custom_rules:
             # Sort rules by priority for display
@@ -4313,7 +4588,16 @@ if "transactions" in st.session_state and st.session_state.transactions:
                             st.rerun()
 
         else:
-            st.info("No custom rules defined yet. Add rules above to automatically categorize transactions.")
+            st.info("No custom rules defined yet. Create rules using the form below or by clicking 'Change' on any transaction.")
+        
+        st.markdown("---")
+        
+        # Quick add rule button that opens modal
+        st.subheader("➕ Create New Rule")
+        st.markdown("Click the button below to create a new rule, or click 'Change' on any transaction in the P&L (Account Codes) tab.")
+        
+        if st.button("🆕 Create Custom Rule", type="primary", use_container_width=True):
+            show_custom_rule_modal()
         
         st.markdown("---")
         st.markdown("**💡 Enhanced Features:**")
