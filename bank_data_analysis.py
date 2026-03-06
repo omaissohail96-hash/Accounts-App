@@ -3559,9 +3559,14 @@ if all_transactions:
             max_date = max(parsed_dates)
             st.info(f"ℹ️ **Computed from transactions:** {min_date.strftime('%B %d, %Y')} → {max_date.strftime('%B %d, %Y')}")
         
-        # Use EXACT dates from statements for filter
+        # Use EXACT dates from statements for filter default values
         first_day_of_start_month = min_date
         last_day_of_end_month = max_date
+        
+        # Calculate absolute min/max from ALL transactions (for filter range limits)
+        # This allows users to expand the date range to see credit card transactions outside bank period
+        absolute_min_date = min(parsed_dates)
+        absolute_max_date = max(parsed_dates)
         
         # Store coverage dates in session state for reference
         st.session_state.statement_coverage_start = min_date
@@ -3569,8 +3574,38 @@ if all_transactions:
         
         # Show all transactions from all uploaded files by default
         # Some transactions may fall outside the official statement period - that's OK
+        # SPECIAL CASE: When both bank statement AND credit card uploaded together,
+        # auto-filter to show bank transactions + CC transactions within bank statement period
         if not st.session_state.get('filter_active', False):
-            st.session_state.filtered_transactions = all_transactions
+            # Check if both bank statement dates exist AND we have both types of transactions
+            if ('statement_period_start' in st.session_state and 
+                'statement_period_end' in st.session_state and 
+                bank_tx_count > 0 and cc_tx_count > 0):
+                
+                # Auto-filter: Include all bank transactions + CC transactions within bank period
+                initial_filtered = []
+                for tx in all_transactions:
+                    is_cc = (getattr(tx, 'source', '') == 'CREDIT_CARD')
+                    
+                    if not is_cc:
+                        # Always include bank transactions
+                        initial_filtered.append(tx)
+                    else:
+                        # For credit card transactions, check if within bank statement period
+                        if tx.date:
+                            try:
+                                tx_date = datetime.strptime(tx.date, "%Y-%m-%d").date()
+                                if min_date <= tx_date <= max_date:
+                                    initial_filtered.append(tx)
+                            except:
+                                initial_filtered.append(tx)  # Include if can't parse
+                        else:
+                            initial_filtered.append(tx)  # Include if no date
+                
+                st.session_state.filtered_transactions = initial_filtered
+            else:
+                # Normal case: show all transactions
+                st.session_state.filtered_transactions = all_transactions
         
         # Check if any transactions fall outside the statement period
         transactions_outside_period = []
@@ -3585,25 +3620,57 @@ if all_transactions:
         
         # Display coverage information
         days_count = (max_date - min_date).days
-        st.info(
-            f"📊 **Statement Period:** {min_date.strftime('%b %d, %Y')} → {max_date.strftime('%b %d, %Y')} "
-            f"({days_count} days, {len(all_transactions)} transactions)"
-        )
+        visible_tx_count = len(st.session_state.get('filtered_transactions', all_transactions))
+        
+        # Check if auto-filtering is active (both uploaded, some CC transactions hidden)
+        if (bank_tx_count > 0 and cc_tx_count > 0 and 
+            'statement_period_start' in st.session_state and 
+            visible_tx_count < len(all_transactions) and
+            not st.session_state.get('filter_active', False)):
+            hidden_count = len(all_transactions) - visible_tx_count
+            st.info(
+                f"📊 **Statement Period:** {min_date.strftime('%b %d, %Y')} → {max_date.strftime('%b %d, %Y')} "
+                f"({days_count} days, {visible_tx_count} transactions shown, {hidden_count} credit card transactions outside period hidden)"
+            )
+        else:
+            st.info(
+                f"📊 **Statement Period:** {min_date.strftime('%b %d, %Y')} → {max_date.strftime('%b %d, %Y')} "
+                f"({days_count} days, {visible_tx_count} transactions)"
+            )
         
         # Show notice if transactions exist outside the statement period
         if transactions_outside_period:
-            with st.expander(f"ℹ️ {len(transactions_outside_period)} transaction(s) fall outside the statement period", expanded=False):
-                st.markdown(f"""
-                **Note:** The statement header specifies the period **{min_date.strftime('%b %d, %Y')} - {max_date.strftime('%b %d, %Y')}**, 
-                but {len(transactions_outside_period)} transaction(s) have dates outside this range.
-                
-                This can happen when:
-                - Pending transactions from previous periods are included
-                - Statement includes transactions that posted after the period end
-                - Multiple statements with different periods are uploaded
-                
-                **All transactions are included in the data.** Use the filter below to narrow the date range if needed.
-                """)
+            # Check if this is auto-filtering case (both bank + CC uploaded)
+            hidden_count = len(all_transactions) - visible_tx_count if visible_tx_count < len(all_transactions) else 0
+            
+            if (bank_tx_count > 0 and cc_tx_count > 0 and hidden_count > 0 and
+                not st.session_state.get('filter_active', False)):
+                # Special message for auto-filtering case
+                with st.expander(f"💳 {hidden_count} credit card transaction(s) outside bank statement period - Click to expand", expanded=False):
+                    st.markdown(f"""
+                    **Auto-filtered view:** Your bank statement covers **{min_date.strftime('%b %d, %Y')} - {max_date.strftime('%b %d, %Y')}**.
+                    
+                    **{hidden_count} credit card transaction(s)** fall outside this period and are **hidden by default** to match your bank statement dates.
+                    
+                    **To view these transactions:** Use the date filter below:
+                    1. Scroll down to the "📅 Date Range" section
+                    2. Adjust the Start Date or End Date to include earlier/later dates
+                    3. Click "Apply Filter" to see all transactions in your selected range
+                    """)
+            else:
+                # Regular message
+                with st.expander(f"ℹ️ {len(transactions_outside_period)} transaction(s) fall outside the statement period", expanded=False):
+                    st.markdown(f"""
+                    **Note:** The statement header specifies the period **{min_date.strftime('%b %d, %Y')} - {max_date.strftime('%b %d, %Y')}**, 
+                    but {len(transactions_outside_period)} transaction(s) have dates outside this range.
+                    
+                    This can happen when:
+                    - Pending transactions from previous periods are included
+                    - Statement includes transactions that posted after the period end
+                    - Multiple statements with different periods are uploaded
+                    
+                    **All transactions are included in the data.** Use the filter below to adjust the date range if needed.
+                    """)
 
         # Initialize filter state if not present
         if 'filter_active' not in st.session_state:
@@ -3636,7 +3703,19 @@ if all_transactions:
         
         # ===== DATE FILTER =====
         st.subheader("📅 Date Range")
-        st.caption(f"💡 Allowed range: {min_date.strftime('%b %d, %Y')} to {max_date.strftime('%b %d, %Y')} - Use arrows (◄ ►) in calendar to navigate months, or type date manually")
+        
+        # Calculate the full selectable range: should include BOTH statement header dates AND actual transaction dates
+        # This allows users to see the exact statement period while also being able to expand if needed
+        filter_min_date = min(min_date, absolute_min_date)
+        filter_max_date = max(max_date, absolute_max_date)
+        
+        # Show helpful caption based on whether there are hidden credit card transactions
+        hidden_count = len(all_transactions) - visible_tx_count if visible_tx_count < len(all_transactions) else 0
+        if hidden_count > 0 and bank_tx_count > 0 and cc_tx_count > 0:
+            st.caption(f"💡 Statement period: {min_date.strftime('%b %d, %Y')} - {max_date.strftime('%b %d, %Y')}. Expand to see {hidden_count} hidden credit card transaction(s)")
+        else:
+            st.caption(f"💡 Allowed range: {filter_min_date.strftime('%b %d, %Y')} to {filter_max_date.strftime('%b %d, %Y')} - Use arrows (◄ ►) in calendar to navigate months")
+        
         col_date1, col_date2 = st.columns(2)
         
         # Use reset counter in widget keys to force recreation on reset
@@ -3646,22 +3725,22 @@ if all_transactions:
             start_md = st.date_input(
                 "Start Date",
                 value=first_day_of_start_month,
-                min_value=min_date,
-                max_value=max_date,
+                min_value=filter_min_date,
+                max_value=filter_max_date,
                 key=f"filter_start_md{reset_suffix}",
                 disabled=filter_disabled,
-                help=f"Click calendar or type date in YYYY/MM/DD format. Range: {min_date.strftime('%Y/%m/%d')} to {max_date.strftime('%Y/%m/%d')}"
+                help=f"Statement start: {min_date.strftime('%Y/%m/%d')}. Full range: {filter_min_date.strftime('%Y/%m/%d')} to {filter_max_date.strftime('%Y/%m/%d')}"
             )
 
         with col_date2:
             end_md = st.date_input(
                 "End Date",
                 value=last_day_of_end_month,
-                min_value=min_date,
-                max_value=max_date,
+                min_value=filter_min_date,
+                max_value=filter_max_date,
                 key=f"filter_end_md{reset_suffix}",
                 disabled=filter_disabled,
-                help=f"Click calendar or type date in YYYY/MM/DD format. Range: {min_date.strftime('%Y/%m/%d')} to {max_date.strftime('%Y/%m/%d')}"
+                help=f"Statement end: {max_date.strftime('%Y/%m/%d')}. Full range: {filter_min_date.strftime('%Y/%m/%d')} to {filter_max_date.strftime('%Y/%m/%d')}"
             )
         
         # Validate date range
