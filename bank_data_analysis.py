@@ -3253,6 +3253,8 @@ if uploaded or credit_card_files:
                 st.session_state.raw_text = all_raw_text  # Save for summary extraction
             # Process credit card statements if uploaded
             if credit_card_files:
+                all_cc_periods = []  # Collect all credit card periods
+                
                 for cc_file in credit_card_files:
                     cc_file_bytes = cc_file.read()
                     dp_cc = DocumentParser()
@@ -3307,10 +3309,9 @@ if uploaded or credit_card_files:
                                 
                                 cc_period = (start_date, end_date)
                         
-                        # Now store the corrected period in session state
+                        # Collect this credit card's period
                         if cc_period:
-                            st.session_state.cc_period_start = cc_period[0]
-                            st.session_state.cc_period_end = cc_period[1]
+                            all_cc_periods.append(cc_period)
                             st.success(f"✅ **{cc_file.name}:** {cc_period[0].strftime('%m/%d/%y')} → {cc_period[1].strftime('%m/%d/%y')} (from summary)")
                         
                         # Apply the year for transaction parsing
@@ -3326,6 +3327,21 @@ if uploaded or credit_card_files:
                         tx.source = "CREDIT_CARD"
 
                     all_txs.extend(cc_txs)
+                
+                # Combine all credit card periods (earliest start, latest end)
+                if all_cc_periods:
+                    all_cc_starts = [period[0] for period in all_cc_periods]
+                    all_cc_ends = [period[1] for period in all_cc_periods]
+                    
+                    combined_cc_start = min(all_cc_starts)
+                    combined_cc_end = max(all_cc_ends)
+                    
+                    st.session_state.cc_period_start = combined_cc_start
+                    st.session_state.cc_period_end = combined_cc_end
+                    
+                    if len(all_cc_periods) > 1:
+                        st.info(f"📅 **Combined credit card period:** {combined_cc_start.strftime('%B %d, %Y')} → {combined_cc_end.strftime('%B %d, %Y')}")
+
 
             valid_dates = [
                 _md_key(tx.date)
@@ -3602,7 +3618,18 @@ if all_transactions:
                         else:
                             initial_filtered.append(tx)  # Include if no date
                 
+                # Initialize all filter state variables for the summary display
+                all_amounts = [abs(tx.amount) for tx in all_transactions if tx.amount]
+                max_amount_possible = max(all_amounts) if all_amounts else 10000.0
+                
                 st.session_state.filtered_transactions = initial_filtered
+                st.session_state.filter_active = True
+                st.session_state.filter_start_date = min_date
+                st.session_state.filter_end_date = max_date
+                st.session_state.filter_min_amount = 0.0
+                st.session_state.filter_max_amount = max_amount_possible
+                st.session_state.filter_search_text = ""
+                st.session_state.filter_account_index = 0
             else:
                 # Normal case: show all transactions
                 st.session_state.filtered_transactions = all_transactions
