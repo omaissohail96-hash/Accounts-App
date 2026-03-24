@@ -1,0 +1,117 @@
+  1: 2025-12-01 00:00:00 |    1003.54 | Transfer Merchant Services ; “MID8018534944" | RAW: 12/01/25 Transfer Merchant Services ; “MID8018534944" 1,003.54
+  2: 2025-12-01 00:00:00 |     825.00 | Zelle payment from RICK SU Conf# eaeopxOw0 | RAW: 12/01/25 Zelle payment from RICK SU Conf# eaeopxOw0 825.00
+  3: 2025-12-01 00:00:00 |     505.00 | Zelle payment from MOHAMMED A SIDDIQUI for “Medical”; Conf# 99bwpilnz | RAW: 12/01/25 Zelle payment from MOHAMMED A SIDDIQUI for “Medical”; Conf# 99bwpilnz 505.00
+  4: 2025-12-01 00:00:00 |     377.88 | Square Inc DES:SQ251201 1D:T3MSV289EHXJPFW INDN-Aziz Family Medical ce CO | RAW: 12/01/25 Square Inc DES:SQ251201 1D:T3MSV289EHXJPFW INDN-Aziz Family Medical ce CO 377.88
+  5: 2025-12-01 00:00:00 |     375.00 | Zelle payment from ALI EHTISHAM for ‘For Medical Exam’; Conf# 99bwfu7b1 | RAW: 12/01/25 Zelle payment from ALI EHTISHAM for ‘For Medical Exam’; Conf# 99bwfu7b1 375.00
+  6: 2025-12-01 00:00:00 |     125.00 | Zelle payment from ALBINO DE LA ROSA Conf# skob8oxif | RAW: 12/01/25 Zelle payment from ALBINO DE LA ROSA Conf# skob8oxif 125.00
+  7: 2025-12-01 00:00:00 |     111.00 | Zelle payment from LISA RICHMOND Conf# AAOWIL21g | RAW: 12/01/25 Zelle payment from LISA RICHMOND Conf# AAOWIL21g 111.00
+  8: 2025-12-02 00:00:00 |     725.25 | Square Inc DES:SQ251202 1D:T3DCEYJ37A8C6G1 INDN:Aziz Family Medical ce CO | RAW: 12/02/25 Square Inc  DES:SQ251202 1D:T3DCEYJ37A8C6G1 INDN:Aziz Family Medical ce CO 725.25
+  9: 2025-12-02 00:00:00 |     375.00 | Zelle payment from YAKIN S MASSO for "tests"; Conf# 99bwu2hwy | RAW: 12/02/25 Zelle payment from YAKIN S MASSO for "tests"; Conf# 99bwu2hwy 375.00
+ 10: 2025-12-02 00:00:00 |     375.00 | Zelle payment from BASSAM TAHA LAFI Conf# AAOWLtO7g | RAW: 12/02/25 Zelle payment from BASSAM TAHA LAFI Conf# AAOWLtO7g 375.00
+ 11: 2025-12-02 00:00:00 |     300.00 | Zelle payment from RITESH MADINENI for ‘i-693 form (Ritesh)"; Conf# 99bwv1qxq | RAW: 12/02/25 Zelle payment from RITESH MADINENI for ‘i-693 form (Ritesh)"; Conf# 99bwv1qxq 300.00
+ 12: 2025-12-02 00:00:00 |     300.00 | Zelle payment from INC ON TIME FREDS TOWING Conf# 99bwvcheO | RAW: 12/02/25 Zelle payment from INC ON TIME FREDS TOWING Conf# 99bwvcheO 300.00
+ 13: 2025-12-02 00:00:00 |     125.00 | Zelle payment from NICOLE G IRION Conf# 99bwtpfyb | RAW: 12/02/25 Zelle payment from NICOLE G IRION Conf# 99bwtpfyb 125.00
+ 14: 2025-12-03 00:00:00 |     565.00 | Zelle payment from BATORGIL BATBOLD for “bill’; Conf# 99bwxyq7u | RAW: 12/03/25 Zelle payment from BATORGIL BATBOLD for “bill’; Conf# 99bwxyq7u 565.00
+ 15: 2025-12-03 00:00:00 |     210.00 | Zelle payment from SHERENIA ISRAEL Conf# AAOWNa66k | RAW: 12/03/25 Zelle payment from SHERENIA ISRAEL Conf# AAOWNa66k 210.00
+ 16: 2025-12-03 00:00:00 |     160.00 | Zelle payment from Conf# kf3aurgmS | RAW: 12/03/25 ——_Zelle payment from Conf# kf3aurgmS 160.00
+ 17: 2025-12-04 00:00:00 |    1097.09 | Transfer Merchant Services ; "MID8018534944" | RAW: 12/04/25 Transfer Merchant Services ; "MID8018534944" 1,097.09
+ 18: 2025-12-04 00:00:00 |     105.00 | Zelle payment from CLARENCE PRINCE Conf# xz74rj62r | RAW: 12/04/25 Zelle payment from CLARENCE PRINCE Conf# xz74rj62r 105.00
+ 19: 2025-12-04 00:00:00 |      98.32 | Transfer Merchant Services ; "MID8018534944" | RAW: 12/04/25 Transfer Merchant Services ; "MID8018534944" 98.32
+ 20: 2025-12-05 00:00:00 |     825.00 | Zelle payment from HASAN BASULEMAN Conf# tmq8ukf7e | RAW: 12/05/25 Zelle payment from HASAN BASULEMAN Conf# tmq8ukf7e 825.00
+ 21: 2025-12-05 00:00:00 |     120.00 | Zelle payment from EFRAIN CAMPAESQUIVEL Conf# 0JJVKGOVY | RAW: 12/05/25 Zelle payment from EFRAIN CAMPAESQUIVEL Conf# 0JJVKGOVY 120.00
+ 22: 2025-12-05 00:00:00 |     110.00 | Zelle payment from ZANELE QUIROZ for “Doctors visit’; Conf# wuzivp4wr | RAW: 12/05/25 Zelle payment from ZANELE QUIROZ for “Doctors visit’; Conf# wuzivp4wr 110.00
+ 23: 2025-12-05 00:00:00 |     105.00 | Zelle payment from EFRAIN CAMPAESQUIVEL Conf# 0)JVKHOXX | RAW: 12/05/25 Zelle payment from EFRAIN CAMPAESQUIVEL Conf# 0)JVKHOXX 105.00
+ 24: 2025-12-08 00:00:00 |    1930.00 | Zelle payment from CHARLES AMIN for “immigration physicals"; Conf# k2tf2gk2Z | RAW: 12/08/25 Zelle payment from CHARLES AMIN for “immigration physicals"; Conf# k2tf2gk2Z 1,930.00
+ 25: 2025-12-08 00:00:00 |     560.00 | Zelle payment from PHILOMENA E ABEBE for "USCIS CIVIIL SURGEON"; Conf# 99bxcq4m4 | RAW: 12/08/25 Zelle payment from PHILOMENA E ABEBE for "USCIS CIVIIL SURGEON"; Conf# 99bxcq4m4 560.00
+ 26: 2025-12-08 00:00:00 |     558.53 | Transfer Merchant Services ; “MID8018534944" | RAW: 12/08/25 Transfer Merchant Services ; “MID8018534944" 558.53
+ 27: 2025-12-08 00:00:00 |     200.00 | Zelle payment from CHINJU CHERIAN Conf# fbjSetoyf | RAW: 12/08/25 Zelle payment from CHINJU CHERIAN Conf# fbjSetoyf 200.00
+ 28: 2025-12-08 00:00:00 |     125.00 | Zelle payment from ALBINO DE LA ROSA Conf# vm22zfm9t | RAW: 12/08/25 Zelle payment from ALBINO DE LA ROSA Conf# vm22zfm9t 125.00
+ 29: 2025-12-08 00:00:00 |     108.27 | Transfer Merchant Services ; "MID8018534944" | RAW: 12/08/25 Transfer Merchant Services ; "MID8018534944" 108.27
+ 30: 2025-12-08 00:00:00 |     105.00 | Zelle payment from Aisha Putnam Conf# 0)JWL6Z56 | RAW: 12/08/25 —Zelle payment from Aisha Putnam Conf# 0)JWL6Z56 105.00
+ 31: 2025-12-08 00:00:00 |      70.00 | Zelle payment from HASAN BASULEMAN Conf# swypipj4d | RAW: 12/08/25 Zelle payment from HASAN BASULEMAN Conf# swypipj4d 70.00
+ 32: 2025-12-09 00:00:00 |     881.77 | Square Inc DES:SQ251209 1D:T37QYBSCHCPCX3W INDN:Aziz Family Medical ce CO | RAW: 12/09/25 Square Inc DES:SQ251209 1D:T37QYBSCHCPCX3W INDN:Aziz Family Medical ce CO 881.77
+ 33: 2025-12-09 00:00:00 |     375.00 | Zelle payment from ELISANDIS FURONES ARIAS Conf# XXXXXXXXX | RAW: 12/09/25 Zelle payment from ELISANDIS FURONES ARIAS Conf# XXXXXXXXX 375.00
+ 34: 2025-12-10 00:00:00 |    1500.34 | Transfer Merchant Services ; "MID8018534944" | RAW: 12/10/25 Transfer Merchant Services ; "MID8018534944" 1,500.34
+ 35: 2025-12-10 00:00:00 |     440.00 | Zelle payment from for “I-693 Medical exam for green card’; Conf# zkhmwo3wd | RAW: 12/10/25 Zelle payment from for “I-693 Medical exam for green card’; Conf# zkhmwo3wd 440.00
+ 36: 2025-12-10 00:00:00 |     310.00 | Zelle payment from VADIM TSESARSKI for “medical exam”; Conf# 99bxvjwz3 | RAW: 12/10/25 Zelle payment from VADIM TSESARSKI for “medical exam”; Conf# 99bxvjwz3 310.00
+ 37: 2025-12-10 00:00:00 |     120.00 | Zelle payment from EFRAIN CAMPAESQUIVEL Conf# 0)KO13J6B | RAW: 12/10/25 Zelle payment from EFRAIN CAMPAESQUIVEL Conf# 0)KO13J6B 120.00
+ 38: 2025-12-10 00:00:00 |     105.00 | Zelle payment from EMMA ENAMORADO Conf# n471uuc6j | RAW: 12/10/25 Zelle payment from EMMA ENAMORADO Conf# n471uuc6j 105.00
+ 39: 2025-12-10 00:00:00 |      12.00 | Zelle payment from LISA RICHMOND Conf# AAOWVy49m | RAW: 12/10/25 Zelle payment from LISA RICHMOND Conf# AAOWVy49m 12.00
+ 40: 2025-12-11 00:00:00 |     388.12 | Transfer Merchant Services ; "MID8018534944" | RAW: 12/11/25 Transfer Merchant Services ; "MID8018534944" 388.12
+ 41: 2025-12-11 00:00:00 |      30.09 | Square Inc DES:SQ251211 ID:T3POYCTF8CPZJOG INDN:Aziz Family Medical ce CO | RAW: 12/11/25 Square Inc DES:SQ251211 ID:T3POYCTF8CPZJOG INDN:Aziz Family Medical ce CO 30.09
+ 42: 2025-12-12 00:00:00 |     880.00 | Zelle payment from MUJAHID MOHIUDDIN MOHAMMED for "Mujahid & Maliha Immigration | RAW: 12/12/25 Zelle payment from MUJAHID MOHIUDDIN MOHAMMED for "Mujahid & Maliha Immigration 880.00
+ 43: 2025-12-12 00:00:00 |     565.00 | Zelle payment from IHOR BURLACHENKO Conf# TOZL86DL) | RAW: 12/12/25 Zelle payment from IHOR BURLACHENKO Conf# TOZL86DL) 565.00
+ 44: 2025-12-15 00:00:00 |    5020.00 | BKOFAMERICA ATM 12/14 #000005032 DEPOSIT VILLA PARK - ROOSE VILLA PARK IL | RAW: 12/15/25 BKOFAMERICA ATM 12/14 #000005032 DEPOSIT VILLA PARK - ROOSE VILLA PARK IL 5,020.00
+ 45: 2025-12-15 00:00:00 |    2498.00 | BKOFAMERICA ATM 12/15 #000005234 DEPOSIT VILLA PARK - ROOSE VILLA PARK IL | RAW: 12/15/25 BKOFAMERICA ATM 12/15 #000005234 DEPOSIT VILLA PARK - ROOSE VILLA PARK IL 2,498.00
+ 46: 2025-12-15 00:00:00 |    1128.50 | Transfer Merchant Services ; "MID8018534944" | RAW: 12/15/25 Transfer Merchant Services ; "MID8018534944" 1,128.50
+ 47: 2025-12-15 00:00:00 |     864.22 | Transfer Merchant Services ; "MID8018534944" | RAW: 12/15/25 Transfer Merchant Services ; "MID8018534944" 864.22
+ 48: 2025-12-15 00:00:00 |     837.13 | Transfer Merchant Services ; "MID8018534944" | RAW: 12/15/25 Transfer Merchant Services ; "MID8018534944" 837.13
+ 49: 2025-12-15 00:00:00 |     750.00 | Zelle payment from TALHA KHAN for "PAYMENT FOR 1693 EXAM FOR 2 PEOPLE’; Conf# | RAW: 12/15/25 Zelle payment from TALHA KHAN for "PAYMENT FOR 1693 EXAM FOR 2 PEOPLE’; Conf# 750.00
+ 50: 2025-12-15 00:00:00 |     640.00 | Zelle payment from BRIGITTI SOSA Conf# XXXXXXXXX | RAW: 12/15/25 Zelle payment from BRIGITTI SOSA Conf# XXXXXXXXX 640.00
+ 51: 2025-12-15 00:00:00 |     580.00 | Zelle payment from Afifah Arif for “Visit and 1 month of shots"; Conf# OJFFVLRKD | RAW: 12/15/25 Zelle payment from Afifah Arif for “Visit and 1 month of shots"; Conf# OJFFVLRKD 580.00
+ 52: 2025-12-15 00:00:00 |     375.00 | Zelle payment from MARIA ZALDIVAR VALDES Conf# XXXXXXXXX | RAW: 12/15/25 Zelle payment from MARIA ZALDIVAR VALDES Conf# XXXXXXXXX 375.00
+ 53: 2025-12-15 00:00:00 |     375.00 | Zelle payment from MUHAMMAD SOHAIL for “Medical exam’; Conf# 126494303 | RAW: 12/15/25 Zelle payment from MUHAMMAD SOHAIL for “Medical exam’; Conf# 126494303 375.00
+ 54: 2025-12-15 00:00:00 |     375.00 | Zelle payment from ADRIANA M QUIMSO for “inmigracion medico’; Conf# 99byj9ppz | RAW: 12/15/25 Zelle payment from ADRIANA M QUIMSO for “inmigracion medico’; Conf# 99byj9ppz 375.00
+ 55: 2025-12-15 00:00:00 |     125.00 | Zelle payment from ALBINO DE LA ROSA Conf# vctxyrkp2 | RAW: 12/15/25 Zelle payment from ALBINO DE LA ROSA Conf# vctxyrkp2 125.00
+ 56: 2025-12-15 00:00:00 |     125.00 | Zelle payment from NICOLE G IRION for "bill"; Conf# 99byjots6 | RAW: 12/15/25 Zelle payment from NICOLE G IRION for "bill"; Conf# 99byjots6 125.00
+ 57: 2025-12-15 00:00:00 |     124.20 | Transfer Merchant Services ; “MID8018534944" | RAW: 12/15/25 Transfer Merchant Services ; “MID8018534944" 124.20
+ 58: 2025-12-15 00:00:00 |     105.00 | Zelle payment from CRYSTAL RICHARDSON Conf# 0)K33YS38 | RAW: 12/15/25 Zelle payment from CRYSTAL RICHARDSON Conf# 0)K33YS38 105.00
+ 59: 2025-12-15 00:00:00 |     100.00 | Zelle payment from BRIJRAJSINH RAOL Conf# zte2dttve | RAW: 12/15/25 Zelle payment from BRIJRAJSINH RAOL Conf# zte2dttve 100.00
+ 60: 2025-12-15 00:00:00 |      96.00 | Zelle payment from LISA RICHMOND Conf# AAOWbr62M | RAW: 12/15/25 Zelle payment from LISA RICHMOND Conf# AAOWbr62M 96.00
+ 61: 2025-12-15 00:00:00 |      40.17 | Square Inc DES:SQ251215 ID:T3H3GKQ9174CEOE INDN-Aziz Family Medical ce CO | RAW: 12/15/25 Square Inc DES:SQ251215 ID:T3H3GKQ9174CEOE INDN-Aziz Family Medical ce CO 40.17
+ 62: 2025-12-16 00:00:00 |     740.00 | Zelle payment from for “Medical Exam Green Card’; Conf# kwvz6em60 | RAW: 12/16/25 Zelle payment from for “Medical Exam Green Card’; Conf# kwvz6em60 740.00
+ 63: 2025-12-16 00:00:00 |     331.93 | Square Inc DES:SQ251216 ID:T3EBZYAFAZOAN3Q INDN:Aziz Family Medical ce CO | RAW: 12/16/25 Square Inc DES:SQ251216 ID:T3EBZYAFAZOAN3Q INDN:Aziz Family Medical ce CO 331.93
+ 64: 2025-12-16 00:00:00 |     135.00 | Zelle payment from LETICIA B LOPEZ for "Dr. visit’; Conf# 99byobnr1 | RAW: 12/16/25 Zelle payment from LETICIA B LOPEZ for "Dr. visit’; Conf# 99byobnr1 135.00
+ 65: 2025-12-17 00:00:00 |    1500.00 | Zelle payment from OLUSEGUN JIMOH Conf# AAOWeH91Q | RAW: 12/17/25 Zelle payment from OLUSEGUN JIMOH Conf# AAOWeH91Q 1,500.00
+ 66: 2025-12-17 00:00:00 |     930.00 | Zelle payment from BENEDICTO PANA JR for "US Immigration Physical Exams"; Conf# 270944002 | RAW: 12/17/25 Zelle payment from BENEDICTO PANA JR for "US Immigration Physical Exams"; Conf# 270944002 930.00
+ 67: 2025-12-17 00:00:00 |     388.12 | Transfer Merchant Services ; “MID8018534944" | RAW: 12/17/25 Transfer Merchant Services ; “MID8018534944" 388.12
+ 68: 2025-12-17 00:00:00 |     120.00 | Zelle payment from EFRAIN CAMPAESQUIVEL Conf# 0JK771Q25 | RAW: 12/17/25 Zelle payment from EFRAIN CAMPAESQUIVEL Conf# 0JK771Q25 120.00
+ 69: 2025-12-17 00:00:00 |     105.00 | Zelle payment from ALBINO DE LA ROSA Conf# v3xefltu6 | RAW: 12/17/25 Zelle payment from ALBINO DE LA ROSA Conf# v3xefltu6 105.00
+ 70: 2025-12-18 00:00:00 |    1200.59 | Transfer Merchant Services ; "MID8018534944" | RAW: 12/18/25 Transfer Merchant Services ; "MID8018534944" 1,200.59
+ 71: 2025-12-18 00:00:00 |     627.68 | Square Inc DES:SQ251218 ID:T38B94TQAVBFEGS INDN:Aziz Family Medical ce CO | RAW: 12/18/25 ‘Square Inc DES:SQ251218 ID:T38B94TQAVBFEGS INDN:Aziz Family Medical ce CO 627.68
+ 72: 2025-12-18 00:00:00 |     375.00 | Zelle payment from KA HO WONG for “immigration Exam’; Conf# 99byw8dd4 | RAW: 12/18/25 Zelle payment from KA HO WONG for “immigration Exam’; Conf# 99byw8dd4 375.00
+ 73: 2025-12-18 00:00:00 |     140.00 | Zelle payment from MAUREEN KHAN for “Gluta package fee’; Conf# 271104598 | RAW: 12/18/25 Zelle payment from MAUREEN KHAN for “Gluta package fee’; Conf# 271104598 140.00
+ 74: 2025-12-18 00:00:00 |      35.00 | Zelle payment from MUHAMMAD VAYANI for ‘Zarina vayani"; Conf# OJK88DPP1 | RAW: 12/18/25 Zelle payment from MUHAMMAD VAYANI for ‘Zarina vayani"; Conf# OJK88DPP1 35.00
+ 75: 2025-12-19 00:00:00 |     950.00 | Zelle payment from Delgerjargal Soninbayar for ‘1693 for 3°; Conf# S2POUU6C) | RAW: 12/19/25 — Zelle payment from Delgerjargal Soninbayar for ‘1693 for 3°; Conf# S2POUU6C) 950.00
+ 76: 2025-12-22 00:00:00 |    4420.00 | BKOFAMERICA ATM 12/21 #000005346 DEPOSIT WESTMONT WESTMONT = IL | RAW: 12/22/25 BKOFAMERICA ATM 12/21 #000005346 DEPOSIT WESTMONT WESTMONT = IL 4,420.00
+ 77: 2025-12-22 00:00:00 |    1430.00 | Zelle payment from EDWIN FIGUEROA for “immigration blood work’; Conf# 99bzdwmtc | RAW: 12/22/25 Zelle payment from EDWIN FIGUEROA for “immigration blood work’; Conf# 99bzdwmtc 1,430.00
+ 78: 2025-12-22 00:00:00 |    1000.00 | Zelle payment from FOLASHADE F ADEWOYE Conf# ypT1owiXr | RAW: 12/22/25 Zelle payment from FOLASHADE F ADEWOYE Conf# ypT1owiXr 1,000.00
+ 79: 2025-12-22 00:00:00 |     983.24 | Transfer Merchant Services ; "MID8018534944" | RAW: 12/22/25 Transfer Merchant Services ; "MID8018534944" 983.24
+ 80: 2025-12-22 00:00:00 |     825.00 | Zelle payment from OSMAN SHAFEEQ MOHAMMED Conf# hoqzcs8f9 | RAW: 12/22/25 Zelle payment from OSMAN SHAFEEQ MOHAMMED Conf# hoqzcs8f9 825.00
+ 81: 2025-12-22 00:00:00 |     750.00 | Zelle payment from TAMAL ROY for “blood work"; Conf# 99bzfr6nq | RAW: 12/22/25 Zelle payment from TAMAL ROY for “blood work"; Conf# 99bzfr6nq 750.00
+ 82: 2025-12-22 00:00:00 |     300.00 | Zelle payment from ZHILUN LIU for “Wuxuan Liu's 1693 Exam"; Conf# 99bzfhbxr | RAW: 12/22/25 Zelle payment from ZHILUN LIU for “Wuxuan Liu's 1693 Exam"; Conf# 99bzfhbxr 300.00
+ 83: 2025-12-22 00:00:00 |     165.60 | Transfer Merchant Services ; "MID8018534944" | RAW: 12/22/25 Transfer Merchant Services ; "MID8018534944" 165.60
+ 84: 2025-12-22 00:00:00 |     151.06 | Square Inc DES:SQ251222 1D:T34DPZYPXDZTAOB INDN:Aziz Family Medical ce CO | RAW: 12/22/25 Square Inc DES:SQ251222 1D:T34DPZYPXDZTAOB INDN:Aziz Family Medical ce CO 151.06
+ 85: 2025-12-22 00:00:00 |     139.72 | Transfer Merchant Services ; "MID8018534944" | RAW: 12/22/25 Transfer Merchant Services ; "MID8018534944" 139.72
+ 86: 2025-12-22 00:00:00 |     125.00 | Zelle payment from ALBINO DE LA ROSA Conf# u2629jx56 | RAW: 12/22/25 Zelle payment from ALBINO DE LA ROSA Conf# u2629jx56 125.00
+ 87: 2025-12-22 00:00:00 |     105.00 | Zelle payment from ANNA CRISTINE C NERIS for "weight loss"; Conf# 99bzff14n | RAW: 12/22/25 Zelle payment from ANNA CRISTINE C NERIS for "weight loss"; Conf# 99bzff14n 105.00
+ 88: 2025-12-22 00:00:00 |     104.72 | Square Inc DES:SQ251222 ID:T3DKQJDNGP29FBX INDN:Aziz Family Medical ce CO | RAW: 12/22/25 ‘Square Inc DES:SQ251222 ID:T3DKQJDNGP29FBX INDN:Aziz Family Medical ce CO 104.72
+ 89: 2025-12-22 00:00:00 |      40.00 | Zelle payment from ALBINO DE LA ROSA Conf# yyjdm3tuS | RAW: 12/22/25 Zelle payment from ALBINO DE LA ROSA Conf# yyjdm3tuS 40.00
+ 90: 2025-12-23 00:00:00 |    1125.00 | Zelle payment from SARVAGHAN RATHINAM for “USCIS MEDICAL"; Conf# TOZMHPTZB | RAW: 12/23/25 Zelle payment from SARVAGHAN RATHINAM for “USCIS MEDICAL"; Conf# TOZMHPTZB 1,125.00
+ 91: 2025-12-23 00:00:00 |     505.00 | Zelle payment from MOHAMMED SIDDIQUI Conf# TOZMHSQXC | RAW: 12/23/25 Zelle payment from MOHAMMED SIDDIQUI Conf# TOZMHSQXC 505.00
+ 92: 2025-12-23 00:00:00 |     375.00 | Zelle payment from JORGE M LOZADAGOMEZ for “pay”; Conf# 99bziy270 | RAW: 12/23/25 Zelle payment from JORGE M LOZADAGOMEZ for “pay”; Conf# 99bziy270 375.00
+ 93: 2025-12-23 00:00:00 |     125.00 | Zelle payment from YOHANNA HERNANDEZNAVA Conf# 04B21GZZN | RAW: 12/23/25 Zelle payment from YOHANNA HERNANDEZNAVA Conf# 04B21GZZN 125.00
+ 94: 2025-12-23 00:00:00 |     125.00 | Zelle payment from NICOLE G IRION Conf# 99bzkc30h | RAW: 12/23/25 Zelle payment from NICOLE G IRION Conf# 99bzkc30h 125.00
+ 95: 2025-12-24 00:00:00 |     108.27 | Transfer Merchant Services ; "MID8018534944" | RAW: 12/24/25 Transfer Merchant Services ; "MID8018534944" 108.27
+ 96: 2025-12-26 00:00:00 |     375.00 | Zelle payment from HAMED MOHIUDDIN for "bloodwork"; Conf# 99bzvS7sy | RAW: 12/26/25 Zelle payment from HAMED MOHIUDDIN for "bloodwork"; Conf# 99bzvS7sy 375.00
+ 97: 2025-12-26 00:00:00 |     190.00 | Zelle payment from CHARLES AMIN for “Medical exam’; Conf# TffOOpw22 | RAW: 12/26/25 Zelle payment from CHARLES AMIN for “Medical exam’; Conf# TffOOpw22 190.00
+ 98: 2025-12-26 00:00:00 |     160.00 | Zelle payment from NIKOLAY GINEV Conf# XXXXXXXXX | RAW: 12/26/25 Zelle payment from NIKOLAY GINEV Conf# XXXXXXXXX 160.00
+ 99: 2025-12-26 00:00:00 |     160.00 | Zelle payment from NATHANIEL TRUCKING INC Conf# 99bzw01go | RAW: 12/26/25 Zelle payment from NATHANIEL TRUCKING INC Conf# 99bzw01go 160.00
+100: 2025-12-26 00:00:00 |      60.00 | Zelle payment from EMMANUELLE JEAN-PAUL Conf# pqn9s8tik | RAW: 12/26/25 Zelle payment from EMMANUELLE JEAN-PAUL Conf# pqn9s8tik 60.00
+101: 2025-12-29 00:00:00 |    1125.00 | Zelle payment from SHAIFALI BHATNAGAR for *i693°; Conf# 99cO6uauw | RAW: 12/29/25 Zelle payment from SHAIFALI BHATNAGAR for *i693°; Conf# 99cO6uauw 1,125.00
+102: 2025-12-29 00:00:00 |       5.00 | Zelle payment from ALINA CREATIVE CONCEPT LLC for paperwork’; Confz 99cOSnmas_ss—=<“i*‘é‘és*«S | RAW: 12/29/25 _Zelle payment from ALINA CREATIVE CONCEPT LLC for paperwork’; Confz 99cOSnmas_ss—=<“i*‘é‘és*«S 5.00
+103: 2025-12-29 00:00:00 |     388.12 | Transfer Merchant Services ; “MID8018534944" | RAW: 12/29/25 Transfer Merchant Services ; “MID8018534944" 388.12
+104: 2025-12-29 00:00:00 |     201.47 | Square Inc DES:SQ251229 1D:T3T732FQYDEYFAT INDN-Aziz Family Medical ce CO | RAW: 12/29/25 ‘Square Inc DES:SQ251229 1D:T3T732FQYDEYFAT INDN-Aziz Family Medical ce CO 201.47
+105: 2025-12-29 00:00:00 |     155.00 | Zelle payment from NANCY PERALTA for “dot physical’; Conf# 99cO6h9rr | RAW: 12/29/25 Zelle payment from NANCY PERALTA for “dot physical’; Conf# 99cO6h9rr 155.00
+106: 2025-12-29 00:00:00 |     105.69 | Square Inc DES:SQ251229 ID:T3ESQ6E8E57RQ5K INDN:Aziz Family Medical ce CO | RAW: 12/29/25 Square Inc  DES:SQ251229 ID:T3ESQ6E8E57RQ5K INDN:Aziz Family Medical ce CO 105.69
+107: 2025-12-30 00:00:00 |     825.00 | Zelle payment from JORGE CARRANZA for “medical exam’; Conf# 99cOb86y6 | RAW: 12/30/25 Zelle payment from JORGE CARRANZA for “medical exam’; Conf# 99cOb86y6 825.00
+108: 2025-12-30 00:00:00 |     465.00 | Zelle payment from CLAUDIA L MEDRANO for “med”; Conf# 99c09flfe | RAW: 12/30/25 Zelle payment from CLAUDIA L MEDRANO for “med”; Conf# 99c09flfe 465.00
+109: 2025-12-30 00:00:00 |     400.00 | Zelle payment from CLAUDIA L MEDRANO for "med"; Conf# 99c09fs35 | RAW: 12/30/25 Zelle payment from CLAUDIA L MEDRANO for "med"; Conf# 99c09fs35 400.00
+110: 2025-12-30 00:00:00 |     377.77 | Transfer Merchant Services ; "MID8018534944" | RAW: 12/30/25 Transfer Merchant Services ; "MID8018534944" 377.77
+111: 2025-12-30 00:00:00 |     155.00 | Zelle payment from NICOLE G IRION Conf# 99cOad59z | RAW: 12/30/25 Zelle payment from NICOLE G IRION Conf# 99cOad59z 155.00
+112: 2025-12-31 00:00:00 |     410.00 | Zelle payment from PREETHI SEKAR Conf# rréikgq04 | RAW: 12/31/25 Zelle payment from PREETHI SEKAR Conf# rréikgq04 410.00
+113: 2025-12-31 00:00:00 |     108.67 | Transfer Merchant Services ; "MID8018534944" | RAW: 12/31/25 Transfer Merchant Services ; "MID8018534944" 108.67
+114: 2025-12-04 00:00:00 |    1130.12 | [REPAIRED] Missing transaction | RAW: REPAIR FOR LEDGER 12/04
+115: 2025-12-08 00:00:00 |     574.41 | [REPAIRED] Missing transaction | RAW: REPAIR FOR LEDGER 12/08
+116: 2025-12-16 00:00:00 |    4100.00 | [REPAIRED] Missing transaction | RAW: REPAIR FOR LEDGER 12/16
+117: 2025-12-29 00:00:00 |     500.00 | [REPAIRED] Missing transaction | RAW: REPAIR FOR LEDGER 12/29

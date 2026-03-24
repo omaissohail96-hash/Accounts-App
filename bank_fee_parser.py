@@ -219,11 +219,13 @@ class BankFeeParser:
         
         desc_lower = description.lower()
         
-        # Exclude patterns that are NOT fees
+        # Exclude patterns that are NOT fees (including balance-related entries)
         exclude_patterns = [
             'transfer to', 'transfer from', 'payment to', 'payment from',
             'zelle', 'quickpay', 'withdrawal to atm', 'deposit',
-            'purchase', 'sale', 'refund'
+            'purchase', 'sale', 'refund', 'balance', 'ending balance',
+            'opening balance', 'beginning balance', 'closing balance',
+            'daily ending', 'average balance'
         ]
         
         if any(pattern in desc_lower for pattern in exclude_patterns):

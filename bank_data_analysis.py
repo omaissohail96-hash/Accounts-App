@@ -583,9 +583,20 @@ class FallbackStatementParser:
         if not ln or not ln.strip():
             return True
         low = ln.lower().strip()
-        # lines that are obvious headings or totals
-        if re.match(r'^(daily ending balance|daily ending|daily ending balance|statement period|opening balance|ending balance|closing balance|total\b|page\s+\d+)', low):
+        
+        # Daily balance entries should always be skipped
+        if any(pattern in low for pattern in [
+            'daily ending balance', 'daily ending', 'daily balance',
+            'balance per bank', 'balance per books', 'opening balance',
+            'starting balance', 'closing balance', 'ending balance',
+            'statement period', 'page  ', 'page\t'
+        ]):
             return True
+        
+        # lines that are obvious headings or totals
+        if re.match(r'^(daily ending balance|daily ending|daily balance|balance per|opening|starting|closing|ending|statement period|total\b|page\s+\d+)', low):
+            return True
+        
         # If the line contains multiple date+amount pairs (daily ending tables) skip
         # Count date tokens and amount tokens; if >1 of each, it's probably a table column row
         date_count = len(DATE_TOKEN_RE.findall(ln))
@@ -603,7 +614,7 @@ class FallbackStatementParser:
         # "TOTAL DEPOSITS" or similar as a whole line
         if re.search(r'\btotal deposits\b|\btotal withdrawals\b|\bdeposits and additions summary\b', low):
             return True
-        print("SKIPPED:", ln) 
+        
         return False
 
     def _line_has_vendor_like_text(self, ln: str) -> bool:

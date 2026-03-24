@@ -184,7 +184,9 @@ class BankStatementParser:
             'total debits', 'total checks', 'total atm', 'total fees', 'total charges',
             'total payments', 'total amount', 'total for this period', 'total ending balance',
             'ending balance', 'beginning balance', 'closing balance', 'average ledger balance',
-            'average available balance', 'interest paid', 'summary'
+            'average available balance', 'interest paid', 'summary',
+            'daily ending balance', 'daily ending', 'daily balance', 'balance per bank',
+            'balance per books', 'opening balance', 'starting balance'
         ]
 
         if any(keyword in line_lower for keyword in summary_keywords):
@@ -301,12 +303,27 @@ class BankStatementParser:
         # If no sections detected, try to parse all lines (fallback)
         if not transactions:
             logger.warning("No sections detected, attempting to parse all lines...")
+            
+            # Keywords to skip in fallback mode
+            fallback_skip_keywords = [
+                'daily ending balance', 'daily ending', 'daily balance',
+                'balance per bank', 'balance per books', 'opening balance',
+                'starting balance', 'total deposits', 'total withdrawals',
+                'total debits', 'total credits', 'total charges', 'total fees'
+            ]
+            
             for i, line in enumerate(lines):
+                line_lower = line.lower()
+                
+                # Skip summary/balance lines
+                if any(keyword in line_lower for keyword in fallback_skip_keywords):
+                    logger.debug(f"Skipping line {i}: {line[:60]}")
+                    continue
+                
                 # Try to detect transaction by presence of amount
                 amount = self.extract_amount(line)
                 if amount and abs(amount) > 1.0:  # Minimum transaction amount
                     # Guess type based on sign or keywords
-                    line_lower = line.lower()
                     if amount < 0 or any(word in line_lower for word in ['debit', 'withdrawal', 'payment', 'charge', 'fee', 'purchase']):
                         trans_type = 'withdrawal'
                     else:
