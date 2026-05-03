@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Dict, Optional
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,10 @@ class AccountCodeMapper:
         except (json.JSONDecodeError, IOError) as e:
             print(f"Warning: Could not load keyword rules from {file_path}: {e}")
             return {}
+
+    def _normalize_match_text(self, value: Optional[str]) -> str:
+        """Normalize text for deterministic keyword matching."""
+        return re.sub(r'[^a-z0-9]+', ' ', str(value or '').lower()).strip()
     
     def _match_by_keywords(self, vendor: Optional[str], description: Optional[str]) -> Optional[tuple]:
         """
@@ -115,15 +120,9 @@ class AccountCodeMapper:
             print(f"⚠️ Warning: No keyword rules loaded from JSON")
             return None
         
-        # Combine vendor and description for keyword matching
-        # Normalize: lowercase, strip, remove extra spaces
-        search_text = ""
-        if vendor:
-            search_text += " ".join(vendor.lower().strip().split()) + " "
-        if description:
-            search_text += " ".join(description.lower().strip().split())
-        
-        search_text = " ".join(search_text.strip().split())  # Remove extra spaces
+        # Combine vendor and description for keyword matching.
+        # Normalize special characters so new PDFs match the same rules consistently.
+        search_text = self._normalize_match_text(f"{vendor or ''} {description or ''}")
         
         if not search_text:
             return None
@@ -145,7 +144,7 @@ class AccountCodeMapper:
             # Check exclude keywords first - if any match, skip this category
             exclude_match = False
             for keyword in exclude_keywords:
-                keyword_normalized = " ".join(keyword.lower().strip().split())
+                keyword_normalized = self._normalize_match_text(keyword)
                 if keyword_normalized and keyword_normalized in search_text:
                     print(f"⛔ Excluded '{search_text[:50]}...' from {account_code} · {account_name} (exclude: '{keyword}')")
                     exclude_match = True
@@ -156,7 +155,7 @@ class AccountCodeMapper:
             
             # Check include keywords - if any match (case-insensitive partial), assign this category
             for keyword in include_keywords:
-                keyword_normalized = " ".join(keyword.lower().strip().split())
+                keyword_normalized = self._normalize_match_text(keyword)
                 if keyword_normalized and keyword_normalized in search_text:
                     print(f"✅ Matched '{search_text[:50]}...' → {account_code} · {account_name} (keyword: '{keyword}')")
                     return (account_code, account_name)
@@ -167,6 +166,7 @@ class AccountCodeMapper:
     def get_account_code(self,
         vendor: Optional[str] = None,
         description: Optional[str] = None,
+        amount: Optional[float] = None,
         is_income: bool = False,
         transaction_type: Optional[str] = None,
         custom_rules: Optional[list] = None
@@ -189,15 +189,45 @@ class AccountCodeMapper:
         text = f"{vendor or ''} {description or ''}".lower()
         
         # PRIORITY 1: Check custom user-defined rules first
-        if custom_rules:
-            for rule in custom_rules:
-                keyword = rule['keyword'].lower()
-                if keyword in text:
-                    account_code = rule['account_code']
-                    # Get account name from loaded rules
-                    account_name = self.keyword_rules.get(account_code, {}).get('name', 'UNKNOWN')
-                    logger.info(f"✅ Custom rule matched: '{text[:50]}...' → {account_code} · {account_name} (rule: '{rule['keyword']}')")
-                    return (account_code, account_name)
+        rules_to_apply = custom_rules if custom_rules is not None else getattr(self, "custom_rules", None)
+        if rules_to_apply:
+            # Apply rules in a stable priority order so matching is deterministic per dataset.
+            sorted_rules = sorted(
+                enumerate(rules_to_apply),
+                key=lambda item: (item[1].get("priority", 999), item[0])
+            )
+            normalized_text = self._normalize_match_text(text)
+            for _, rule in sorted_rules:
+                keyword = self._normalize_match_text(rule.get('keyword', ''))
+                if not keyword or keyword not in normalized_text:
+                    continue
+
+                fixed_amount = rule.get('fixed_amount')
+                if fixed_amount is not None and amount is not None:
+                    if round(abs(amount), 2) != round(float(fixed_amount), 2):
+                        continue
+
+                if amount is not None:
+                    tx_amount = abs(amount)
+                    min_amount = rule.get('min_amount')
+                    max_amount = rule.get('max_amount')
+                    if min_amount is not None and tx_amount < min_amount:
+                        continue
+                    if max_amount is not None and tx_amount > max_amount:
+                        continue
+
+                exclude_keywords = rule.get('exclude_keywords', [])
+                if exclude_keywords and any(self._normalize_match_text(item) in normalized_text for item in exclude_keywords):
+                    continue
+
+                additional_keywords = rule.get('additional_keywords', [])
+                if additional_keywords and not all(self._normalize_match_text(item) in normalized_text for item in additional_keywords):
+                    continue
+
+                account_code = rule.get('account_code')
+                account_name = self.keyword_rules.get(account_code, {}).get('name', 'UNKNOWN')
+                logger.info(f"✅ Custom rule matched: '{normalized_text[:50]}...' → {account_code} · {account_name} (rule: '{rule.get('keyword')}')")
+                return (account_code, account_name)
 
         # Defensive detection of explicit direction words
         # include multi-word phrases that indicate money leaving the account
@@ -254,6 +284,14 @@ class AccountCodeMapper:
                     logger.debug(f"get_account_code: text='{text[:80]}', keyword matched expense -> {keyword_match}")
                     return keyword_match
                 # if matched code is income, ignore it because direction wins
+
+            # Purchase-specific retry: allow Shopify purchase rows to reach 701 even if Shopify
+            # also matches the sales keyword set first.
+            purchase_rule = self.keyword_rules.get("701", {})
+            purchase_keywords = purchase_rule.get("include_keywords", [])
+            if any(keyword.lower() in text for keyword in purchase_keywords):
+                logger.debug(f"get_account_code: text='{text[:80]}', purchase retry -> 701 · PURCHASES")
+                return ("701", "PURCHASES")
             logger.debug(f"get_account_code: text='{text[:80]}', no expense keyword match -> fallback 999")
             return ("999", "OTHER EXPENSES")
 

@@ -55,7 +55,7 @@ class BankStatementParser:
             r'service\s+charges?',
             r'money\s+out',
             r'payments?',
-            r'purchases?',
+            r'purchases?\s+and\s+cash\s+advances?',
         ]
         
         # Common date patterns
@@ -174,6 +174,10 @@ class BankStatementParser:
     def parse_transaction_line(self, line: str, transaction_type: str, line_num: int) -> Optional[Transaction]:
         """Parse a single transaction line"""
         if not line.strip():
+            return None
+
+        # Ignore credit-card footer summary labels that can be mistaken for transactions.
+        if re.fullmatch(r'(purchases?|cash\s+advances?)(?:\s+[$€£¥]?\s*[\d,().-]+)?', line.lower().strip()):
             return None
         
         # Skip header lines, total lines, and summary lines

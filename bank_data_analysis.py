@@ -1747,6 +1747,15 @@ def show_custom_rule_modal(prefill_keyword="", prefill_account_code=""):
             max_amount = st.number_input(
                 "Max Amount", min_value=0.0, value=0.0, step=10.0, key="modal_max"
             )
+
+        fixed_amount = st.number_input(
+            "Fixed Amount (exact match, optional)",
+            min_value=0.0,
+            value=0.0,
+            step=0.01,
+            format="%.2f",
+            key="modal_fixed_amount"
+        )
         
         st.markdown("**Pattern Matching:**")
         priority = st.number_input(
@@ -1791,6 +1800,9 @@ def show_custom_rule_modal(prefill_keyword="", prefill_account_code=""):
                 new_rule['min_amount'] = min_amount
             if max_amount > 0:
                 new_rule['max_amount'] = max_amount
+            if fixed_amount > 0:
+                # Exact amount match is handled before range filters.
+                new_rule['fixed_amount'] = fixed_amount
             if priority != 999:
                 new_rule['priority'] = priority
             if additional_keywords.strip():
@@ -1816,8 +1828,10 @@ def show_custom_rule_modal(prefill_keyword="", prefill_account_code=""):
             
             # Success message
             msg = f"✅ Rule created: '{keyword}' → {rule_account}"
-            if min_amount > 0 or max_amount > 0:
+            if min_amount > 0 or max_amount > 0 or fixed_amount > 0:
                 amount_filter = []
+                if fixed_amount > 0:
+                    amount_filter.append(f"=${fixed_amount:.2f}")
                 if min_amount > 0:
                     amount_filter.append(f"${min_amount:.2f}+")
                 if max_amount > 0:
@@ -1885,8 +1899,12 @@ def reapply_custom_rules():
                     continue
                 
                 # 2. Check amount range filters (optional)
+                fixed_amt = rule.get("fixed_amount")
                 min_amt = rule.get("min_amount")
                 max_amt = rule.get("max_amount")
+
+                if fixed_amt is not None and round(tx_amount, 2) != round(float(fixed_amt), 2):
+                    continue  # Exact amount required for this rule
                 
                 if min_amt is not None and tx_amount < min_amt:
                     continue  # Amount too small for this rule
@@ -1940,6 +1958,7 @@ def reapply_custom_rules():
             code, _ = mapper.get_account_code(
                 vendor=getattr(tx, "vendor", None),
                 description=getattr(tx, "description", None),
+                amount=getattr(tx, "amount", None),
                 is_income=(tx.amount >= 0),
                 transaction_type=getattr(tx, "transaction_type", None),
                 custom_rules=st.session_state.get("custom_rules", [])
@@ -2029,7 +2048,27 @@ def login_user(email, password):
 
 def load_business_rules(user_id, business_name):
     store = load_business_store()
-    return store.get(str(user_id), {}).get(business_name, {}).get("rules", [])
+    rules = store.get(str(user_id), {}).get(business_name, {}).get("rules", [])
+
+    # Normalize and sort rules on load so each new dataset uses the same matching order.
+    def _norm(value):
+        return re.sub(r'[^a-z0-9]+', ' ', str(value or '').lower()).strip()
+
+    normalized_rules = []
+    for rule in rules:
+        normalized_rule = dict(rule)
+        normalized_rule["keyword"] = _norm(rule.get("keyword", ""))
+        if rule.get("additional_keywords"):
+            normalized_rule["additional_keywords"] = [_norm(item) for item in rule.get("additional_keywords", []) if _norm(item)]
+        if rule.get("exclude_keywords"):
+            normalized_rule["exclude_keywords"] = [_norm(item) for item in rule.get("exclude_keywords", []) if _norm(item)]
+        try:
+            normalized_rule["priority"] = int(rule.get("priority", 999))
+        except (TypeError, ValueError):
+            normalized_rule["priority"] = 999
+        normalized_rules.append(normalized_rule)
+
+    return sorted(normalized_rules, key=lambda r: r.get("priority", 999))
 
 def save_business_rules(user_id, business_name, rules):
     store = load_business_store()
@@ -4325,6 +4364,8 @@ if "transactions" in st.session_state and st.session_state.transactions:
                     
                     # Add filters inline
                     filters = []
+                    if rule.get('fixed_amount'):
+                        filters.append(f"=${rule['fixed_amount']:.2f}")
                     if rule.get('min_amount'):
                         filters.append(f"≥${rule['min_amount']:.0f}")
                     if rule.get('max_amount'):
@@ -4463,6 +4504,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
                     code, name = mapper.get_account_code(
                         vendor=getattr(tx, "vendor", None),
                         description=getattr(tx, "description", None),
+                        amount=getattr(tx, "amount", None),
                         is_income=(tx.amount >= 0),
                         transaction_type=getattr(tx, "type", None)
                     )
@@ -4547,6 +4589,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
                     account_code, account_name = mapper.get_account_code(
                         tx.vendor, 
                         tx.description, 
+                        amount=tx.amount,
                         is_income=is_income,
                         transaction_type=tx.transaction_type,
                         custom_rules=st.session_state.get('custom_rules', [])
@@ -4559,6 +4602,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
                         account_code, account_name = mapper.get_account_code(
                             tx.vendor,
                             tx.description,
+                            amount=tx.amount,
                             is_income=False,
                             transaction_type="withdrawal",
                             custom_rules=st.session_state.get('custom_rules', [])
@@ -4612,6 +4656,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
                         account_code, account_name = mapper.get_account_code(
                             tx.vendor, 
                             tx.description, 
+                            amount=tx.amount,
                             is_income=is_income,
                             transaction_type=tx.transaction_type,
                             custom_rules=st.session_state.get('custom_rules', [])
@@ -4622,6 +4667,7 @@ if "transactions" in st.session_state and st.session_state.transactions:
                             account_code, account_name = mapper.get_account_code(
                                 tx.vendor,
                                 tx.description,
+                                amount=tx.amount,
                                 is_income=False,
                                 transaction_type="withdrawal",
                                 custom_rules=st.session_state.get('custom_rules', [])
@@ -4734,8 +4780,10 @@ if "transactions" in st.session_state and st.session_state.transactions:
                 label_parts = [f"🔍 {rule['keyword']}"]
                 
                 # Add amount range if present
-                if rule.get('min_amount') or rule.get('max_amount'):
+                if rule.get('fixed_amount') or rule.get('min_amount') or rule.get('max_amount'):
                     amount_range = []
+                    if rule.get('fixed_amount'):
+                        amount_range.append(f"= ${rule['fixed_amount']:.2f}")
                     if rule.get('min_amount'):
                         amount_range.append(f"≥ ${rule['min_amount']:.0f}")
                     if rule.get('max_amount'):
@@ -4756,6 +4804,8 @@ if "transactions" in st.session_state and st.session_state.transactions:
                         
                         # Show filters if present
                         filters = []
+                        if rule.get('fixed_amount'):
+                            filters.append(f"Fixed Amount: ${rule['fixed_amount']:.2f}")
                         if rule.get('min_amount'):
                             filters.append(f"Min Amount: ${rule['min_amount']:.2f}")
                         if rule.get('max_amount'):
