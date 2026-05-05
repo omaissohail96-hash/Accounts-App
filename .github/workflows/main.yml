@@ -27,9 +27,5 @@ jobs:
             # keep your data safe
             cp -r ~/data_backup/. data/
 
-            # restart backend
-            pkill -f python || true
-            nohup python app.py > output.log 2>&1 &
-
             # restart nginx
             sudo systemctl restart nginx
