@@ -3036,7 +3036,7 @@ if "active_business" not in st.session_state or st.session_state.active_business
     
     st.stop()
 
-st.markdown("<h3 style='text-align: center;'>PROTOTYPE V1.1</h3>", unsafe_allow_html=True)
+st.markdown("<h3 style='text-align: center;'>PROTOTYPE V1.1</h3><br>CICD is Active<br>", unsafe_allow_html=True)
 
 st.title("💼 Bank Statement Analyzer")
 
