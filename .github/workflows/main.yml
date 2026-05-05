@@ -1,0 +1,35 @@
+name: Deploy to AWS EC2
+
+on:
+  push:
+    branches:
+      - Prototypev1.1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@v0.1.6
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd ~/Accounts-App
+            git fetch origin
+            git reset --hard origin/Prototypev1.1
+            
+            # keep your data safe
+            cp -r ~/data_backup/. data/
+
+            # restart backend
+            pkill -f python || true
+            nohup python app.py > output.log 2>&1 &
+
+            # restart nginx
+            sudo systemctl restart nginx
